@@ -1,0 +1,76 @@
+# --- OS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# --- Editors / IDEs ---
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# --- Env / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Rust / Cargo ---
+/target/
+**/*.rs.bk
+
+# --- Node / npm / Vite ---
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+.turbo/
+.npm/
+.eslintcache
+.cache/
+
+# --- Python / uv / pytest ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# --- PyInstaller (packaging/worker.spec) ---
+build/
+*.manifest
+*.spec.bak
+
+# --- Tauri ---
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/target/
+*.app
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.msi
+*.exe
+
+# --- Logs / temp ---
+*.log
+*.tmp
+*.temp
+tmp/
+temp/
