@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "joints": [
+    {
+      "id": "carriage_slide",
+      "parent": "rail",
+      "child": "carriage",
+      "parent_frame": {
+        "position_m": [
+          0,
+          0,
+          0.01302
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "child_frame": {
+        "position_m": [
+          0,
+          0,
+          0
+        ],
+        "quaternion": [
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "kind": {
+        "type": "prismatic",
+        "axis": [
+          1,
+          0,
+          0
+        ]
+      },
+      "initial": 0,
+      "limits": [
+        -0.08,
+        0.08
+      ]
+    }
+  ],
+  "collision": {
+    "bodies": {
+      "rail": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ],
+      "carriage": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ]
+    },
+    "clearance_m": 1e-05,
+    "backoff_m": 1e-06,
+    "ignored_pairs": []
+  }
+}

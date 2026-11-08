@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "joints": [{"id":"slide","parent":"rail","child":"carriage","kind":{"type":"prismatic","axis":[1,0,0]},"initial":0,"limits":[-0.08,0.08]}],
+  "collision": {
+    "bodies": {
+      "rail": [
+        {"frame":{"position_m":[0,0,-0.005]},"shape":{"type":"box","half_extents_m":[0.1,0.01,0.002]}},
+        {"frame":{"position_m":[0,0.008,0.003]},"shape":{"type":"box","half_extents_m":[0.1,0.002,0.006]}},
+        {"frame":{"position_m":[0,-0.008,0.003]},"shape":{"type":"box","half_extents_m":[0.1,0.002,0.006]}}
+      ],
+      "carriage":[{"shape":{"type":"bounds"}}],
+      "stop":[{"shape":{"type":"bounds"}}]
+    },
+    "clearance_m": 0.00001,
+    "backoff_m": 0.000001,
+    "ignored_pairs": [["rail","stop"]]
+  }
+}

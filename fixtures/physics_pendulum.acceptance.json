@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "scales": [1, 2],
+  "amplitudes_rad": [0.05, 0.4],
+  "base_dimensions_m": [0.01, 0.01, 0.2],
+  "base_mass_kg": 0.2,
+  "gravity_m_s2": 9.81,
+  "periods": 10,
+  "minimum_measured_periods": 8,
+  "max_period_relative_error": 0.005,
+  "max_energy_relative_drift": 0.01,
+  "max_pivot_drift_mm": 0.01,
+  "max_axis_tilt_rad": 0.00001,
+  "max_exact_bounds_error_mm": 0.0001,
+  "max_joint_limit_error_rad": 0.0001
+}

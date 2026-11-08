@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "joints": [{
+    "id": "hinge", "parent": null, "child": "pendulum",
+    "kind": {"type": "revolute", "axis": [0, 1, 0]},
+    "parent_frame": {"position_m": [0, 0, 0]},
+    "child_frame": {"position_m": [0, 0, 0.1]},
+    "initial": 0.05, "limits": [-0.8, 0.8]
+  }],
+  "collision": {
+    "bodies": {"pendulum": [{"shape": {"type": "bounds"}}]},
+    "clearance_m": 0, "backoff_m": 0.000001, "ignored_pairs": []
+  }
+}

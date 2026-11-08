@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "joints": [{"id":"vertical","parent":null,"child":"slider","kind":{"type":"prismatic","axis":[0,0,1]},"initial":0.05,"limits":[0.01,0.15]}],
+  "collision": {"bodies":{"slider":[{"shape":{"type":"bounds"}}],"stop":[{"shape":{"type":"bounds"}}]},"clearance_m":0,"backoff_m":0.000001,"ignored_pairs":[]}
+}

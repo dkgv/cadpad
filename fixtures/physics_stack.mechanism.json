@@ -1,0 +1,12 @@
+{
+  "joints": [],
+  "collision": {
+    "bodies": {
+      "floor": [{"shape": {"type": "bounds"}}],
+      "lower": [{"shape": {"type": "bounds"}}],
+      "upper": [{"shape": {"type": "bounds"}}]
+    },
+    "clearance_m": 0,
+    "backoff_m": 0.000001
+  }
+}

@@ -1,0 +1,27 @@
+[package]
+name = "cadpad-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+schemars = { version = "1", features = ["derive"] }
+
+base64 = "0.22"
+glam = "0.33"
+parry3d-f64 = "0.31"
+nalgebra = "0.35"
+rapier3d-f64 = "0.36.1"
+
+[dev-dependencies]
+tempfile = "3"
+jsonschema.workspace = true
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"

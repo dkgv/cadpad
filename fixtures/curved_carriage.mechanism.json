@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "joints": [
+    {
+      "id": "track",
+      "parent": null,
+      "child": "carriage",
+      "kind": {
+        "type": "path",
+        "path": {
+          "start_m": [
+            0.05,
+            0,
+            0
+          ],
+          "up": [
+            0,
+            0,
+            1
+          ],
+          "closed": true,
+          "segments": [
+            {
+              "type": "arc",
+              "center_m": [
+                0,
+                0,
+                0
+              ],
+              "axis": [
+                0,
+                0,
+                1
+              ],
+              "angle_rad": 6.283185307179586
+            }
+          ]
+        }
+      },
+      "initial": 0,
+      "limits": [
+        0,
+        0.3141592653589793
+      ]
+    }
+  ],
+  "collision": {
+    "bodies": {
+      "rail": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ],
+      "carriage": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ],
+      "stop": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ]
+    },
+    "clearance_m": 1e-05,
+    "backoff_m": 1e-06,
+    "ignored_pairs": [
+      [
+        "rail",
+        "stop"
+      ]
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "mass_kg": 0.1,
+  "gravity_m_s2": -9.81,
+  "stiffness_n_m": 200,
+  "damping_n_s_m": 10,
+  "max_force_n": 2,
+  "ticks_per_phase": 360,
+  "max_transient_penetration_mm": 0.1,
+  "max_settled_penetration_mm": 0.05,
+  "max_settled_cad_gap_mm": 0.1,
+  "max_joint_limit_error_mm": 0.05,
+  "max_spring_equilibrium_error_mm": 0.1,
+  "max_settled_speed_m_s": 0.001,
+  "max_axis_drift_mm": 0.01,
+  "max_rotation_error_rad": 0.0001,
+  "max_static_motor_force_error_n": 0.01,
+  "motor_impulse_slack_n_s": 1e-10,
+  "insufficient_force_n": 0.5,
+  "proxy_padding_mm": 2,
+  "max_proxy_clearance_comparison_error_mm": 0.001
+}

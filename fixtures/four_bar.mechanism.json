@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "joints": [
+    {
+      "id": "crank",
+      "parent": "ground",
+      "child": "crank",
+      "kind": {
+        "type": "revolute",
+        "axis": [
+          0,
+          0,
+          1
+        ]
+      },
+      "initial": 0.8,
+      "limits": [
+        -3,
+        7
+      ]
+    },
+    {
+      "id": "coupler",
+      "parent": "crank",
+      "child": "coupler",
+      "parent_frame": {
+        "position_m": [
+          0.04,
+          0,
+          0
+        ]
+      },
+      "kind": {
+        "type": "revolute",
+        "axis": [
+          0,
+          0,
+          1
+        ]
+      },
+      "initial": -0.32901064303942074,
+      "limits": [
+        -10,
+        10
+      ]
+    },
+    {
+      "id": "rocker",
+      "parent": "ground",
+      "child": "rocker",
+      "parent_frame": {
+        "position_m": [
+          0.1,
+          0,
+          0
+        ]
+      },
+      "kind": {
+        "type": "revolute",
+        "axis": [
+          0,
+          0,
+          1
+        ]
+      },
+      "initial": 1.4552673754301872,
+      "limits": [
+        -4,
+        4
+      ]
+    }
+  ],
+  "constraints": {
+    "passive_joints": [
+      "coupler",
+      "rocker"
+    ],
+    "equations": [
+      {
+        "type": "hinge_closure",
+        "id": "closing_pin",
+        "a": {
+          "instance_id": "coupler",
+          "frame": {
+            "position_m": [
+              0.09,
+              0,
+              0
+            ]
+          }
+        },
+        "b": {
+          "instance_id": "rocker",
+          "frame": {
+            "position_m": [
+              0.07,
+              0,
+              0
+            ]
+          }
+        }
+      }
+    ],
+    "length_tolerance_m": 1e-06,
+    "angle_tolerance_rad": 1e-05
+  },
+  "collision": {
+    "bodies": {
+      "ground": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ],
+      "crank": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ],
+      "coupler": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ],
+      "rocker": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ],
+      "stop": [
+        {
+          "shape": {
+            "type": "bounds"
+          }
+        }
+      ]
+    },
+    "clearance_m": 1e-05,
+    "backoff_m": 1e-06,
+    "ignored_pairs": [
+      [
+        "ground",
+        "crank"
+      ],
+      [
+        "ground",
+        "rocker"
+      ],
+      [
+        "crank",
+        "coupler"
+      ],
+      [
+        "coupler",
+        "rocker"
+      ]
+    ]
+  }
+}

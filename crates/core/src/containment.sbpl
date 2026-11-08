@@ -1,0 +1,26 @@
+(version 1)
+(deny default)
+; Only the selected Python/worker executable may be exec'd. Fork and networking
+; have no grants. The policy remains installed if model code replaces itself.
+(allow process-exec (literal (param "EXECUTABLE")))
+(allow sysctl-read)
+(allow file-read-metadata)
+(allow mach-lookup
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.notification_center"))
+(allow file-read* file-map-executable
+  (subpath "/System/Library") (subpath "/usr/lib"))
+(allow file-read*
+  (subpath "/usr/share") (subpath "/Library/Fonts")
+  (literal "/") (literal "/private/etc/passwd")
+  (literal "/private/etc/localtime")
+  (literal "/dev/random") (literal "/dev/urandom")
+  (literal "/dev/zero") (literal "/dev/null")
+  (regex #"^/dev/fd/(0|1|2)$")
+  (subpath (param "CACHE")))
+(allow file-write* (subpath (param "CACHE")))
+(allow file-write-data (literal "/dev/null")
+  (regex #"^/dev/fd/(1|2)$"))
+; Keep the directory identity and the collector's marker intact.
+(deny file-write-unlink (literal (param "CACHE")))
+(deny file-write* (literal (string-append (param "CACHE") "/.lease")))

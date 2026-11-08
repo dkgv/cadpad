@@ -1,0 +1,362 @@
+[
+  {
+    "id": "diameter_0",
+    "label": "Ball 0",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_0"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_3",
+    "label": "Ball 3",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_3"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_6",
+    "label": "Ball 6",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_6"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_9",
+    "label": "Ball 9",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_9"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_12",
+    "label": "Ball 12",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_12"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_15",
+    "label": "Ball 15",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_15"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_18",
+    "label": "Ball 18",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_18"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_21",
+    "label": "Ball 21",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_21"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_24",
+    "label": "Ball 24",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_24"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_27",
+    "label": "Ball 27",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_27"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_30",
+    "label": "Ball 30",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_30"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_33",
+    "label": "Ball 33",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_33"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_36",
+    "label": "Ball 36",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_36"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_39",
+    "label": "Ball 39",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_39"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_42",
+    "label": "Ball 42",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_42"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_45",
+    "label": "Ball 45",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_45"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_48",
+    "label": "Ball 48",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_48"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_51",
+    "label": "Ball 51",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_51"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_54",
+    "label": "Ball 54",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_54"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_57",
+    "label": "Ball 57",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_57"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_60",
+    "label": "Ball 60",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_60"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_63",
+    "label": "Ball 63",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_63"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_66",
+    "label": "Ball 66",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_66"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_69",
+    "label": "Ball 69",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_69"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_72",
+    "label": "Ball 72",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_72"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_75",
+    "label": "Ball 75",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_75"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_78",
+    "label": "Ball 78",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_78"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_81",
+    "label": "Ball 81",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_81"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_84",
+    "label": "Ball 84",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_84"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  },
+  {
+    "id": "diameter_87",
+    "label": "Ball 87",
+    "definition": {
+      "kind": "published",
+      "publication_id": "diameter_87"
+    },
+    "format": {
+      "unit": "mm",
+      "precision": 1
+    }
+  }
+]
