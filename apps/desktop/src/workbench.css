@@ -1,0 +1,123 @@
+.docked-workbench{height:100dvh;display:flex;flex-direction:column;overflow:hidden;background:#f7f8fa}
+.workbench-header-slot:empty{display:none}.workbench-header-slot .app-header,.docked-workbench>.app-header{height:52px;min-height:52px}
+.docked-workbench.macos .app-header{padding-left:86px}
+.workbench-empty-header{display:flex;align-items:center;flex:none;border-bottom:1px solid var(--line);background:#f3f4f6}
+.workbench-empty-header .document-title{pointer-events:none}
+.workbench-header-slot .document-title,.docked-workbench>.app-header .document-title{align-items:center;gap:9px}
+.docked-main{display:flex;flex:1;min-height:0;min-width:0}
+.workbench-rail-slot{flex:none;display:flex}.workbench-rail-slot>.dock-content-host{display:flex}.workbench-rail-slot .activity-rail{height:100%;width:44px}
+.docked-sidebar{flex:none;min-width:160px;min-height:0;overflow:hidden;background:#f8f9fb}
+.docked-center{position:relative;display:flex;flex-direction:column;flex:1;min-width:180px;min-height:0;overflow:hidden}
+.workbench-notices-slot{flex:none;max-height:30%;overflow:auto}.workbench-notices-slot:has(.workspace-notices:empty){display:none}
+.workbench-notices-slot .workspace-notices{padding:0 12px}
+.workbench-width-divider{width:4px;flex:none;background:#e4e7ec;cursor:col-resize;touch-action:none;z-index:10}
+.workbench-width-divider:hover,.workbench-width-divider:focus-visible{background:#087bf0}
+.dock-area{height:100%;width:100%;flex:1;min-height:0;min-width:0;overflow:hidden}
+.dock-split{display:flex;height:100%;width:100%;min-height:0;min-width:0;overflow:hidden}
+.dock-split.vertical{flex-direction:column}
+.dock-branch{min-width:0;min-height:0;overflow:hidden;flex:1}
+.dock-branch:first-child{flex:0 0 calc(var(--dock-ratio) - 2px)}
+.dock-divider{flex:0 0 4px;background:#e2e6eb;cursor:col-resize;touch-action:none;z-index:8}
+.dock-split.vertical>.dock-divider{cursor:row-resize}
+.dock-divider:hover,.dock-divider:focus-visible{background:#087bf0}
+.dock-group{display:flex;flex-direction:column;width:100%;height:100%;min-height:0;min-width:0;background:#fff;position:relative}
+.dock-tabs{display:flex;flex:none;align-items:stretch;height:35px;min-height:35px;border-bottom:1px solid #dfe3e9;background:#eef0f3;z-index:9}
+.dock-group.focused>.dock-tabs{background:#e7eaf0}
+.dock-tab-list{display:flex;flex:1;overflow:auto;scrollbar-width:thin;min-width:0}
+.dock-tab{display:flex;align-items:stretch;flex:none;max-width:240px;border-right:1px solid #dfe3e9;border-top:2px solid transparent;cursor:grab}
+.dock-tab.active{background:#fff;border-top-color:#9ca8b9}
+.dock-group.focused>.dock-tabs .dock-tab.active{border-top-color:#087bf0}
+.dock-tab button{background:transparent;border:none;border-radius:0;min-height:0;padding:5px 8px;font-size:12px;gap:7px;color:#596474;box-shadow:none}
+.dock-tab.active button{color:#212833}
+.dock-tab button[role=tab]{min-width:0}.dock-tab button[role=tab]>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
+.dock-tab button[role=tab]>svg{width:14px;height:14px;flex:none}
+.dock-tab .tab-close{width:25px;min-width:25px;padding:4px;opacity:0}
+.dock-tab:hover .tab-close,.dock-tab:focus-within .tab-close,.dock-tab.active .tab-close{opacity:1}
+.tab-dirty{width:6px;height:6px;border-radius:50%;background:#647083;flex:none}
+.dock-tab-actions{display:flex;align-items:center;padding:0 3px;gap:1px;flex:none}
+.dock-tab-actions .icon-button{height:27px;width:25px;min-width:25px;min-height:27px;padding:4px;border:0;border-radius:4px;background:transparent}
+.dock-body{position:relative;flex:1;min-height:0;min-width:0;overflow:hidden}
+.dock-mount,.dock-content-host{height:100%;width:100%;min-height:0;min-width:0}
+.dock-mount[hidden]{display:none}
+.dock-content-host>.workspace{width:100%;height:100%;min-height:0;min-width:0;position:relative;flex:1}
+.docked-sidebar .model-browser,.docked-sidebar .motion-sidebar,.docked-sidebar .assistant-panel{width:100%;min-width:0;max-width:none;height:100%;border:0;display:flex;flex-direction:column;position:relative;background:#fafbfc}
+.docked-sidebar .model-browser-content,.docked-sidebar .motion-sidebar-content{flex:1;min-height:0;overflow:auto;padding:16px}
+.docked-sidebar .assistant-panel .assistant-chat-dock{flex:1;min-height:0}
+.docked-sidebar .assistant-panel .inspector-page{width:100%}
+.docked-sidebar .assistant-panel .prompt-form{flex:none}
+.docked-sidebar .motion-sidebar-content>div[hidden]{display:none}
+.dock-empty{display:grid;place-items:center;height:100%;font-size:12px;color:#8993a2;background:#f7f8fa}
+.dock-drop-preview{position:absolute;inset:6px;border:1px solid #087bf0;background:#087bf025;pointer-events:none;z-index:25;border-radius:4px}
+.dock-drop-preview.left{right:50%}.dock-drop-preview.right{left:50%}.dock-drop-preview.top{bottom:50%}.dock-drop-preview.bottom{top:50%}
+.dock-open-menu{position:relative}.dock-open-menu>summary{padding:5px;list-style:none;display:flex;align-items:center;cursor:pointer;border-radius:4px}.dock-open-menu>summary::-webkit-details-marker{display:none}
+.dock-open-menu[open]>summary{background:#dce4ef}
+.dock-open-menu>div{position:absolute;right:0;top:29px;min-width:210px;max-height:320px;overflow:auto;display:flex;flex-direction:column;padding:5px;border:1px solid #dce1e8;border-radius:7px;box-shadow:0 5px 20px #17243b26;background:#fff;z-index:45}
+.dock-open-menu button{justify-content:flex-start;text-align:left;border:0;background:transparent;border-radius:4px;font-size:12px}
+.dock-open-menu small{padding:10px 10px 4px;color:#758196}
+.dock-welcome{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:32px 24px;background:linear-gradient(#f7f8fa,#eef1f5);overflow:auto}
+.dock-welcome-card{width:min(420px,100%);display:flex;flex-direction:column;gap:14px}
+.dock-welcome-card>h1{margin:0;font-size:28px;font-weight:650;letter-spacing:-.6px;color:#1c1f24}
+.dock-welcome-card>p{margin:0;font-size:13px;line-height:1.5;color:#5c6570}
+.dock-welcome-actions{display:flex;flex-wrap:wrap;gap:8px}
+.dock-welcome-actions>button{min-height:36px;padding:8px 14px}
+.dock-welcome-recent{display:flex;flex-direction:column;gap:8px;margin-top:6px;padding-top:14px;border-top:1px solid #e2e6ec}
+.dock-welcome-recent-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dock-welcome-recent-heading>h2{margin:0;font-size:11px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;color:#758196}
+.dock-welcome-recent-heading>.subtle-button{min-height:24px;padding:2px 8px;font-size:11px;color:#5c6570}
+.dock-welcome-recent>ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.dock-welcome-recent>ul>li{display:flex;align-items:center;gap:4px}
+.dock-welcome-recent .dock-welcome-open{flex:1;min-width:0;justify-content:flex-start;gap:10px;min-height:38px;padding:8px 10px;border:1px solid #e2e6ec;border-radius:8px;background:#fff;color:#2c3138;font-size:13px}
+.dock-welcome-recent .dock-welcome-open:hover{background:#f3f6fa;border-color:#d5dde8}
+.dock-welcome-recent .dock-welcome-open span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.dock-welcome-recent .dock-welcome-open small{flex:none;font-size:11px;color:#087bf0}
+.dock-welcome-recent>ul>li>.icon-button{flex:none;width:30px;min-width:30px;height:30px;color:#758196}
+.dock-error{padding:8px 12px;background:#fff1ee;color:#963a2b;font-size:12px}
+@media(max-width:1000px){.docked-sidebar{max-width:32vw}.dock-tab button[role=tab]>span{max-width:110px}.dock-tab-actions{gap:0;padding:0}.dock-tab-actions .icon-button{width:22px;min-width:22px}}
+.docked-main:has(.docked-sidebar.left):has(.docked-sidebar.right) .docked-sidebar{max-width:calc((100vw - 284px)/2)}
+.docked-main .docked-sidebar:only-of-type{max-width:calc(100vw - 284px)}
+.workbench-notices-slot:has(.workspace-notices:not(:has(*))){display:none}
+/* Pointer docking works from tabs and empty tab-bar space, including over WebGL portals. */
+.docked-main{position:relative}
+.dock-tab,.dock-tab button[role=tab]{touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab}
+body.dock-dragging,body.dock-dragging *{cursor:grabbing!important;user-select:none!important;-webkit-user-select:none!important}
+.dock-drag-ghost{position:fixed;pointer-events:none;z-index:10000;width:220px;max-width:calc(100vw - 16px);padding:10px 12px;border:1px solid #b6c9e3;border-radius:7px;background:#fff;box-shadow:0 8px 24px #17243b30;display:flex;flex-direction:column;gap:4px;font-size:12px}
+.dock-drag-ghost strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dock-drag-ghost span{font-size:11px;color:#536a87}
+.dock-drop-preview{display:flex;align-items:flex-start;justify-content:center;padding:12px;border:2px solid #087bf0;background:#087bf021}
+.dock-drop-preview>span{font-size:11px;font-weight:600;background:#087bf0;color:#fff;border-radius:4px;padding:4px 8px;box-shadow:0 2px 5px #152b4f20}
+.dock-drop-compass{position:absolute;top:50%;left:50%;width:90px;height:90px;transform:translate(-50%,-50%);z-index:30;pointer-events:none;display:grid;grid-template:repeat(3,28px)/repeat(3,28px);gap:3px;filter:drop-shadow(0 3px 7px #18304730)}
+.dock-drop-compass>span{background:#f8fbff;border:1px solid #b5c9e2;border-radius:4px;display:grid;place-items:center;color:#64809f}
+.dock-drop-compass>.top{grid-area:1/2}.dock-drop-compass>.left{grid-area:2/1}.dock-drop-compass>.center{grid-area:2/2}.dock-drop-compass>.right{grid-area:2/3}.dock-drop-compass>.bottom{grid-area:3/2}
+.dock-drop-compass>.active{background:#087bf0;color:#fff;border-color:#087bf0}
+.dock-tab.drop-before{box-shadow:inset 3px 0 #087bf0}
+.dock-outer-target{position:absolute;top:0;bottom:0;width:32px;z-index:70;border:1px dashed #8ab7ec;background:#087bf00c;pointer-events:none;display:flex;align-items:center;justify-content:center}
+.dock-outer-target.left{left:44px}.dock-outer-target.right{right:0}.dock-outer-target.active{background:#087bf037;border:2px solid #087bf0}
+.dock-outer-target>span{writing-mode:vertical-rl;font-size:11px;color:#30689f;background:#f2f7ff;padding:8px 4px;border-radius:3px}
+/* Activity-rail tabs own the pane; stacked sections only appear if tools are dragged together. */
+.sidebar-sections{height:100%;overflow:auto;display:flex;flex-direction:column;background:#f7f8fa;position:relative}
+.sidebar-sections.is-stacked{overflow:hidden}
+.docked-sidebar .dock-area{height:100%;min-height:0}
+.docked-sidebar .dock-group{background:#f8f9fb}
+.docked-sidebar .dock-body{min-height:0;background:#fafbfc}
+.docked-sidebar .dock-body>.dock-content-host,.docked-sidebar .dock-body>.dock-mount{height:100%;min-height:0}
+.docked-sidebar .dock-body .model-browser,.docked-sidebar .dock-body .motion-sidebar,.docked-sidebar .dock-body .assistant-panel{height:100%}
+.sidebar-section{flex:none;min-width:0;border-bottom:1px solid #e3e6eb}
+.sidebar-section-heading{display:flex;align-items:center;min-height:28px;background:#eef0f3;flex:none}
+.sidebar-section-heading>button:first-child{flex:1;min-width:0;justify-content:flex-start;min-height:28px;padding:4px 9px;gap:7px;border:0;border-radius:0;background:transparent;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.35px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+.sidebar-section-heading>button:first-child:hover{background:#e7eaf0}.sidebar-section-heading svg{flex:none;color:#667284}
+.sidebar-section.expanded>.sidebar-section-heading>button:first-child>svg{transform:rotate(90deg)}
+.sidebar-section-heading .section-settings{opacity:0;width:25px;min-width:25px;height:24px;min-height:24px;padding:4px;margin-right:4px;border:0;background:transparent}
+.sidebar-section-heading:hover .section-settings,.sidebar-section-heading:focus-within .section-settings{opacity:1}
+.sidebar-section-content{max-height:55vh;overflow:auto}
+.sidebar-section-content>.dock-content-host{height:auto}
+.docked-sidebar .sidebar-section .model-browser,.docked-sidebar .sidebar-section .motion-sidebar{height:auto;min-height:0}
+.sidebar-section .model-browser-content,.sidebar-section .motion-sidebar-content{flex:none;overflow:visible;padding:12px}
+.sidebar-section-resizer{flex:none;height:5px;margin:-1px 0;border:0;padding:0;background:#e3e6eb;cursor:row-resize;touch-action:none;position:relative;z-index:2}
+.sidebar-section-resizer:hover,.sidebar-section-resizer:focus-visible{background:#087bf0}
+.sidebar-section:only-child.expanded,.sidebar-section.fill.expanded,.sidebar-section.stacked.expanded,.sidebar-section[data-sidebar-section=assistant].expanded{flex:1 0 120px;display:flex;flex-direction:column;min-height:120px;border-bottom:0}
+.sidebar-section.stacked.expanded{flex:var(--section-weight,1) 1 96px;min-height:96px;overflow:hidden}
+.sidebar-section:only-child.expanded>div[id],.sidebar-section.fill.expanded>div[id],.sidebar-section.stacked.expanded>div[id],.sidebar-section[data-sidebar-section=assistant].expanded>div[id]{flex:1;min-height:0;display:flex;flex-direction:column}
+.sidebar-section:only-child .sidebar-section-content,.sidebar-section:only-child .dock-content-host,.sidebar-section.fill .sidebar-section-content,.sidebar-section.fill .dock-content-host,.sidebar-section.stacked .sidebar-section-content,.sidebar-section.stacked .dock-content-host,.sidebar-section[data-sidebar-section=assistant] .sidebar-section-content,.sidebar-section[data-sidebar-section=assistant] .dock-content-host{height:100%;max-height:none;min-height:0;flex:1}
+.sidebar-section:only-child .model-browser,.sidebar-section:only-child .motion-sidebar,.sidebar-section:only-child .assistant-panel,.sidebar-section.fill .model-browser,.sidebar-section.fill .motion-sidebar,.sidebar-section.fill .assistant-panel,.sidebar-section.stacked .model-browser,.sidebar-section.stacked .motion-sidebar,.sidebar-section.stacked .assistant-panel,.sidebar-section[data-sidebar-section=assistant] .assistant-panel{height:100%;min-height:0;display:flex;flex-direction:column}
+.sidebar-section:only-child .model-browser-content,.sidebar-section:only-child .motion-sidebar-content,.sidebar-section.fill .model-browser-content,.sidebar-section.fill .motion-sidebar-content,.sidebar-section.stacked .model-browser-content,.sidebar-section.stacked .motion-sidebar-content{flex:1;min-height:0;overflow:auto}
+.sidebar-section.drop-before{box-shadow:inset 0 3px #087bf0}
+.sidebar-sections.drop-at-end:after{content:'';height:3px;min-height:3px;display:block;background:#087bf0}

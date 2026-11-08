@@ -1,0 +1,6 @@
+.external-loads fieldset{border:0;margin:12px 0;padding:0;min-width:0}
+.external-loads legend{font-size:12px;font-weight:600;color:var(--text-secondary,#66717e);margin-bottom:6px}
+.external-loads .load-components{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.external-loads .load-components label{display:flex;flex-direction:column;gap:4px;font-size:12px;min-width:0}
+.external-loads input{width:100%;min-width:0;box-sizing:border-box}
+.external-loads .load-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}

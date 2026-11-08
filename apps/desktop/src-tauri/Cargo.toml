@@ -1,0 +1,18 @@
+[package]
+name = "cadpad-desktop"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+cadpad-mcp = { path = "../../../crates/mcp" }
+cadpad-agent = { path = "../../../crates/agent" }
+cadpad-core = { path = "../../../crates/core" }
+serde_json.workspace = true
+serde.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+tauri-plugin-dialog = "2"
