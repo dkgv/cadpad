@@ -1,0 +1,140 @@
+# Build a macOS release candidate on a semver tag and publish a GitHub Release.
+#
+# Usage:
+#   1. Bump versions in Cargo.toml, package.json, apps/desktop/package.json,
+#      apps/desktop/src-tauri/tauri.conf.json, and pyproject.toml together.
+#   2. Commit, then tag: git tag v0.2.0 && git push origin v0.2.0
+#
+# Current builds are ad-hoc signed (same as scripts/build_release_candidate.py).
+# Developer ID signing, notarization, and Tauri updater manifests are follow-ups
+# once APPLE_* secrets and a distribution identity exist.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Semver tag to validate against (e.g. v0.1.0). Build still uses current checkout."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    name: macOS release candidate
+    runs-on: macos-14
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag must be vX.Y.Z, got: $TAG" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check package versions match tag
+        run: python3 scripts/check_release_version.py "${{ steps.tag.outputs.tag }}"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Install Python environment
+        run: uv sync --locked --python 3.12
+
+      - name: Build release candidate
+        run: .venv/bin/python scripts/build_release_candidate.py
+
+      - name: Stage release assets
+        id: assets
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.tag.outputs.version }}'
+          OUT="$RUNNER_TEMP/cadpad-release"
+          mkdir -p "$OUT"
+          REPORT=docs/release-staging-experiment.json
+          if [ ! -f "$REPORT" ]; then
+            echo "Missing $REPORT from the release candidate build" >&2
+            exit 1
+          fi
+          APP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["app"])' "$REPORT")"
+          if [ ! -d "$APP" ]; then
+            echo "Cadpad.app missing at $APP" >&2
+            exit 1
+          fi
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT/Cadpad-$VERSION-macos-arm64.zip"
+          cp "$REPORT" "$OUT/release-staging-experiment-$VERSION.json"
+          echo "dir=$OUT" >> "$GITHUB_OUTPUT"
+          ls -lh "$OUT"
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG='${{ steps.tag.outputs.tag }}'
+          VERSION='${{ steps.tag.outputs.version }}'
+          NOTES="$(mktemp)"
+          cat > "$NOTES" <<EOF
+          Cadpad $VERSION
+
+          macOS arm64 candidate built from \`$TAG\`.
+
+          - Ad-hoc signed locally in CI (not Developer ID / notarized yet)
+          - Unzip and run \`Cadpad.app\` on Apple Silicon
+          - Auto-update notifications are not wired yet
+
+          Built by GitHub Actions run ${{ github.run_id }}.
+          EOF
+          gh release create "$TAG" \
+            --title "Cadpad $VERSION" \
+            --notes-file "$NOTES" \
+            --verify-tag \
+            "${{ steps.assets.outputs.dir }}"/*
+
+      - name: Upload workflow artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadpad-${{ steps.tag.outputs.version }}-macos-arm64
+          path: ${{ steps.assets.outputs.dir }}/*
+          if-no-files-found: error
