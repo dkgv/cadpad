@@ -995,7 +995,7 @@ async fn viewport_references_reach_the_model_with_component_source_exact_propert
     );
 }
 
-struct ChatHistoryProvider(Mutex<Vec<String>>);
+struct ChatHistoryProvider(Mutex<Vec<String>>, Option<Arc<tokio::sync::Semaphore>>);
 #[async_trait]
 impl Provider for ChatHistoryProvider {
     async fn respond(
@@ -1014,8 +1014,14 @@ impl Provider for ChatHistoryProvider {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        self.0.lock().unwrap().push(text);
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        let first = {
+            let mut requests = self.0.lock().unwrap();
+            requests.push(text);
+            requests.len() == 1
+        };
+        if first && let Some(gate) = &self.1 {
+            gate.acquire().await.unwrap().forget();
+        }
         Ok(ProviderReply {
             content: vec![Block::Text {
                 text: "Saved reply".into(),
@@ -1047,7 +1053,8 @@ async fn saved_chats_isolate_context_resume_and_survive_restart() {
         .unwrap();
     let ws = core.create_workspace("user").await.unwrap();
     let original = core.get_project(&ws).await.unwrap()["revision"].clone();
-    let provider = Arc::new(ChatHistoryProvider(Mutex::new(vec![])));
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let provider = Arc::new(ChatHistoryProvider(Mutex::new(vec![]), Some(gate.clone())));
     let credentials = Arc::new(MemoryCredentials::default());
     let factory = Arc::new(Factory(provider.clone()));
     let root = temp.path().join("agent");
@@ -1076,15 +1083,16 @@ async fn saved_chats_isolate_context_resume_and_survive_restart() {
         .unwrap();
     assert_eq!(
         service
-            .change_chat(&ws, "new", None)
+            .change_chat(&ws, "remove", Some(&first.chat_id))
             .await
             .unwrap_err()
             .code(),
         "AGENT_BUSY"
     );
+    let fresh = service.change_chat(&ws, "new", None).await.unwrap();
+    gate.add_permits(1);
     finished_event(&mut events, &first.id).await;
     let first_id = first.chat_id.clone();
-    let fresh = service.change_chat(&ws, "new", None).await.unwrap();
     assert_eq!(fresh["messages"], json!([]));
     assert!(fresh["turn"].is_null());
     assert_eq!(fresh["chats"].as_array().unwrap().len(), 1);
@@ -1100,7 +1108,7 @@ async fn saved_chats_isolate_context_resume_and_survive_restart() {
                 ws.clone(),
                 "Stale send".into(),
                 Default::default(),
-                Some(first_id.clone())
+                Some(uuid::Uuid::new_v4().to_string())
             )
             .await
             .unwrap_err()
@@ -1206,7 +1214,7 @@ async fn legacy_chat_migrates_and_failed_chat_save_preserves_selection() {
         core,
         root.clone(),
         Arc::new(MemoryCredentials::default()),
-        Arc::new(Factory(Arc::new(ChatHistoryProvider(Mutex::new(vec![]))))),
+        Arc::new(Factory(Arc::new(ChatHistoryProvider(Mutex::new(vec![]), None)))),
         Limits::default(),
     )
     .await
