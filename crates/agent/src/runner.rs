@@ -37,6 +37,10 @@ impl Default for Limits {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_revision: Option<String>,
     pub role: String,
     pub text: String,
     /// Viewport geometry attached to a user message, in letter order.
@@ -217,6 +221,7 @@ pub async fn run(
                 crate::references::history_note(&message.references)
             )
         };
+        let image = message.image;
         messages.push(Message::text(
             if message.role == "assistant" {
                 Role::Assistant
@@ -225,6 +230,9 @@ pub async fn run(
             },
             text,
         ));
+        if let Some(image) = image {
+            messages.last_mut().unwrap().content.push(Block::Native { value: json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":image}}) });
+        }
     }
     if attachment.text.is_empty() && attachment.image.is_none() {
         messages.push(Message::text(Role::User, prompt));

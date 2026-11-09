@@ -557,9 +557,56 @@ impl Core {
 }
 
 impl Core {
+    pub async fn model_history(&self, workspace: &str) -> Result<Value> {
+        let all = self.workspaces.lock().await;
+        let ws = all.get(workspace).ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+        let mut entries = Vec::new();
+        let mut cursor = Some(ws.stored.current.as_str());
+        while let Some(id) = cursor {
+            let Some(revision) = ws.stored.revisions.get(id) else { break; };
+            let job = ws.stored.jobs.values().find(|job| job.resulting_revision.as_deref()==Some(id));
+            let label = if revision.restored_from.is_some() {
+                "Restored earlier model".to_string()
+            } else if let Some(parent) = revision.parent.as_ref().and_then(|id|ws.stored.revisions.get(id)) {
+                let added_assets = revision.inputs.assets.keys().filter(|name|!parent.inputs.assets.contains_key(*name)).collect::<Vec<_>>();
+                let parameters = revision.inputs.parameters.as_object().map(|parameters|parameters.iter().filter(|(name,value)|parent.inputs.parameters.get(*name)!=Some(*value)).map(|(name,_)|name.replace('_'," ")).collect::<Vec<_>>()).unwrap_or_default();
+                let changed_files = revision.inputs.files.iter().filter(|(name,source)|parent.inputs.files.get(*name)!=Some(*source)).map(|(name,_)|name.clone()).collect::<Vec<_>>();
+                let old_parts = parent.model["parts"].as_array().cloned().unwrap_or_default();
+                let parts = revision.model["parts"].as_array().cloned().unwrap_or_default();
+                let added = parts.iter().filter(|part|!old_parts.iter().any(|old|old["name"]==part["name"])).filter_map(|part|part["name"].as_str()).collect::<Vec<_>>();
+                let removed = old_parts.iter().filter(|part|!parts.iter().any(|new|new["name"]==part["name"])).filter_map(|part|part["name"].as_str()).collect::<Vec<_>>();
+                if !added_assets.is_empty() { format!("Imported {}", added_assets.iter().map(|path|path.rsplit('/').next().unwrap_or(path)).collect::<Vec<_>>().join(", ")) }
+                else if !added.is_empty() { format!("Added {}",added.join(", ").replace('_'," ")) }
+                else if !removed.is_empty() { format!("Removed {}",removed.join(", ").replace('_'," ")) }
+                else if !parameters.is_empty() { format!("Adjusted {}",parameters.join(", ")) }
+                else if !changed_files.is_empty() {
+                    let names = parts.iter().filter_map(|part|part["name"].as_str()).collect::<Vec<_>>();
+                    if names.len()==1 { format!("Updated {}",names[0].replace('_'," ")) } else { format!("Edited {}",changed_files.join(", ")) }
+                } else { "Rebuilt model".into() }
+            } else { "Initial model".into() };
+            entries.push(json!({"label":label,"revision":id,"restored":revision.restored_from.is_some(),"initial":revision.parent.is_none(),"actor":revision.actor,"parts":revision.model["parts"].as_array().map_or(0,Vec::len),"created_at":job.map(|job|job.created_at)}));
+            cursor = revision.parent.as_deref();
+            if entries.len() >= 100 { break; }
+        }
+        Ok(json!(entries))
+    }
     pub async fn workspace_summaries(&self) -> Value {
         let workspaces = self.workspaces.lock().await;
-        let mut summaries=workspaces.values().map(|ws|json!({
+        let mut candidates = workspaces.values().collect::<Vec<_>>();
+        candidates.sort_by(|a, b| b.stored.id.cmp(&a.stored.id));
+        let mut seen = std::collections::HashSet::new();
+        let mut summaries=candidates.into_iter().filter(|ws| {
+            let revision = &ws.stored.revisions[&ws.stored.current];
+            let has_parts = revision.model["parts"].as_array().is_some_and(|parts| !parts.is_empty());
+            let has_inputs = serde_json::to_value(&revision.inputs).ok() != serde_json::to_value(crate::Inputs::default()).ok();
+            if !has_parts && !has_inputs && ws.stored.jobs.is_empty() && ws.stored.recordings.is_empty() && ws.stored.motion_tests.is_empty() {
+                return false;
+            }
+
+            let Some(binding) = ws.stored.project.as_ref() else { return true; };
+            let directory = binding.directory.canonicalize().unwrap_or_else(|_| binding.directory.clone());
+            seen.insert(directory)
+        }).map(|ws|json!({
             "workspace_id":ws.stored.id,
             "name":ws.stored.project.as_ref().and_then(|binding|binding.directory.file_name()).map(|name|name.to_string_lossy().to_string()).or_else(||ws.stored.title.clone()).unwrap_or_else(||"Untitled".into()),
             "running":ws.stored.jobs.values().filter(|job|matches!(job.state,crate::JobState::Queued|crate::JobState::Running)).count()

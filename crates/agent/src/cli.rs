@@ -211,6 +211,7 @@ pub struct LaunchRequest<'a> {
     pub backend: Backend,
     pub bridge: &'a Bridge,
     pub workspace_id: &'a str,
+    pub project_directory: Option<&'a std::path::Path>,
     pub prompt: &'a str,
     pub client_name: &'a str,
 }
@@ -255,14 +256,23 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
             }
         }
     });
+    let catalog = cadpad_core::tools::definitions_ref().iter()
+        .map(|tool| format!("- {}: {}", tool.name, tool.description))
+        .collect::<Vec<_>>().join("\n");
     let system = format!(
         "You are editing a Cadpad CAD document through the cadpad MCP server. \
          Call get_project with workspace_id={} first, then use explicit workspace_id and revision \
-         on every Cadpad tool. Your normal file, search, editing, shell and other configured tools are available. \
-         Use them for supporting work; submit design source through update_source and build so Cadpad can validate and display it. \
-         Keep millimetre units. Do not invent exact dimensions from pixels.",
+         on every Cadpad tool. The only modeling target is the supplied workspace. \
+         Submit design source through update_source and build so Cadpad can validate and display it. \
+         Keep millimetre units. Do not invent exact dimensions from pixels.
+
+         Available Cadpad MCP commands (discover the input schemas you need through the connected server in one lookup when possible; reuse discovered schemas for the rest of the turn, and do not rediscover before each call):
+{catalog}
+
+         Modeling workflow: get_project and read_source first. Use update_source to stage changes, build the returned draft,          and poll get_job until terminal. A failed build leaves the previous model displayed; repair the draft rather than claiming success.          After success, get_project again and use inspect for exact geometry and capture_view to check the visible result.          Only claim a change is reflected in the canvas after verifying the committed revision. Use managed asset tools for imports;          an STL reference mesh is not an editable parametric solid. Keep all project calls scoped to this workspace.          Use the connected cadpad MCP commands directly rather than asking the user to run them.",
         request.workspace_id
     );
+    let system = format!("{system}\nProject folder: {}. This is the sole source of truth. Paths mentioned in old messages are historical context, not additional workspaces. Do not read, edit, synchronize or export to other project folders. Use Cadpad MCP for all model edits and managed exports. Never maintain a second copy of the model.", request.project_directory.map(|path| path.display().to_string()).unwrap_or_else(|| "unsaved Cadpad workspace".into()));
     let child = match request.backend {
         Backend::ClaudeCli => {
             let mcp_path = work_dir.join("mcp.json");
@@ -280,8 +290,9 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                     "--include-partial-messages",
                     "--permission-mode",
                     "acceptEdits",
-                    "--allowedTools",
-                    "Bash",
+                    "--tools",
+                    "",
+                    "--strict-mcp-config",
                     "--append-system-prompt",
                     &system,
                 ])
@@ -349,7 +360,8 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                     "stream-json",
                     "--stream-partial-output",
                     "--approve-mcps",
-                    "--force",
+                    "--sandbox",
+                    "enabled",
                     "--trust",
                     "--workspace",
                 ])
@@ -562,7 +574,15 @@ fn cursor_tool(value: &Value) -> (Option<String>, String, Option<String>, bool) 
         "getMcpToolsToolCall" => "tool_schema".into(),
         other => format!("cursor:{}", other.trim_end_matches("ToolCall")),
     };
-    let detail = call["description"].as_str().map(str::to_string);
+    let detail = call["description"].as_str().map(str::to_string).or_else(|| {
+        if key != "getMcpToolsToolCall" { return None; }
+        let names = args.get("toolNames").or_else(||args.get("tools")).or_else(||args.get("toolName"));
+        names.and_then(|value| match value {
+            Value::String(name) => Some(name.clone()),
+            Value::Array(names) => Some(names.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
+            _ => None,
+        }).filter(|names|!names.is_empty())
+    });
     let result = &call["result"];
     let error = result.get("error").is_some()
         || result.get("failure").is_some()

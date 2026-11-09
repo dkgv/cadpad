@@ -855,7 +855,7 @@ impl Core {
                     workspace_id,
                     &draft.base_revision,
                     &revision_id,
-                    json!({"source_root":source_root,"entry_point":draft.inputs.entry_point,"parameters":draft.inputs.parameters,"annotations":draft.inputs.annotations,"collision":draft.inputs.mechanism.get("collision"),"expected_dependencies":draft.inputs.dependencies,"allow_empty":draft.inputs.files==Inputs::default().files && draft.inputs.parameters==json!({}),"input_digest":portable::fingerprint(&draft.inputs)?}),
+                    json!({"source_root":source_root,"entry_point":draft.inputs.entry_point,"parameters":draft.inputs.parameters,"annotations":draft.inputs.annotations,"collision":draft.inputs.mechanism.get("collision"),"expected_dependencies":draft.inputs.dependencies,"allow_empty":draft.inputs.files.get(&draft.inputs.entry_point).is_some_and(|source| source.trim()=="# Describe a part to get started.") && draft.inputs.parameters==json!({}),"input_digest":portable::fingerprint(&draft.inputs)?}),
                     cancel.clone(),
                 )
                 .await;
@@ -1273,6 +1273,22 @@ impl Core {
             draft
         };
         self.build(workspace_id, base, &draft.id, actor).await
+    }
+    pub async fn restore_checkpoint(&self, workspace: &str, expected: &str, target: &str) -> Result<Job> {
+        let draft = {
+            let mut all = self.workspaces.lock().await;
+            let ws = all.get_mut(workspace).ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+            if ws.stored.current != expected { return Err(Error::domain("REVISION_CONFLICT", "The model changed. Try reverting again.")); }
+            let revision = ws.stored.revisions.get(target).ok_or_else(|| Error::domain("INVALID_REQUEST", "Restore point is unavailable"))?;
+            let mut draft = Self::input_draft(revision.inputs.clone(), expected, "local-user");
+            draft.restore_revision = Some(target.into());
+            let mut next = ws.stored.clone();
+            next.drafts.insert(draft.id.clone(), draft.clone());
+            self.persist(&next).await?;
+            ws.stored = next;
+            draft
+        };
+        self.build(workspace, expected, &draft.id, "local-user").await
     }
     pub async fn undo(&self, workspace_id: &str, expected: &str, actor: &str) -> Result<Job> {
         let draft = {

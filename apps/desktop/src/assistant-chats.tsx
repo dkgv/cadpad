@@ -96,6 +96,14 @@ export function AssistantChatDock({
       return groups(next).some(pane=>pane.tabs.length)?next:group([activeId||'new'],activeId||'new');
     });
   }
+  useEffect(()=>{
+    const handler=(event:Event)=>{
+      const id=(event as CustomEvent<{chatId:string}>).detail?.chatId;
+      if(id&&visibleIds.includes(id))void close(id);
+    };
+    document.addEventListener('cadpad-close-chat',handler);
+    return()=>document.removeEventListener('cadpad-close-chat',handler);
+  });
   return <DockDragProvider onDrop={(payload:DockDragPayload,target:DockTarget)=>{if(payload.area==='chats'&&target.area==='chats')drop(payload.active,payload.area,target.group,target.edge,target.before,payload);}}>
     <div className="assistant-chat-dock">
       <DockArea

@@ -21,8 +21,9 @@
         "hiddenTitle": true,
         "trafficLightPosition": {
           "x": 14,
-          "y": 20
-        }
+          "y": 28
+        },
+        "dragDropEnabled": false
       }
     ],
     "security": {

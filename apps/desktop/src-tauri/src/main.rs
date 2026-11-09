@@ -36,11 +36,11 @@ async fn initialize(core: State<'_, Core>) -> Result<Value, Value> {
         None => core.create_workspace("local-user").await.map_err(error)?,
     };
     core.focus_workspace(&workspace).await.map_err(error)?;
-    core.get_project(&workspace).await.map_err(error)
+    files::project_with_imports(&core, &workspace).await
 }
 #[tauri::command]
 async fn project(core: State<'_, Core>, workspace: String) -> Result<Value, Value> {
-    core.get_project(&workspace).await.map_err(error)
+    files::project_with_imports(&core, &workspace).await
 }
 #[tauri::command]
 async fn read_source(
@@ -52,6 +52,10 @@ async fn read_source(
     core.read_source(&workspace, &version, &path)
         .await
         .map_err(error)
+}
+#[tauri::command]
+async fn add_joint(core: State<'_, Core>, workspace: String, revision: String, joint: cadpad_core::kinematics::Joint) -> Result<Value, Value> {
+    core.add_joint(&workspace, &revision, joint, "local-user").await.map(|job| json!(job)).map_err(error)
 }
 #[tauri::command]
 async fn example(
@@ -118,6 +122,14 @@ async fn stop(core: State<'_, Core>, workspace: String, job_id: String) -> Resul
         .await
         .map(|j| json!(j))
         .map_err(error)
+}
+#[tauri::command]
+async fn model_history(core: State<'_, Core>, workspace: String) -> Result<Value, Value> {
+    core.model_history(&workspace).await.map_err(error)
+}
+#[tauri::command]
+async fn restore_checkpoint(core: State<'_, Core>, workspace: String, revision: String, target: String) -> Result<Value, Value> {
+    core.restore_checkpoint(&workspace, &revision, &target).await.map(|job| json!(job)).map_err(error)
 }
 #[tauri::command]
 async fn undo(core: State<'_, Core>, workspace: String, revision: String) -> Result<Value, Value> {
@@ -235,12 +247,15 @@ fn main() {
             project,
             read_source,
             example,
+            add_joint,
             job,
             stop,
             menus::connect_native_menu,
             menus::update_native_menu,
             menus::popup_native_menu,
             undo,
+            restore_checkpoint,
+            model_history,
             parameter,
             annotation,
             inspect,

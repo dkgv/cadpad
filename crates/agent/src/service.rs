@@ -383,11 +383,7 @@ impl AgentService {
     pub fn conversation(&self, workspace: &str, chat_id: Option<&str>) -> Result<Value> {
         valid_workspace(workspace)?;
         let mut state = self.inner.state.lock().unwrap();
-        let live = state
-            .active
-            .get(workspace)
-            .and_then(|id| state.turns.get(id))
-            .cloned();
+        let live = state.active.values().filter_map(|id|state.turns.get(id)).filter(|turn|turn.workspace_id==workspace).cloned().collect::<Vec<_>>();
         let book = state.conversations.entry(workspace.into()).or_default();
         let chat = if let Some(id) = chat_id {
             book.chats
@@ -402,8 +398,8 @@ impl AgentService {
         } else {
             book.current()
         };
-        let turn = live
-            .filter(|turn| turn.chat_id == chat.id)
+        let turn = live.into_iter()
+            .find(|turn| turn.chat_id == chat.id)
             .or_else(|| chat.last_turn.clone());
         let mut chats = book.chats.iter().filter(|chat| !chat.archived && !chat.messages.is_empty()).map(|chat| json!({"id": chat.id, "title": chat.title, "created_at": chat.created_at, "updated_at": chat.updated_at, "message_count": chat.messages.len()})).collect::<Vec<_>>();
         chats
@@ -426,7 +422,7 @@ impl AgentService {
         let _storage = self.inner.storage.lock().await;
         let next = {
             let mut state = self.inner.state.lock().unwrap();
-            if state.active.contains_key(workspace) || state.changing_chats.contains(workspace) {
+            if state.changing_chats.contains(workspace) || (!matches!(action,"new"|"select") && state.active.values().filter_map(|id|state.turns.get(id)).any(|turn| turn.workspace_id==workspace && chat_id.is_none_or(|id|turn.chat_id==id))) {
                 return Err(Error::domain(
                     "AGENT_BUSY",
                     "Wait for the assistant to finish or stop it before changing chats",
@@ -497,6 +493,19 @@ impl AgentService {
                         }
                     }
                 }
+                action if action.starts_with("rewind:") => {
+                    let index = action[7..].parse::<usize>().map_err(|_| Error::domain("INVALID_REQUEST", "Invalid message"))?;
+                    let id = chat_id.ok_or_else(|| Error::domain("INVALID_REQUEST", "Choose a chat"))?;
+                    let chat = book.chats.iter_mut().find(|chat| chat.id == id && !chat.archived)
+                        .ok_or_else(|| Error::domain("INVALID_REQUEST", "Unknown chat"))?;
+                    if !chat.messages.get(index).is_some_and(|message| message.role == "user") {
+                        return Err(Error::domain("INVALID_REQUEST", "Choose a user message"));
+                    }
+                    chat.messages.truncate(index);
+                    chat.last_turn = None;
+                    chat.updated_at = now();
+                    book.active_id = id.into();
+                }
                 _ => return Err(Error::domain("INVALID_REQUEST", "Unknown chat action")),
             }
             state.changing_chats.insert(workspace.into());
@@ -555,15 +564,16 @@ impl AgentService {
     ) -> Result<Turn> {
         valid_workspace(&workspace)?;
         references::validate_image(&attachments.image)?;
-        if prompt.trim().is_empty() || prompt.len() > 32768 {
+        if prompt.trim().is_empty() {
             return Err(Error::domain(
                 "INVALID_REQUEST",
-                "Enter a request up to 32 KiB",
+                "Enter a request",
             ));
         }
         if !self.inner.core.has_workspace(&workspace).await {
             return Err(Error::domain("APP_UNAVAILABLE", "Unknown workspace"));
         }
+        let checkpoint = self.inner.core.get_project(&workspace).await?["revision"].as_str().map(str::to_owned);
         let chips = if attachments.references.is_empty() {
             vec![]
         } else {
@@ -608,7 +618,8 @@ impl AgentService {
         };
         let (history, previous_chat) = {
             let mut state = self.inner.state.lock().unwrap();
-            if state.active.contains_key(&workspace) || state.changing_chats.contains(&workspace) {
+            let target_chat = expected_chat.as_deref().or_else(||state.conversations.get(&workspace).map(|book|book.active_id.as_str()));
+            if state.changing_chats.contains(&workspace) || state.active.values().filter_map(|id|state.turns.get(id)).any(|turn| turn.workspace_id==workspace && Some(turn.chat_id.as_str())==target_chat) {
                 return Err(Error::domain(
                     "AGENT_BUSY",
                     "Stop or wait for the current agent turn in this workspace",
@@ -660,6 +671,8 @@ impl AgentService {
             let previous_chat = chat.clone();
             let history = chat.messages.clone();
             chat.messages.push(ChatMessage {
+                checkpoint_revision: checkpoint,
+                image: attachments.image.clone(),
                 role: "user".into(),
                 text: prompt.clone(),
                 references: chips.clone(),
@@ -670,13 +683,13 @@ impl AgentService {
                 chat.title = chat_title(&chat.messages);
             }
             chat.updated_at = now();
-            state.active.insert(workspace.clone(), id.clone());
+            state.active.insert(id.clone(), id.clone());
             state.turns.insert(id.clone(), turn.clone());
             (history, previous_chat)
         };
         if let Err(error) = self.persist_conversation(&workspace).await {
             let mut state = self.inner.state.lock().unwrap();
-            state.active.remove(&workspace);
+            state.active.remove(&id);
             state.turns.remove(&id);
             *state
                 .conversations
@@ -853,10 +866,20 @@ impl AgentService {
                 let bridge = self.inner.bridge.clone().ok_or_else(|| {
                     Error::domain("APP_UNAVAILABLE", "CLI agents need the Cadpad MCP bridge")
                 })?;
+                let mut context = history.iter().rev().take(20).collect::<Vec<_>>();
+                context.reverse();
+                let transcript = context.into_iter().map(|message| {
+                    format!("{}: {}", message.role, message.text)
+                }).collect::<Vec<_>>().join("\n\n");
+                let prompt = if transcript.is_empty() { prompt } else {
+                    format!("Prior conversation (context only; follow the latest user message):\n{}\n\nLatest user message:\n{}", transcript, prompt)
+                };
+                let project_directory = self.inner.core.project_directory(&turn.workspace_id).await.ok();
                 let launch = cli::spawn(cli::LaunchRequest {
                     backend: settings.backend,
                     bridge: &bridge,
                     workspace_id: &turn.workspace_id,
+                    project_directory: project_directory.as_deref(),
                     prompt: &prompt,
                     client_name: &format!("Cadpad · {}", settings.backend.label()),
                 })
@@ -1016,6 +1039,8 @@ impl AgentService {
                 finished.text.clone()
             };
             messages.push(ChatMessage {
+                checkpoint_revision: None,
+                image: None,
                 role: "assistant".into(),
                 text,
                 references: vec![],
@@ -1034,7 +1059,7 @@ impl AgentService {
             .lock()
             .unwrap()
             .active
-            .remove(&turn.workspace_id);
+            .remove(&turn.id);
         let finished = self.turn(&finished.id).unwrap_or(finished);
         self.emit(&finished, "turn_finished", None);
     }

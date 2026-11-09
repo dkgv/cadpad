@@ -461,3 +461,13 @@ def test_performance_reference_has_100_shared_instances_and_30_pinned_dimensions
     assert 900000<=triangles<=1100000
     pinned=[item for item in result["annotations"] if item.get("saved_id")]
     assert len(pinned)==30 and all(item["status"]=="resolved" and item["value"]==200 for item in pinned)
+
+
+def test_scaffold_entry_accepts_empty_model_with_existing_project_files(tmp_path):
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'model.py').write_text('# Describe a part to get started.\n')
+    (source / 'helper.py').write_text('value = 42\n')
+    model = Model(tmp_path / 'cache')
+    result = model.build(dict(source_root=str(source), parameters={}), 'r1')
+    assert result['parts'] == []

@@ -83,7 +83,15 @@ pub async fn open_project(
     let config = portable::metadata_directory(&directory).map_err(error_value_owned)?;
     let legacy = config == directory && portable::read_manifest(&directory).is_ok();
     if config == directory && !legacy {
-        return prepare_entry_selection(&pending, directory).await;
+        if portable::python_entry_points(&directory).map_err(error_value_owned)?.is_empty() {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+                .open(directory.join("model.py")).map_err(dialog_error)?;
+            file.write_all(b"# Describe a part to get started.\n").map_err(dialog_error)?;
+            portable::initialize_folder(&directory, "model.py").map_err(error_value_owned)?;
+        } else {
+            return prepare_entry_selection(&pending, directory).await;
+        }
     }
     open_directory(&core, directory).await
 }
@@ -234,6 +242,10 @@ pub async fn project_entry_plan(
     Ok(plan)
 }
 async fn open_directory(core: &Core, directory: PathBuf) -> Result<Value, Value> {
+    let candidates = std::fs::read_dir(&directory).map_err(dialog_error)?
+        .filter_map(Result::ok).map(|entry| entry.path())
+        .filter(|path| path.is_file() && import_kind(&path.to_string_lossy()).is_ok())
+        .map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>();
     let opened = core
         .open_project(directory, "local-user")
         .await
@@ -250,9 +262,11 @@ async fn open_directory(core: &Core, directory: PathBuf) -> Result<Value, Value>
         )
         .await
         .map_err(error_value_owned)?;
-    Ok(
-        json!({"project":core.get_project(&opened.workspace_id).await.map_err(error_value_owned)?,"job":job}),
-    )
+    let mut project = core.get_project(&opened.workspace_id).await.map_err(error_value_owned)?;
+    if project["model"]["parts"].as_array().is_some_and(|parts| parts.is_empty()) {
+        project["import_candidates"] = json!(candidates);
+    }
+    Ok(json!({"project":project,"job":job}))
 }
 #[tauri::command]
 pub async fn save_project(
@@ -322,8 +336,9 @@ async fn stage_imported_asset(
     revision: &str,
     title: &str,
     extensions: &[&str],
+    selected_path: Option<PathBuf>,
 ) -> Result<Option<(cadpad_core::Draft, String)>, Value> {
-    let Some(path) = file_path(app, title, extensions, false, "").await? else {
+    let Some(path) = (if selected_path.is_some() { selected_path } else { file_path(app, title, extensions, false, "").await? }) else {
         return Ok(None);
     };
     let name = path
@@ -416,7 +431,14 @@ pub async fn import_model(
     core: State<'_, Core>,
     workspace: String,
     revision: String,
+    selected_path: Option<PathBuf>,
 ) -> Result<Value, Value> {
+    if let Some(path) = &selected_path {
+        let directory = core.project_directory(&workspace).await.map_err(error_value_owned)?;
+        if !path.canonicalize().map_err(dialog_error)?.starts_with(directory.canonicalize().map_err(dialog_error)?) {
+            return Err(dialog_error("Choose a file inside this project"));
+        }
+    }
     let Some((draft, name)) = stage_imported_asset(
         &app,
         &*core,
@@ -424,6 +446,7 @@ pub async fn import_model(
         &revision,
         "Import a model",
         &["step", "stp", "stl", "STEP", "STP", "STL"],
+        selected_path,
     )
     .await?
     else {
@@ -446,6 +469,7 @@ pub async fn import_step(
         &revision,
         "Import a STEP part",
         &["step", "stp", "STEP", "STP"],
+        None,
     )
     .await?
     else {
@@ -467,6 +491,7 @@ pub async fn import_stl(
         &revision,
         "Import an STL reference for reconstruction",
         &["stl", "STL"],
+        None,
     )
     .await?
     else {
@@ -556,9 +581,7 @@ pub async fn switch_project(core: State<'_, Core>, workspace: String) -> Result<
     core.focus_workspace(&workspace)
         .await
         .map_err(error_value_owned)?;
-    core.get_project(&workspace)
-        .await
-        .map_err(error_value_owned)
+    project_with_imports(&core, &workspace).await
 }
 
 #[cfg(test)]
@@ -575,4 +598,20 @@ mod import_tests {
         assert!(import_kind("model.obj").is_err());
         assert!(import_kind("model").is_err());
     }
+}
+
+ pub async fn project_with_imports(core: &Core, workspace: &str) -> Result<Value, Value> {
+    let mut project = core.get_project(workspace).await.map_err(error_value_owned)?;
+    if project["model"]["parts"].as_array().is_some_and(|parts| parts.is_empty()) {
+        if let Ok(directory) = core.project_directory(workspace).await {
+            if let Ok(entries) = std::fs::read_dir(directory) {
+                let mut paths = entries.filter_map(Result::ok).map(|entry| entry.path())
+                    .filter(|path| path.is_file() && import_kind(&path.to_string_lossy()).is_ok())
+                    .map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>();
+                paths.sort();
+                project["import_candidates"] = json!(paths);
+            }
+        }
+    }
+    Ok(project)
 }

@@ -5,6 +5,7 @@ import {DockArea,DockContent,group,groups,placeTab,placeTabs,removeTab,updateGro
 import {DockDragProvider,DockOuterTarget,type DockDragPayload} from './dock-drag';
 import type {SessionHost,ToolTab} from './session-host';
 import {Icon} from './ui';
+import {ProjectEntry,type EntrySelection} from './project-entry';
 import {SidebarSections} from './sidebar-sections';
 import './workbench.css';
 
@@ -73,6 +74,17 @@ function WidthDivider({side,value,onChange}:{side:'left'|'right';value:number;on
   return <div className="workbench-width-divider" role="separator" tabIndex={0} aria-label={`Resize ${side} sidebar`} aria-orientation="vertical" aria-valuemin={220} aria-valuemax={640} aria-valuenow={Math.round(value)} onDoubleClick={()=>onChange(320)} onPointerDown={event=>{if(event.button!==0)return;event.preventDefault();start.current={x:event.clientX,width:value};event.currentTarget.setPointerCapture(event.pointerId);}} onPointerMove={event=>{if(start.current)resize(start.current.width+(event.clientX-start.current.x)*(side==='left'?1:-1));}} onPointerUp={()=>{start.current=null;}} onPointerCancel={()=>{start.current=null;}} onLostPointerCapture={()=>{start.current=null;}} onKeyDown={event=>{const delta=event.key==='ArrowRight'?10:event.key==='ArrowLeft'?-10:0;if(delta){event.preventDefault();resize(value+delta*(side==='left'?1:-1));}if(event.key==='Enter')onChange(320);}}/>;
 }
 export function Workbench(){
+  const [entrySelection,setEntrySelection]=useState<EntrySelection|null>(null);
+  const [opening,setOpening]=useState(false);
+  async function finishEntry(entry?:string,adapter?:string){
+    if(!entrySelection)return;
+    setOpening(true);
+    try{
+      const result=await invoke<{cancelled?:boolean;project:Project}>('open_project_entry',{requestId:entrySelection.request_id,entry:entry??null,...(adapter?{adapter}:{})});
+      setEntrySelection(null);
+      if(!result.cancelled)openProject(result.project);
+    }catch(error){setFailure(describeError(error));}finally{setOpening(false);}
+  }
   const [layout,setLayout]=useState<Layout|null>(null),[failure,setFailure]=useState('');
   const [known,setKnown]=useState<{workspace_id:string;name:string;running:number}[]>([]);
   const state=useRef(layout);state.current=layout;
@@ -136,8 +148,21 @@ export function Workbench(){
     const documents=current.documents.filter(doc=>doc.id!==id),focus=current.focus===id?groups(tree).find(g=>g.id===owner?.id)?.active??groups(tree).map(g=>g.active).find(Boolean)??'':current.focus;
     return {...current,canvas:tree,documents,focus};
   });}
+  useEffect(()=>{
+    if(!layout)return;
+    const tabs=groups(layout.left).flatMap(group=>group.tabs);
+    if(tabs.includes('move')&&!tabs.includes('simulate'))update(current=>({...current,left:group(['move','simulate']),expanded:current.expanded.filter(id=>id!=='simulate')}));
+  },[layout]);
   function toggleSection(tool:ToolTab){update(current=>({...current,expanded:current.expanded.includes(tool)?current.expanded.filter(id=>id!==tool):[...current.expanded,tool]}));}
-  function showTool(tool:ToolTab,toggle=false){update(current=>{
+  function showTool(tool:ToolTab,toggle=false){
+    if(tool==='move'||tool==='simulate'){
+      update(current=>{
+        const shown=groups(current.left).some(pane=>pane.tabs.includes('move'));
+        if(toggle&&shown)return {...current,left:group(),expanded:current.expanded.filter(id=>id!=='move'&&id!=='simulate')};
+        return {...current,left:group(['move','simulate']),expanded:[...current.expanded.filter(id=>!leftTools.has(id)),tool]};
+      });return;
+    }
+    update(current=>{
     const home: 'left'|'right'=tool==='assistant'?'right':'left';
     const remembered=current.locations[tool]==='left'||current.locations[tool]==='right'?current.locations[tool] as 'left'|'right':home;
     let area:'left'|'right'|null=null;
@@ -193,9 +218,25 @@ export function Workbench(){
     const menu=menus.current.get(current.focus);
     if(menu){menu.onmessage(resolved);return;}
     if(!['new-model','new-project','open','settings'].includes(resolved))return;
+    if(resolved==='open'){
+      if(opening)return;
+      setOpening(true);
+      try{
+        const result=await invoke<{cancelled?:boolean;choose_entry?:EntrySelection;project:Project}>('open_project');
+        if(result.choose_entry)setEntrySelection(result.choose_entry);
+        else if(!result.cancelled)openProject(result.project);
+      }catch(error){setFailure(describeError(error));}finally{setOpening(false);}
+      return;
+    }
     const createModel=resolved==='new-model'||resolved==='new-project';
     waitingAction.current=createModel?null:resolved;
-    try{openProject(await invoke<Project>('new_scratchpad'),{replace:resolved==='new-project'});}catch(error){waitingAction.current=null;setFailure(describeError(error));}
+    try{
+      const draft=await invoke<Project>('new_scratchpad');
+      if(resolved==='new-project'){
+        const created=await invoke<Project&{cancelled?:boolean}>('save_project',{workspace:draft.workspace_id,revision:draft.revision,saveAs:true});
+        if(!created.cancelled)openProject(created);
+      }else openProject(draft);
+    }catch(error){waitingAction.current=null;setFailure(describeError(error));}
   }
   function connectMenu(id:string,channel:Channel<string>){
     menus.current.set(id,channel);
@@ -205,7 +246,13 @@ export function Workbench(){
   }
   function ensureMenu(){
     if(!menuConnected.current){const bridge=new Channel<string>();bridge.onmessage=command=>{
-      if(command==='close-tab'){if(state.current?.focus)closeTab('canvas',state.current.focus);return;}
+      if(command==='close-tab'){
+        const pane=document.activeElement?.closest<HTMLElement>('.assistant-chat-pane');
+        const chatTab=document.activeElement?.closest<HTMLElement>('.assistant-chat-dock [data-tab]');
+        if(chatTab){document.dispatchEvent(new CustomEvent('cadpad-close-chat',{detail:{chatId:chatTab.dataset.tab}}));return;}
+        if(pane){pane.dispatchEvent(new CustomEvent('cadpad-close-chat',{bubbles:true,detail:{chatId:pane.dataset.chatId}}));return;}
+        if(state.current?.focus)closeTab('canvas',state.current.focus);return;
+      }
       if(command==='split-right'||command==='split-down'){const current=state.current;const owner=current?groups(current.canvas).find(g=>g.tabs.includes(current.focus)):null;if(owner)split('canvas',owner.id,command==='split-right'?'horizontal':'vertical');return;}
       if(command.startsWith('workspace:')){void openWorkspace(command.slice(10));return;}
       const active=state.current?.focus;const target=active?menus.current.get(active):null;if(target)target.onmessage(command);else void action(command);
@@ -249,11 +296,12 @@ export function Workbench(){
   };
 
   return <DockDragProvider onDrop={(payload,target)=>{if(['canvas','left','right'].includes(target.area))drop(target.area as Area,payload.active,payload.area,target.group,target.edge,target.before,payload);}}><div className={`docked-workbench ${/Mac/.test(navigator.platform)?'macos':''}`}>
+    {entrySelection&&<ProjectEntry selection={entrySelection} busy={opening} error={failure} onOpen={(entry,adapter)=>void finishEntry(entry,adapter)} onCancel={()=>void finishEntry()}/> }
     <Slot host={header} className="workbench-header-slot"/>
-    {!layout.documents.length&&<header className="app-header workbench-empty-header" data-tauri-drag-region><div className="document-title" data-tauri-drag-region><Icon name="cube" size={15}/><span className="document-identity"><span className="document-caption">Cadpad</span><span className="document-name">No project open</span></span></div><span className="header-spacer" data-tauri-drag-region/></header>}
+    {!layout.documents.length&&<header className="app-header workbench-empty-header" data-tauri-drag-region/>}
     <div className="docked-main">{!groups(layout.left).some(g=>g.tabs.length)&&<DockOuterTarget area="left" group={groups(layout.left)[0].id}/>} {!groups(layout.right).some(g=>g.tabs.length)&&<DockOuterTarget area="right" group={groups(layout.right)[0].id}/>}<Slot host={rail} className="workbench-rail-slot"/>
       {!!layout.documents.length&&groups(layout.left).some(g=>g.tabs.length)&&<><div className="docked-sidebar left" style={{width:layout.leftWidth}}>{area('left')}</div><WidthDivider side="left" value={layout.leftWidth} onChange={width=>update(current=>({...current,leftWidth:width}))}/></>}
-      <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<div role="alert" className="dock-error">{failure}<button onClick={()=>setFailure('')}>Dismiss</button></div>}{!!layout.documents.length&&area('canvas')}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Open a project folder, continue a recent model, or start a new model.</p><div className="dock-welcome-actions"><button className="primary-button" onClick={()=>void action('open')}>Open folder…</button><button onClick={()=>void action('new-model')}>New model</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span>{ws.name||'Untitled'}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}</div>
+      <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<div role="alert" className="dock-error">{failure}<button onClick={()=>setFailure('')}>Dismiss</button></div>}{!!layout.documents.length&&area('canvas')}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Create a project, open a project folder, or continue a recent project.</p><div className="dock-welcome-actions"><button onClick={()=>void action('new-project')}><Icon name="plus" size={15}/>New project…</button><button className="primary-button" onClick={()=>void action('open')}><Icon name="folder" size={15}/>Open project…</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span>{ws.name||'Untitled'}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}</div>
       {!!layout.documents.length&&groups(layout.right).some(g=>g.tabs.length)&&<><WidthDivider side="right" value={layout.rightWidth} onChange={width=>update(current=>({...current,rightWidth:width}))}/><div className="docked-sidebar right" style={{width:layout.rightWidth}}>{area('right')}</div></>}
     </div>
     {layout.documents.filter(doc=>{if(visible.has(doc.id))mounted.current.add(doc.id);return mounted.current.has(doc.id);}).map(doc=>{

@@ -354,10 +354,13 @@ pub fn read_project(directory: &Path) -> Result<Loaded> {
         inputs.files.insert(path, source);
     }
     if !inputs.files.contains_key(&manifest.entry_point) {
-        return Err(Error::domain(
-            "INVALID_REQUEST",
-            "Project entry point is missing",
-        ));
+        use std::io::Write;
+        let path = checked_path(&root, &manifest.entry_point)?;
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        let source = "# Describe a part to get started.\n";
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        file.write_all(source.as_bytes())?;
+        inputs.files.insert(manifest.entry_point.clone(), source.into());
     }
     let mut blobs = BTreeMap::new();
     let mut asset_paths = Vec::new();

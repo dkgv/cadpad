@@ -306,7 +306,8 @@ class Model:
         finally:
             os.chdir(old_cwd)
             sys.path[:] = old_path
-        if not self.parts and not args.get("allow_empty", False):
+        starter_entry = entry_path.read_text().strip() == "# Describe a part to get started."
+        if not self.parts and not (args.get("allow_empty", False) or starter_entry):
             raise DomainError("INVALID_GEOMETRY", "Model did not publish geometry. Use show_object(result), show(result, name=...), or assign the model to result.")
         for annotation in self.annotations:
             if annotation["part"] not in self.parts or (annotation["parameter"] is not None and annotation["parameter"] not in self.parameters):

@@ -1,3 +1,4 @@
+import {JointWizard} from './joint-wizard';
 import {createPortal} from 'react-dom';
 import type {SessionHost,ToolTab} from './session-host';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -14,21 +15,39 @@ import {AssistantChatDock,chatTabIds,type ChatSummary} from './assistant-chats';
 import {MotionParts} from './motion-parts';
 import {BuildDiagnostics} from './build-diagnostics';
 import {ProjectEntry,type EntrySelection} from './project-entry';
+import {ModelHistory} from './model-history';
 import {ProjectExplorer} from './explorer';
 import {LiveReply,FinishedReply,Markdown,type AgentStep} from './agent-steps';
 import {useDockDrag} from './dock-drag';
 import {ViewCube,type ViewCubeDirection} from './view-cube';
 
+const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren>(function ConversationScroll({children},forwardedRef){
+  const nodeRef=useRef<HTMLDivElement|null>(null);
+  const follow=useRef(true),interacting=useRef(false);
+  useLayoutEffect(()=>{
+    const node=nodeRef.current;if(!node)return;
+    const bottom=()=>{if(follow.current&&node.clientHeight>0)node.scrollTop=node.scrollHeight;};
+    const resize=new ResizeObserver(bottom);
+    resize.observe(node);if(node.firstElementChild)resize.observe(node.firstElementChild);
+    const changes=new MutationObserver(bottom);changes.observe(node,{childList:true,subtree:true,characterData:true});
+    bottom();const frame=requestAnimationFrame(bottom);
+    return()=>{resize.disconnect();changes.disconnect();cancelAnimationFrame(frame);};
+  },[]);
+  return <div className="conversation" ref={node=>{nodeRef.current=node;if(typeof forwardedRef==='function')forwardedRef(node);else if(forwardedRef)forwardedRef.current=node;}}
+    onWheel={()=>{interacting.current=true;}} onTouchStart={()=>{interacting.current=true;}} onPointerDown={()=>{interacting.current=true;}}
+    onScroll={event=>{if(interacting.current){const node=event.currentTarget;follow.current=node.scrollHeight-node.scrollTop-node.clientHeight<48;}}}>{children}</div>;
+});
+
 type Parameter = {value:number;unit:string;minimum:number|null;maximum:number|null;description:string};
 type Recording = {id:string;name:string;revision:string;source_mode:string;frame_count:number;duration_s:number;capacity_reached:boolean};
 type PlaybackReply={snapshot:MotionSnapshot;recordings:Recording[];frame_times_s:number[]|null};
-export type Project = { display_generation?:string;display_error?:{code:string;message:string}|null;external_tracking:boolean; recordings:Recording[]; workspace_id:string; revision:string; files?:string[]; assets?:Record<string,string>; entry_point?:string; model:SceneModel; parameters:Record<string,Parameter>;activity:Job[]; name:string|null; saved_revision:string|null; dirty:boolean;motion:MotionSnapshot };
+export type Project = { import_candidates?:string[]; display_generation?:string;display_error?:{code:string;message:string}|null;external_tracking:boolean; recordings:Recording[]; workspace_id:string; revision:string; files?:string[]; assets?:Record<string,string>; entry_point?:string; model:SceneModel; parameters:Record<string,Parameter>;activity:Job[]; name:string|null; saved_revision:string|null; dirty:boolean;motion:MotionSnapshot };
 type Job = { id:string;state:string;diagnostics:unknown;actor?:string };
 type McpSettings = {config:unknown;bridge_installed:boolean;sessions:{id:string;client_name:string;connected:boolean;calls:number}[]};
 type AgentTurn = {id:string;workspace_id:string;chat_id?:string;state:'running'|'cancelling'|'cancelled'|'succeeded'|'failed';text:string;activity:string;error:{code:string;message:string}|null;artifacts:{handle:string;format:string;revision:string}[];steps?:AgentStep[];started_at?:number};
 type PendingAgentStart={workspace:string;cancelRequested:boolean;turn?:AgentTurn;stopping?:Promise<AgentTurn>};
 type ChatReference={letter:string;instance_id:string;entity_id:string;part:string;label:string;file?:string;line?:number};
-type ChatMessage = {role:string;text:string;references?:ChatReference[];steps?:AgentStep[]};
+type ChatMessage = {image?:string;checkpoint_revision?:string;role:string;text:string;references?:ChatReference[];steps?:AgentStep[]};
 const MAX_REFERENCES=8;
 const MAX_ATTACHED_IMAGE=1024*1024;
 const entityKey=(entity:Entity)=>`${entity.revision}|${entity.instance_id}|${entity.entity_id}`;
@@ -67,7 +86,7 @@ const errorCode=(error:unknown)=>{
   try{const data=JSON.parse(message(error));return typeof data?.code==='string'?data.code:typeof data?.error?.code==='string'?data.error.code:'';}catch{return '';}
 };
 const motionTools=[
-  {id:'move',title:'Move',button:'tab-motion',icon:'motion'},
+  {id:'move',title:'Simulation',button:'tab-motion',icon:'motion'},
   {id:'simulate',title:'Physics',button:'tab-physics',icon:'physics'},
   {id:'test',title:'Requirements',button:'tab-tests',icon:'tests'},
 ] as const;
@@ -111,7 +130,7 @@ export function App({host}:{host?:SessionHost}={}) {
   function toggleReference(entity:Entity){
     const now=referencesNow.current.filter(item=>item.revision===entity.revision);
     const present=now.some(item=>sameEntity(item,entity));
-    if(!present&&now.length>=MAX_REFERENCES){setNotice(`Select up to ${MAX_REFERENCES} things for one message.`);return;}
+    if(!present&&now.length>=MAX_REFERENCES){setSelectionNotice(`Select up to ${MAX_REFERENCES} references per message.`);return;}
     const next=present?now.filter(item=>!sameEntity(item,entity)):[...now,entity];
     const primary=present?next[next.length-1]??null:entity;
     setReferences(next);choosePrimary(primary);viewer.current?.selectEntity(primary);
@@ -148,7 +167,7 @@ export function App({host}:{host?:SessionHost}={}) {
   const [dimensions,setDimensions] = useState(false), [scope,setScope] = useState<Scope>('selected');
   const [motion,setMotion]=useState<MotionSnapshot|null>(null),[manipulating,setManipulating]=useState(false);
   const [interferenceResult,setInterferenceResult]=useState<InterferenceResult|null>(null),[checkingInterference,setCheckingInterference]=useState(false);
-  const [recordings,setRecordings]=useState<Recording[]>([]),[recordingName,setRecordingName]=useState('Motion recording'),[playbackBusy,setPlaybackBusy]=useState(false),[playbackRunning,setPlaybackRunning]=useState(false);
+  const [playbackBusy,setPlaybackBusy]=useState(false),[playbackRunning,setPlaybackRunning]=useState(false);
   const playbackPending=useRef(false),timeline=useRef<{id:string;times:number[]}|null>(null),playbackClock=useRef({started:0,offset:0});
   const [simulationRunning,setSimulationRunning]=useState(false),[simulationBusy,setSimulationBusy]=useState(false);
   const [simulationDensity,setSimulationDensity]=useState(1000),[simulationFriction,setSimulationFriction]=useState(0.5),[simulationRestitution,setSimulationRestitution]=useState(0);
@@ -170,6 +189,12 @@ export function App({host}:{host?:SessionHost}={}) {
   function setHidden(next:Set<string>){hiddenIntent.current=next;updateHidden(next);}
   const displayRetry = useRef(false);
   const [notice,setNotice] = useState('');
+  const [selectionNotice,setSelectionNotice]=useState('');
+  useEffect(()=>{
+    if(!selectionNotice)return;
+    const timer=window.setTimeout(()=>setSelectionNotice(''),5000);
+    return()=>window.clearTimeout(timer);
+  },[selectionNotice]);
   const [cleaningCache,setCleaningCache]=useState(false);
   const [workspaces,setWorkspaces]=useState<{workspace_id:string;name:string;running:number}[]>([]);
   const [external,setExternal] = useState<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}|null>(null);
@@ -252,7 +277,7 @@ export function App({host}:{host?:SessionHost}={}) {
     if(activeWorkspace.current===workspace&&chatEpoch.current===epoch)acceptChat(workspace,result);
   }
   async function changeChat(action:'new'|'select'|'remove'|'restore',id?:string):Promise<boolean>{
-    const workspace=activeWorkspace.current;if(!workspace||chatChangePending.current||pendingAgentStarts.current.has(workspace)||liveTurn.current?.workspace_id===workspace&&['running','cancelling'].includes(liveTurn.current.state))return false;
+    const workspace=activeWorkspace.current;if(!workspace||chatChangePending.current||pendingAgentStarts.current.has(workspace))return false;
     chatChangePending.current=workspace;setChatBusy(true);chatEpoch.current++;setError('');
     try{
       const result=await invoke<{messages:ChatMessage[];turn:AgentTurn|null;active_chat_id:string;chats:ChatSummary[]}>('agent_chat',{workspace,action,chatId:id??null});
@@ -278,6 +303,28 @@ export function App({host}:{host?:SessionHost}={}) {
       throw error;
     }
   }
+  const [editingMessage,setEditingMessage]=useState<{chatId:string;index:number;text:string;revision?:string}|null>(null);
+  const [editingMessageBusy,setEditingMessageBusy]=useState(false);
+  async function submitMessageEdit(){
+    const edit=editingMessage,current=currentProject.current;
+    if(!edit||!current||!edit.text.trim()||editingMessageBusy)return;
+    setEditingMessageBusy(true);setError('');
+    try{
+      if(edit.revision&&edit.revision!==current.revision){
+        let job=await invoke<Job>('restore_checkpoint',{workspace:current.workspace_id,revision:current.revision,target:edit.revision});
+        while(['queued','running'].includes(job.state)){
+          await new Promise(resolve=>window.setTimeout(resolve,200));
+          job=await invoke<Job>('job',{workspace:current.workspace_id,jobId:job.id});
+        }
+        if(job.state!=='succeeded')throw new Error('Could not restore the model. Your conversation was kept.');
+        adopt(await invoke<Project>('project',{workspace:current.workspace_id}));
+      }
+      await invoke('agent_chat',{workspace:current.workspace_id,action:`rewind:${edit.index}`,chatId:edit.chatId});
+      await refreshChat(current.workspace_id);
+      setEditingMessage(null);
+      await sendPrompt(edit.text,edit.chatId);
+    }catch(error){setError(message(error));}finally{setEditingMessageBusy(false);}
+  }
   async function sendPrompt(submission?:string,chatId?:string){
     const current=currentProject.current;
     const targetChat=chatId??selectedChat.current?.id??activeChatId??undefined;
@@ -289,7 +336,7 @@ export function App({host}:{host?:SessionHost}={}) {
     pendingAgentStarts.current.set(workspace,pending);starting(workspace,'starting');chatEpoch.current++;setError('');setNotice('');
     // Show the outbound message immediately; refreshChat reconciles with the server.
     if(activeWorkspace.current===workspace){
-      const optimistic={role:'user',text:submitted};
+      const optimistic={role:'user',text:submitted,image:attachedImage?.data};
       const base=!targetChat||targetChat===activeChatId?chat:chatMessages[targetChat]||[];
       const next=[...base,optimistic];
       if(!targetChat||targetChat===activeChatId)setChat(next);
@@ -419,7 +466,7 @@ export function App({host}:{host?:SessionHost}={}) {
       try{
         const result=await invoke<PlaybackReply>('playback',{request:{workspace_id:workspace,revision:current.revision,expected_pose_version:current.pose_version,command}});
         if(activeWorkspace.current!==workspace)return;
-        receiveMotion(result.snapshot);setRecordings(result.recordings);
+        receiveMotion(result.snapshot);
         if(result.frame_times_s&&result.snapshot.playback)timeline.current={id:result.snapshot.playback.recording_id,times:result.frame_times_s};
         if(command.action==='finish_recording'||command.action==='delete'){
           const next=await invoke<Project>('project',{workspace});
@@ -429,16 +476,6 @@ export function App({host}:{host?:SessionHost}={}) {
     }catch(error){setPlaybackRunning(false);if(activeWorkspace.current===workspace){setError(message(error));await refreshMotion();}}
     finally{playbackPending.current=false;setPlaybackBusy(false);scheduleTarget();}
   }
-  function playRecording(){const selected=currentMotion.current?.playback;if(!selected||timeline.current?.id!==selected.recording_id)return;playbackClock.current={started:performance.now(),offset:selected.time_s};setPlaybackRunning(true);}
-  useEffect(()=>{
-    if(!playbackRunning||!motion?.playback)return;
-    const timer=setInterval(()=>{
-      const selected=currentMotion.current?.playback,track=timeline.current;if(!selected||!track||selected.recording_id!==track.id){setPlaybackRunning(false);return;}
-      const index=recordedFrameAt(track.times,playbackClock.current.offset+(performance.now()-playbackClock.current.started)/1000);
-      if(!sendingMotion.current&&!playbackPending.current&&index!==selected.frame_index)void playbackAction({action:'select',recording_id:selected.recording_id,frame_index:index});
-      if(selected.frame_index===selected.frame_count-1)setPlaybackRunning(false);
-    },1000/60);return()=>clearInterval(timer);
-  },[playbackRunning,motion?.playback?.recording_id]);
   function queueJoint(joint:string,coordinate:number,unit:string,check_collision=true){
     const current=currentProject.current;if(!current||currentMotion.current?.playback)return;
     draftCoordinates.current.set(joint,coordinate);
@@ -494,7 +531,7 @@ export function App({host}:{host?:SessionHost}={}) {
       }
     }finally{sendingMotion.current=false;scheduleTarget();}
   }
-  function adopt(next:Project) { if(hostRef.current&&next.workspace_id!==hostRef.current.workspaceId){hostRef.current.onOpen(next);return;} if(!next||typeof next.workspace_id!=='string'||typeof next.revision!=='string'||!Array.isArray(next.model?.parts)||!Array.isArray(next.activity)||!next.parameters||typeof next.parameters!=='object')throw new Error('The workspace reply is invalid. Open another project or rebuild this workspace; existing projects are unchanged.'); const switching=currentProject.current?.workspace_id!==next.workspace_id;const rebuilding=currentProject.current?.revision!==next.revision;activeWorkspace.current=next.workspace_id;currentProject.current=next;setProject(next);hostRef.current?.onProject(next);if(switching||rebuilding){for(const timer of settleTimers.current.values())window.clearTimeout(timer);settleTimers.current.clear();if(interactiveThrottle.current!==null){window.clearTimeout(interactiveThrottle.current);interactiveThrottle.current=null;}if(draftUiFrame.current!==null){cancelAnimationFrame(draftUiFrame.current);draftUiFrame.current=null;}if(motionUiFrame.current!==null){cancelAnimationFrame(motionUiFrame.current);motionUiFrame.current=null;}pendingTargets.current.clear();draftCoordinates.current.clear();currentMotion.current=null;setManipulating(false);setSimulationRunning(false);setSimulationDynamic({});setPlaybackRunning(false);timeline.current=null;}setRecordings(next.recordings||[]);receiveMotion(next.motion);if(switching)setJob(next.activity.find(job=>['queued','running'].includes(job.state))||next.activity.at(-1)||null); }
+  function adopt(next:Project) { if(hostRef.current&&next.workspace_id!==hostRef.current.workspaceId){hostRef.current.onOpen(next);return;} if(!next||typeof next.workspace_id!=='string'||typeof next.revision!=='string'||!Array.isArray(next.model?.parts)||!Array.isArray(next.activity)||!next.parameters||typeof next.parameters!=='object')throw new Error('The workspace reply is invalid. Open another project or rebuild this workspace; existing projects are unchanged.'); const switching=currentProject.current?.workspace_id!==next.workspace_id;const rebuilding=currentProject.current?.revision!==next.revision;activeWorkspace.current=next.workspace_id;currentProject.current=next;setProject(next);hostRef.current?.onProject(next);if(switching||rebuilding){for(const timer of settleTimers.current.values())window.clearTimeout(timer);settleTimers.current.clear();if(interactiveThrottle.current!==null){window.clearTimeout(interactiveThrottle.current);interactiveThrottle.current=null;}if(draftUiFrame.current!==null){cancelAnimationFrame(draftUiFrame.current);draftUiFrame.current=null;}if(motionUiFrame.current!==null){cancelAnimationFrame(motionUiFrame.current);motionUiFrame.current=null;}pendingTargets.current.clear();draftCoordinates.current.clear();currentMotion.current=null;setManipulating(false);setSimulationRunning(false);setSimulationDynamic({});setPlaybackRunning(false);timeline.current=null;}receiveMotion(next.motion);if(switching)setJob(next.activity.find(job=>['queued','running'].includes(job.state))||next.activity.at(-1)||null); }
   useEffect(()=>{invoke<{workspace_id:string;name:string;running:number}[]>('workspaces').then(setWorkspaces).catch(e=>setError(message(e)));},[project?.workspace_id,project?.name,job?.state]);
   async function switchWorkspace(workspace:string){
     if(hostRef.current){hostRef.current.onOpenWorkspace(workspace);return;}
@@ -605,6 +642,7 @@ export function App({host}:{host?:SessionHost}={}) {
         }
       }else if(event.turn){if(liveTurn.current&&liveTurn.current.id!==event.turn.id&&event.kind!=='turn_started')return;showTurn(event.turn);}
       if(event.kind==='turn_started'||event.kind==='turn_finished')refreshChat(workspace).catch(e=>setError(message(e)));
+      if(event.kind==='turn_finished')void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace)adopt(next);}).catch(error=>setError(message(error)));
       if(event.kind==='turn_finished'&&event.turn?.error?.code==='LLM_NOT_CONFIGURED')setProviderOpen(true);
     };
     invoke('connect_agent',{channel}).catch(e=>setError(message(e)));
@@ -618,7 +656,10 @@ export function App({host}:{host?:SessionHost}={}) {
       try{
         const latest=await invoke<AgentTurn>('agent_turn',{turnId:turn.id});
         if(!active||activeWorkspace.current!==workspace||liveTurn.current?.id!==turn.id||latest.id!==turn.id||latest.workspace_id!==workspace)return;
-        // Streaming events own live text. Polling only reconciles terminal state.
+        const committed=await invoke<Project>('project',{workspace});
+        if(!active||activeWorkspace.current!==workspace)return;
+        if(currentProject.current?.revision!==committed.revision||currentProject.current?.dirty!==committed.dirty)adopt(committed);
+        // Streaming events own live text. Polling reconciles model and terminal state.
         if(['succeeded','failed','cancelled'].includes(latest.state)){
           showTurn(latest);await refreshChat(workspace);
         }
@@ -649,7 +690,7 @@ export function App({host}:{host?:SessionHost}={}) {
           const hits=(batch??[]).filter(item=>current&&item.revision===current.revision);
           let next=origin==='marquee-add'?[...referencesNow.current.filter(item=>current&&item.revision===current.revision)]:[] as Entity[];
           for(const hit of hits){if(!next.some(item=>sameEntity(item,hit)))next.push(hit);}
-          if(next.length>MAX_REFERENCES){setNotice(`Select up to ${MAX_REFERENCES} things for one message.`);next=next.slice(0,MAX_REFERENCES);}
+          if(next.length>MAX_REFERENCES){setSelectionNotice(`Select up to ${MAX_REFERENCES} references per message.`);next=next.slice(0,MAX_REFERENCES);}
           const primary=next[next.length-1]??null;
           setReferences(next);choosePrimary(primary);viewport.selectEntity(primary);if(primary&&!toolPanelOpen.current)setModelOpen(true);return;
         }
@@ -741,14 +782,17 @@ export function App({host}:{host?:SessionHost}={}) {
     return () => {active=false;clearTimeout(timer);};
   },[job,project?.workspace_id]);
   const agentWorking=!!agentTurn&&['running','cancelling'].includes(agentTurn.state);
-  // Keep the latest message in view after send and while the reply streams.
-  useLayoutEffect(()=>{
-    if(!(agentSending||agentWorking))return;
-    const node=conversationRef.current;if(!node)return;
-    node.scrollTop=node.scrollHeight;
-  },[chat,agentSending,agentWorking,agentTurn?.text,agentTurn?.activity,agentTurn?.steps]);
   const working = busy || agentSending || agentWorking || !!job && ['queued','running'].includes(job.state);
   const simulationUnavailable=motion?.simulation_unavailable_reason||(motion&&motion.simulation_unavailable_reason===undefined&&(motion.constraints||motion.joints.some(joint=>joint.kind==='path'))?'Simulation for this mechanism is not available yet':null);
+  const [importCandidates,setImportCandidates]=useState<string[]>([]);
+  const [importChoice,setImportChoice]=useState('');
+  const importPrompted=useRef(new Set<string>());
+  useEffect(()=>{
+    const candidates=project?.import_candidates??[];
+    if(!project||!candidates.length||importPrompted.current.has(project.workspace_id))return;
+    importPrompted.current.add(project.workspace_id);
+    setImportCandidates(candidates);setImportChoice(candidates[0]??'');
+  },[project?.workspace_id,project?.import_candidates]);
   async function run(command:string,args:Record<string,unknown>={}) {
     const workspace=currentProject.current?.workspace_id??project?.workspace_id;
     if(!workspace||mutationBusy.current)return;
@@ -806,6 +850,17 @@ export function App({host}:{host?:SessionHost}={}) {
       setSelection(null);setExternal(null);setNotice('');
     }catch(e){setError(message(e));}finally{setBusy(false);}
   }
+  async function newProject(){
+    if(busy||entrySelection)return;
+    setBusy(true);setError('');
+    try{
+      const draft=await invoke<Project>('new_scratchpad');
+      const created=await invoke<Project&{cancelled?:boolean}>('save_project',{workspace:draft.workspace_id,revision:draft.revision,saveAs:true});
+      if(created.cancelled)return;
+      if(hostRef.current){hostRef.current.onOpen(created);return;}
+      adopt(created);setJob(null);setSelection(null);setExternal(null);setNotice('');
+    }catch(error){setError(message(error));}finally{setBusy(false);}
+  }
   async function cleanCache(){
     setCleaningCache(true);setError('');
     try{const report=await invoke<{bytes_removed:number;already_running:boolean;retained_unmanaged:number;errors:string[];evicted_display_revisions:number;display_budget_exceeded:boolean}>('clean_cache');setNotice(report.already_running?'Cache cleanup is already running.':`Removed ${(report.bytes_removed/1024/1024).toFixed(1)} MB of cached data.${report.evicted_display_revisions?` Display data for ${report.evicted_display_revisions} workspace(s) can be restored when needed.`:''}${report.display_budget_exceeded?' Active or protected display data remains above the cache target.':''}${report.retained_unmanaged?' Unmanaged files and folders were left untouched.':''}`);if(report.errors.length)setError(report.errors.join('\n'));}
@@ -825,11 +880,8 @@ export function App({host}:{host?:SessionHost}={}) {
   const autoSaving=useRef(false),autoSaveTimer=useRef<number|null>(null);
   async function autoSaveBound(){
     const current=currentProject.current;
-    if(!current?.dirty||!current.saved_revision||autoSaving.current)return;
-    if(pendingAgentStarts.current.has(current.workspace_id))return;
-    if(liveTurn.current&&['running','cancelling'].includes(liveTurn.current.state))return;
+    if(!current?.dirty||current.saved_revision==null||autoSaving.current)return;
     if(liveJob.current&&['queued','running'].includes(liveJob.current.state))return;
-    if(externalNow.current?.changed)return;
     autoSaving.current=true;
     const workspace=current.workspace_id;
     try{
@@ -839,7 +891,7 @@ export function App({host}:{host?:SessionHost}={}) {
     finally{autoSaving.current=false;}
   }
   useEffect(()=>{
-    if(!project?.dirty||!project.saved_revision)return;
+    if(!project?.dirty||project.saved_revision==null)return;
     if(autoSaveTimer.current!==null)window.clearTimeout(autoSaveTimer.current);
     autoSaveTimer.current=window.setTimeout(()=>void autoSaveBound(),450);
     return()=>{if(autoSaveTimer.current!==null)window.clearTimeout(autoSaveTimer.current);};
@@ -895,7 +947,7 @@ export function App({host}:{host?:SessionHost}={}) {
       case 'settings':setProviderOpen(true);break;
       case 'new':
       case 'new-model':if(!busy)void open('new_scratchpad');break;
-      case 'new-project':if(!busy)void open('new_scratchpad',{replace:true});break;
+      case 'new-project':void newProject();break;
       case 'open':if(!busy)void open('open_project');break;
       case 'save':if(!busy)void save();break;
       case 'save-as':if(!busy)void save(true);break;
@@ -932,19 +984,28 @@ export function App({host}:{host?:SessionHost}={}) {
   const agentChromeStatus=agentStartCancelling?'Stopping…':agentWorking?agentTurn.activity:agentSending?'Starting request…':'';
   const projectBound=!!project&&(project.saved_revision!=null||project.external_tracking);
   const retainedView=!!project&&!!viewer.current?.hasScene(project.workspace_id,project.revision);
+  const [modelHistory,setModelHistory]=useState<{label?:string;revision:string;restored:boolean;initial:boolean;actor:string;parts:number;created_at?:number}[]>([]);
+  useEffect(()=>{
+    if(!project)return;
+    let active=true;
+    invoke<typeof modelHistory>('model_history',{workspace:project.workspace_id}).then(items=>{if(active)setModelHistory(items);}).catch(()=>{});
+    return()=>{active=false;};
+  },[project?.workspace_id,project?.revision]);
   const headerBar=(    <header className="app-header" data-tauri-drag-region>
       <div className="document-title" data-tauri-drag-region title={projectBound?`Open project folder · ${project?.name||'Untitled'}`:`Model · ${project?.name||'Untitled'}`}>
         <Icon name={projectBound?'folder':'cube'} size={16}/>
-        <span className="document-identity"><span className="document-caption">{projectBound?'Project folder':'Model'}</span><span className="document-name">{project?.name||'Untitled'}</span></span>
+        <span className="document-identity"><span className="document-name">{project?.name||'Untitled'}</span></span>
         {project?.dirty&&<span className="document-edited">Edited</span>}
       </div>
-      <button className="icon-button" title="Undo last model change" aria-label="Undo last model change" disabled={working||!project?.activity.some(j=>j.state==='succeeded')} onClick={()=>run('undo')}><Icon name="undo"/></button>
       <span className="header-spacer" data-tauri-drag-region/>
+      <ModelHistory entries={modelHistory} disabled={working} onUndo={()=>void run('undo')} onRestore={target=>void run('restore_checkpoint',{target})}/>
+
+      <button id="tab-assistant" className="titlebar-assistant"  aria-label="Toggle Assistant panel" title="Toggle Assistant" aria-controls="panel-assistant-dock" aria-expanded={host?host.visibleTools.includes('assistant'):assistantOpen} onClick={()=>{if(host)host.showTool('assistant',true);else setAssistantOpen(!assistantOpen);setFocusedTool('assistant');}}><Icon name="chat" size={16}/><span>Assistant</span></button>
     </header>);
   const activityRail=(      <nav className="activity-rail" aria-label="Workspace panels">
         <button id="tab-model" {...railEvents('model','Explorer')} aria-label="Toggle Explorer panel" data-sidebar-tooltip="Explorer" aria-controls="panel-model" aria-expanded={host?host.visibleTools.includes('model'):modelOpen} onClick={()=>{if(host)host.showTool('model',true);else if(modelOpen)setModelOpen(false);else setPanel('model');}}><Icon name="folder" size={21}/></button>
-        {motionTools.map(tool=><button key={tool.id} id={tool.button} {...railEvents(tool.id,tool.title)} aria-label={`Toggle ${tool.title} panel`} data-sidebar-tooltip={tool.title} aria-controls={host?`panel-${tool.id}`:"panel-motion"} aria-expanded={host?host.visibleTools.includes(tool.id):motionOpen&&motionTask===tool.id} onClick={()=>openMotionTool(tool.id,true)}><Icon name={tool.icon} size={21}/></button>)}
-        <button id="tab-assistant" {...railEvents('assistant','Assistant')} aria-label="Toggle Assistant panel" data-sidebar-tooltip="Assistant" aria-controls="panel-assistant-dock" aria-expanded={host?host.visibleTools.includes('assistant'):assistantOpen} onClick={()=>{if(host)host.showTool('assistant',true);else setAssistantOpen(!assistantOpen);setFocusedTool('assistant');}}><Icon name="chat" size={21}/></button>
+        {motionTools.filter(tool=>tool.id!=='simulate').map(tool=><button key={tool.id} id={tool.button} {...railEvents(tool.id,tool.title)} aria-label={`Toggle ${tool.title} panel`} data-sidebar-tooltip={tool.title} aria-controls={host?`panel-${tool.id}`:"panel-motion"} aria-expanded={host?host.visibleTools.includes(tool.id):motionOpen&&motionTask===tool.id} onClick={()=>openMotionTool(tool.id,true)}><Icon name={tool.icon} size={21}/></button>)}
+
       </nav>);
   const noticesPanel=(        <div className="workspace-notices inspector-page">      {notice&&<p className="notice">{notice}</p>}
       {project?.display_error&&<section><p>{project.display_error.message}</p><button disabled={working} onClick={()=>run('repair_display')}>Restore display</button><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></section>}
@@ -969,17 +1030,15 @@ export function App({host}:{host?:SessionHost}={}) {
           {motion?.mode==='simulate'&&task==='move'&&!motion.playback&&<div className="motion-session"><strong>Physics is paused</strong><p>Return to the position from before the simulation to move parts by hand, or open Physics to continue.</p><button disabled={simulationBusy||!!motion.recording} onClick={()=>{setSimulationRunning(false);void simulationAction({action:'stop'});}}>Stop and restore pose</button>{motion.recording&&<p>Finish or discard your recording first.</p>}</div>}
           {(!host||task!=='test')&&<div hidden={task==='test'}>
           {motion?.recording&&!motion.playback&&<div className="motion-capture-bar"><span>Recording · {motion.recording.duration_s.toFixed(2)} s{motion.recording.capacity_reached?' · full':''}</span><button disabled={playbackBusy} onClick={()=>void playbackAction({action:'finish_recording'})}>Finish recording</button></div>}
-          {!motion?.joints.some(joint=>joint.kind!=='fixed'&&joint.drivable!==false)&&<div className="panel-empty" hidden={task!=='move'}><h3>No movable joints yet</h3><p>A joint defines how two parts can move, such as sliding along a rail or turning on a hinge. Ask the assistant to add one.</p><button disabled={working||!project} onClick={()=>{setPrompt('Add movable joints to this assembly. Help me choose which parts slide, rotate, or stay fixed.');setPanel('assistant');}}>Set up movement</button></div>}
+          {task==='move'&&project&&<JointWizard key={`${project.workspace_id}:${project.revision}`} parts={project.model.parts} motion={motion} disabled={working||motion?.mode==='simulate'||!!motion?.playback||!!motion?.recording} onSave={async joint=>{await run('add_joint',{joint});}}/>}
         {task==='simulate'&&project&&motion&&!motion.collision&&<div className="panel-empty"><h3>Physics needs contact geometry</h3><p>{simulationUnavailable||'Ask the assistant to configure collision shapes for this assembly before simulating forces.'}</p><button onClick={()=>{setPrompt('Set up this assembly for physics simulation, including collision shapes and which parts stay fixed.');setPanel('assistant');}}>Set up with assistant</button></div>}
         {project&&motion?.collision&&(!host||task==='simulate')&&<div className="physics-workflow" hidden={task!=='simulate'}><h3>{motion.mode==='simulate'?'Run and observe':'Choose what can move'}</h3><section><p className="muted">Parts respond to gravity, motor forces and contact. This is an approximate physics preview.</p>{motion.mode==='simulate'&&!motion.playback?<><p className="muted">{motion.simulation?.current.time_s.toFixed(3)} s · fixed step 1/120 s · approximate proxy inertia and contacts</p><button disabled={simulationBusy} onClick={()=>setSimulationRunning(!simulationRunning)} className="primary-button">{simulationRunning?'Pause simulation':'Run simulation'}</button><button disabled={simulationBusy||simulationRunning} onClick={()=>void simulationAction({action:'advance',steps:2})}>Advance 1/60 s</button><button disabled={simulationBusy||!!motion.recording} onClick={()=>{setSimulationRunning(false);void simulationAction({action:'stop'});}}>Stop and restore pose</button></>:<><p className="muted">Keep the base in place and let the moving parts respond to forces. Review the choices below, then start.</p>{project.model.parts.map(part=><label className="parameter" key={part.instance_id}><span>{part.name}</span><select value={(simulationDynamic[part.instance_id]??motion.joints.some(joint=>joint.child===part.instance_id))?'dynamic':'fixed'} onChange={event=>setSimulationDynamic({...simulationDynamic,[part.instance_id]:event.target.value==='dynamic'})}><option value="fixed">Stay in place</option><option value="dynamic">Can move</option></select></label>)}<PhysicsSettings density={simulationDensity} friction={simulationFriction} bounce={simulationRestitution} gravity={simulationGravity} onDensity={setSimulationDensity} onFriction={setSimulationFriction} onBounce={setSimulationRestitution} onGravity={setSimulationGravity}/><button className="primary-button" disabled={simulationBusy||!!motion.recording||!!motion.playback||!!simulationUnavailable} onClick={()=>void startSimulation()}>Run simulation</button>{simulationUnavailable&&<p className="muted">{simulationUnavailable}</p>}</>}<details><summary>Advanced motor settings</summary><p className="muted">Sliders: N, N/m, N s/m. Hinges: N m, N m/rad, N m s/rad.</p><label>Maximum force / torque<input type="number" min={0.000001} value={motorForce} onChange={event=>setMotorForce(Number(event.target.value))}/></label><label>Spring stiffness<input type="number" min={0} value={motorStiffness} onChange={event=>setMotorStiffness(Number(event.target.value))}/></label><label>Damping<input type="number" min={0} value={motorDamping} onChange={event=>setMotorDamping(Number(event.target.value))}/></label></details></section>{motion?.mode==='simulate'&&motion.simulation&&<section><ExternalLoads key={`${motion.workspace_id}:${motion.revision}`} simulation={motion.simulation} disabled={simulationBusy||simulationRunning||!!motion.playback} onApply={loads=>void simulationAction({action:'loads',loads},motion)}/></section>}</div>}
       {!!motion?.joints.some(joint=>joint.kind!=='fixed'&&joint.drivable!==false)&&(!host||task==='move'&&motion.mode!=='simulate'||task==='simulate'&&motion.mode==='simulate')&&<section className="manual-motion" hidden={task==='move'?motion.mode==='simulate':motion.mode!=='simulate'}>{motion.mode==='simulate'?<><h3>Motor targets</h3><div className="joint-controls">{motion.joints.filter(joint=>joint.kind!=='fixed'&&joint.drivable!==false).map(joint=><JointControl key={`${motion.revision}:${joint.id}`} joint={joint} name={humanLabel(project?.model.parts.find(part=>part.instance_id===joint.child)?.name||joint.id)} coordinate={draftCoordinates.current.get(joint.id)??joint.coordinate} disabled={!!motion.playback} motor={motion.mode==='simulate'} onPreview={next=>{viewer.current?.previewCoordinate(joint.id,next);queueJoint(joint.id,next,joint.unit,false);}} onCommit={next=>queueJoint(joint.id,next,joint.unit,true)}/>)}</div></>:project&&<MotionParts parts={project.model.parts} motion={motion} dragging={manipulating} disabled={!!motion.playback} coordinates={draftCoordinates.current} onDragging={setManipulating} onLocate={id=>{const entity={revision:project.revision,instance_id:id,entity_id:'part:0'};viewer.current?.selectEntity(entity);setSelection(entity);}} onPreview={(joint,next)=>{viewer.current?.previewCoordinate(joint.id,next);queueJoint(joint.id,next,joint.unit,false);}} onCommit={(joint,next)=>queueJoint(joint.id,next,joint.unit,true)}/>}<details className="motion-technical"><summary>Movement limits and collisions</summary>{motion.constraints&&<p className="muted">{motion.mode==='simulate'?`Approximate loop closure · ${(motion.constraints.position_error_m*1000).toPrecision(3)} mm · ${motion.constraints.axis_error_rad.toPrecision(3)} rad`:'Coupled mechanism · model constraints satisfied'}</p>}<p className="muted">{motion.mode==='simulate'?'Approximate dynamic contacts · force-limited motors':motion.collision?`Swept collision blocking · conservative proxies · ${(motion.collision.clearance_m*1000).toPrecision(3)} mm margin`:'Joint limits apply. Collision blocking is not configured.'}</p>{!!motion.collision?.ignored_pairs.length&&<details><summary>{motion.collision.ignored_pairs.length} intentional contact pair(s) excluded</summary>{motion.collision.ignored_pairs.map(pair=><p key={pair.join(':')}>{pair.join(' ↔ ')}</p>)}</details>}</details></section>}
 
 
       </div>}
-      <div hidden={task!=='move'}><details className="motion-disclosure recording-tools"><summary>Record and replay…</summary>{project&&motion&&!!project.model.parts.length&&<section className="recording-library"><h3>Record and replay</h3><p className="muted">Press Record motion, then move the joints or run a simulation. Finish recording to save the movement for replay.</p>{motion.recording?<><p>{motion.recording.name} · {motion.recording.frame_count}/{motion.recording.capacity} frames · {motion.recording.duration_s.toFixed(3)} s</p>{motion.recording.capacity_reached&&<p className="notice">Recording capacity reached. Later motion is not recorded.</p>}<button disabled={playbackBusy} onClick={()=>void playbackAction({action:'finish_recording'})}>Finish recording</button><button disabled={playbackBusy} onClick={()=>void playbackAction({action:'cancel_recording'})}>Discard recording</button></>:!motion.playback&&<><input aria-label="Recording name" maxLength={120} value={recordingName} onChange={event=>setRecordingName(event.target.value)}/><button disabled={playbackBusy} onClick={()=>void playbackAction({action:'start_recording',name:recordingName})}>Record motion</button></>}{motion.playback&&<><p>{motion.playback.name} · {motion.playback.time_s.toFixed(3)} / {motion.playback.duration_s.toFixed(3)} s</p>{!motion.playback.recording_id.startsWith('motion-test:')&&<><input aria-label="Recorded frame" type="range" min={0} max={motion.playback.frame_count-1} step={1} value={motion.playback.frame_index} disabled={playbackBusy||playbackRunning} onChange={event=>void playbackAction({action:'select',recording_id:motion.playback!.recording_id,frame_index:Number(event.target.value)})}/><button disabled={playbackBusy} onClick={()=>playbackRunning?setPlaybackRunning(false):playRecording()}>{playbackRunning?'Pause playback':'Play recording'}</button></>}<p className="muted">Exact inspection and export use this recorded frame. Live motion is paused.</p></>}{!recordings.length&&!motion.recording&&<p className="muted">No saved recordings yet. Start recording, move a joint or run physics, then finish recording.</p>}<button disabled={playbackBusy} onClick={()=>void playbackAction({action:'list'})}>Refresh recordings</button>{recordings.map(recording=><div key={recording.id}><span>{recording.name} · {recording.duration_s.toFixed(2)} s{recording.revision!==motion.revision?' · earlier design':''}</span><button disabled={playbackBusy||!!motion.recording||recording.revision!==motion.revision} onClick={()=>{setPlaybackRunning(false);void playbackAction({action:'select',recording_id:recording.id,frame_index:0});}}>Open</button><button disabled={playbackBusy||recording.id===motion.playback?.recording_id} onClick={()=>void playbackAction({action:'delete',recording_id:recording.id})}>Delete</button></div>)}<p className="muted">Save your project to take completed recordings with you. Playback keeps the design geometry unchanged.</p></section>}</details>
-
-      </div><div hidden={task!=='move'&&task!=='simulate'}>
-      {!!project?.model.parts.length&&<details className="motion-disclosure"><summary>Check for overlapping parts<small>Inspect the current position</small></summary><section className="motion-interference"><h3>Check for overlapping parts</h3><p className="muted">Check the exact geometry at the current position. Move the joints to check another position.</p><button disabled={checkingInterference} onClick={()=>void checkInterference()}>{checkingInterference?'Checking exact geometry…':'Check interference'}</button>{interferenceResult?.exact?.pairs.map(pair=><p key={pair.instances.join(':')}>{pair.instances.join(' ↔ ')}: {pair.interfering?`overlap ${pair.intersection_volume_mm3.toPrecision(4)} mm³`:`clearance ${pair.distance_mm.toPrecision(4)} mm`}<small className="muted"> · exact CAD at the settled pose</small></p>)}</section></details>}
+      <div hidden={task!=='move'&&task!=='simulate'}>
+      {task==='move'&&(project?.model.parts.length??0)>1&&<details className="motion-disclosure"><summary>Check for overlapping parts<small>Inspect the current position</small></summary><section className="motion-interference"><h3>Check for overlapping parts</h3><p className="muted">Check the exact geometry at the current position. Move the joints to check another position.</p><button disabled={checkingInterference} onClick={()=>void checkInterference()}>{checkingInterference?'Checking exact geometry…':'Check interference'}</button>{interferenceResult?.exact?.pairs.map(pair=><p key={pair.instances.join(':')}>{pair.instances.join(' ↔ ')}: {pair.interfering?`overlap ${pair.intersection_volume_mm3.toPrecision(4)} mm³`:`clearance ${pair.distance_mm.toPrecision(4)} mm`}<small className="muted"> · exact CAD at the settled pose</small></p>)}</section></details>}
           </div>
           <div hidden={task!=='test'}>{project&&(!host||task==='test')&&<Requirements workspace={project.workspace_id} revision={project.revision} motion={motion} onSnapshot={snapshot=>{setSimulationRunning(false);setPlaybackRunning(false);pendingTargets.current.clear();receiveMotion(snapshot);}} onChanged={()=>{const workspace=project.workspace_id;void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace&&currentProject.current?.revision===next.revision){currentProject.current=next;setProject(next);}}).catch(e=>setError(message(e)));}} agentBusy={agentWorking||agentSending} onCreate={intent=>prepareMotionTest(intent)} onEdit={(id,intent)=>prepareMotionTest(intent,id)}/>}</div>
         </div>
@@ -1000,14 +1059,16 @@ export function App({host}:{host?:SessionHost}={}) {
         {scenePhase==='missing'&&<button disabled={working} onClick={()=>void run('repair_display')}>Restore display</button>}
       </div></div>}
 
-      {!project?.model.parts.length&&job?.state!=='failed'&&<div className="empty"><h1>Start a model</h1><p>Open a project, import a model, or ask the assistant.</p><div className="start-actions"><div className="start-file-actions"><button disabled={busy} aria-label="Open project" onClick={()=>void open('open_project')}><Icon name="folder" size={15}/>Open project…</button><button className="primary-button" disabled={working||!project} aria-label="Import model" onClick={()=>void run('import_model')}><Icon name="import" size={15}/>Import model…</button></div></div></div>}
-      {!advancedView&&<nav className="camera-controls" aria-label="Camera views">
+      {!!importCandidates.length&&<div className="import-setup-backdrop"><section className="import-setup" role="dialog" aria-modal="true" aria-labelledby="import-setup-title"><header><h2 id="import-setup-title">Import model</h2><button className="icon-button" aria-label="Close import setup" onClick={()=>setImportCandidates([])}><Icon name="close" size={15}/></button></header><div className="import-setup-body"><p>Choose a model from this project folder.</p><div className="import-file-list" role="radiogroup" aria-label="Model file">{importCandidates.map(path=><button key={path} role="radio" aria-checked={importChoice===path} className={importChoice===path?'selected':''} onClick={()=>setImportChoice(path)}><Icon name="file" size={18}/><span>{path.split('/').at(-1)}</span><small>{path.split('.').at(-1)?.toUpperCase()}</small></button>)}</div><p className="import-setup-hint">The original file stays in your folder.</p></div><footer><button disabled={working} onClick={()=>setImportCandidates([])}>Skip for now</button><button className="primary-button" disabled={working||!importChoice} onClick={()=>{const path=importChoice;setImportCandidates([]);void run('import_model',{selectedPath:path});}}><Icon name="import" size={14}/>Import</button></footer></section></div>}
+
+      {!project?.model.parts.length&&job?.state!=='failed'&&<div className="empty"><h1>Start a model</h1><p>Import a model or ask the assistant to create one.</p><div className="start-actions"><div className="start-file-actions"><button className="primary-button" disabled={working||!project} aria-label="Import model" onClick={()=>void run('import_model')}><Icon name="import" size={15}/>Import model…</button></div></div></div>}
+      {!advancedView&&!!project?.model.parts.length&&<nav className="camera-controls" aria-label="Camera views">
         <ViewCube getQuaternion={()=>viewer.current?.cameraQuaternion()??null} onView={chooseCamera}/>
         <button className="camera-fit" aria-label="Fit model in view" title="Fit model" onClick={()=>chooseCamera('fit')}><Icon name="fit" size={18}/><small>Fit</small></button>
       </nav>}
       {!project?.model.parts.length&&job?.state==='failed'&&<div className="build-empty"><strong>Model could not build</strong><p>Review the error below to continue.</p></div>}
       </div>
-      {job?.state==='failed'&&<BuildDiagnostics key={job.id} diagnostics={job.diagnostics} onRetry={()=>void run('rebuild')} onSetup={project?.external_tracking?()=>void setupProjectEntry():undefined}/>}
+      {job?.state==='failed'&&!agentWorking&&!agentSending&&<BuildDiagnostics key={job.id} diagnostics={job.diagnostics} onRetry={()=>void run('rebuild')} onSetup={project?.external_tracking?()=>void setupProjectEntry():undefined}/>}
       <footer><span>Millimetres <span className="footer-dot">·</span> {project?.model.parts.length||0} parts</span><span className="hover-status" aria-label="Hovered geometry" ref={hoverStatus}/><span>{manipulating&&motion?.mode==='manipulate'&&!motion.playback?'Drag a moving part to slide or rotate it':'Drag to orbit'} <span className="footer-dot">·</span> ⇧ drag to pan <span className="footer-dot">·</span> Scroll to zoom</span></footer>
     </section>);
   const openChatIds=chatTabIds(chatList,activeChatId);
@@ -1019,7 +1080,7 @@ export function App({host}:{host?:SessionHost}={}) {
           workspaceKey={project?.workspace_id||'none'}
           chats={chatList}
           activeId={activeChatId}
-          busy={!project||chatBusy||agentWorking||agentSending}
+          busy={!project||chatBusy||agentSending}
           hosts={chatHostMap}
           onVisibleChats={setVisibleChatIds}
           onNew={()=>changeChat('new')}
@@ -1031,19 +1092,26 @@ export function App({host}:{host?:SessionHost}={}) {
             const live=!!((agentSending||agentWorking)&&(agentTurn?.chat_id?agentTurn.chat_id===chatId:chatId===activeChatId));
             const draft=draftFor(chatId);
             const activePane=chatId===activeChatId||(!activeChatId&&chatId==='new');
-            return <div className="assistant-chat-pane">
-              <div className="conversation" ref={activePane?conversationRef:undefined}>
+            return <div className="assistant-chat-pane" data-chat-id={chatId} tabIndex={-1} onPointerDown={event=>{if(!(event.target as HTMLElement).closest('button,input,textarea,select,a,summary'))event.currentTarget.focus({preventScroll:true});}}>
+              <ConversationScroll key={`${project?.workspace_id}:${chatId}`} ref={activePane?conversationRef:undefined}>
                 <div className="inspector-page" id={activePane?'panel-assistant':undefined} role="region" aria-label="Assistant conversation">
                   {!messages.length&&!live&&<div className="assistant-welcome"><h3>Describe a change</h3><p>Ask for a part, an edit, or a mechanism. It shows up in this document.</p></div>}
-                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<p>{entry.text}</p>:<FinishedReply text={entry.text} steps={entry.steps}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=><li key={`${chip.instance_id}:${chip.entity_id}`} className="reference-chip" title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`}>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></li>)}</ul>}</div>)}
+                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p>{entry.text}</p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({chatId,index,text:entry.text,revision:entry.checkpoint_revision})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending} onClick={()=>void run('restore_checkpoint',{target:entry.checkpoint_revision})}><Icon name="undo" size={13}/>Restore</button>}</>:<FinishedReply text={entry.text} steps={entry.steps}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=><li key={`${chip.instance_id}:${chip.entity_id}`} className="reference-chip" title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`}>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></li>)}</ul>}</div>)}
                   {activePane&&!!agentChromeStatus&&<span className="visually-hidden" data-agent-chrome-status role="status">{agentChromeStatus}</span>}
                   {live&&<div className="chat-message assistant streaming" aria-live="polite"><strong>Cadpad</strong>{agentWorking&&agentTurn.steps?.length?<LiveReply steps={agentTurn.steps} activity={agentTurn.activity} startedAt={agentTurn.started_at} stopping={agentStartCancelling||agentTurn.state==='cancelling'}/>:agentWorking&&agentTurn.text?<><Markdown text={agentTurn.text}/><LiveReply steps={[]} activity={agentTurn.activity} startedAt={agentTurn.started_at}/></>:<LiveReply steps={[]} activity={agentStartCancelling?'Stopping':agentWorking?agentTurn.activity:'Starting'} startedAt={agentWorking?agentTurn.started_at:undefined}/>}</div>}
                   {live&&agentTurn?.state==='failed'&&<p className="agent-failure">{agentTurn.error?.message||'The agent could not finish this change.'}</p>}
                   {live&&agentTurn?.state==='cancelled'&&<p className="muted">Stopped. The last committed model is still available.</p>}
                   {live&&!!agentTurn?.artifacts.length&&<section className="agent-artifacts">{agentTurn.artifacts.map(artifact=><button key={artifact.handle} onClick={()=>saveAgentArtifact(artifact)}>Save {artifact.format} export</button>)}</section>}
                 </div>
-              </div>
-              <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&!!references.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<textarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&references.length?(references.length>1?'Ask about A, B…  (⇧-click to add or remove)':'Ask about this selection…  (⇧-click to add more)'):activePane&&attachedImage?'Ask about this image…':'Ask for a part or a change…'} value={draft} maxLength={32768} onFocus={()=>{setPanel('assistant');if(chatId!==activeChatId&&chatId!=='new')void changeChat('select',chatId);}} onChange={event=>setDraft(chatId,event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();if(!agentWorking&&!agentSending&&!chatBusy){setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}}}/><div className="composer-actions"><button type="button" className="composer-settings" onClick={()=>setProviderOpen(true)}><Icon name="sliders" size={14}/>{providerSettings?.configured===false?'Connect agent':'Agent settings'}</button>{agentWorking||agentSending?<button className="send-prompt" title="Stop assistant" aria-label="Stop assistant" disabled={agentStartCancelling||agentTurn?.state==='cancelling'} type="button" onClick={()=>void stopAgent()}><span className="stop-glyph" aria-hidden="true"/></button>:<button className="send-prompt" title="Send message" aria-label="Send message" disabled={!project||!draft.trim()||chatBusy} type="submit"><Icon name="arrowUp" size={18}/></button>}</div></div></form>
+              </ConversationScroll>
+              <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&selectionNotice&&<div className="composer-notice" role="status">{selectionNotice}<button type="button" className="icon-button" aria-label="Dismiss selection notice" onClick={()=>setSelectionNotice('')}><Icon name="close" size={12}/></button></div>}{activePane&&!!references.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<textarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&references.length?(references.length>1?'Ask about A, B…  (⇧-click to add or remove)':'Ask about this selection…  (⇧-click to add more)'):activePane&&attachedImage?'Ask about this image…':'Ask for a part or a change…'} value={draft} onPaste={event=>{
+                const text=event.clipboardData.getData('text/plain');
+                if(!text)return;
+                event.preventDefault();
+                const input=event.currentTarget,start=input.selectionStart,end=input.selectionEnd;
+                setDraft(chatId,draft.slice(0,start)+text+draft.slice(end));
+                requestAnimationFrame(()=>{input.selectionStart=input.selectionEnd=start+text.length;});
+              }} onFocus={()=>{setPanel('assistant');if(chatId!==activeChatId&&chatId!=='new')void changeChat('select',chatId);}} onChange={event=>setDraft(chatId,event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();if(!agentWorking&&!agentSending&&!chatBusy){setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}}}/><div className="composer-actions"><button type="button" className="composer-settings" onClick={()=>setProviderOpen(true)}><Icon name="sliders" size={14}/>{providerSettings?.configured===false?'Connect agent':'Agent settings'}</button>{agentWorking||agentSending?<button className="send-prompt" title="Stop assistant" aria-label="Stop assistant" disabled={agentStartCancelling||agentTurn?.state==='cancelling'} type="button" onClick={()=>void stopAgent()}><span className="stop-glyph" aria-hidden="true"/></button>:<button className="send-prompt" title="Send message" aria-label="Send message" disabled={!project||!draft.trim()||chatBusy} type="submit"><Icon name="arrowUp" size={18}/></button>}</div></div></form>
             </div>;
           }}
         />
@@ -1058,9 +1126,10 @@ export function App({host}:{host?:SessionHost}={}) {
           ['anthropic_api','Anthropic API key'],
         ].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
         {agentBackend!=='anthropic_api'&&providerSettings?.cli?.filter(item=>item.backend===agentBackend).map(item=><p key={item.backend} className="muted">{item.installed?(item.authenticated?item.detail:`Installed · ${item.detail}`):item.detail}{item.path?` · ${item.path}`:''}</p>)}
+        {agentBackend!=='anthropic_api'&&<section className="agent-connection-setup"><strong>Cadpad modeling connection</strong><p>{providerSettings?.bridge_available?'MCP bridge available. Cadpad configures this connection automatically when launching your agent.':'MCP bridge unavailable. Modeling requires this connection. Restart Cadpad through the desktop launcher to restore it.'}</p><ol><li>Install your selected CLI and sign in.</li><li>Check that the MCP bridge is available below.</li><li>Save settings to enable modeling tools.</li></ol><button type="button" disabled={savingProvider} onClick={()=>invoke<AgentSettings>('agent_settings').then(setProviderSettings).catch(error=>setError(message(error)))}>Recheck connection</button></section>}
         {agentBackend==='anthropic_api'&&<><label>Model ID<input value={modelId} placeholder="Model ID from your API account" onChange={event=>setModelId(event.target.value)} autoComplete="off"/></label>
         <label>API key<input type="password" value={apiKey} placeholder={providerSettings?.configured?'Saved key · leave blank to keep':'Enter API key'} onChange={event=>setApiKey(event.target.value)} autoComplete="off"/></label></>}
-        <button disabled={savingProvider||(agentBackend==='anthropic_api'&&!modelId.trim())} onClick={()=>void saveProvider()}>{savingProvider?'Saving…':'Save settings'}</button>
+        <button disabled={savingProvider||(agentBackend==='anthropic_api'?!modelId.trim():!providerSettings?.bridge_available)} onClick={()=>void saveProvider()}>{savingProvider?'Saving…':'Save settings'}</button>
         {agentBackend==='anthropic_api'&&providerSettings?.configured&&<button disabled={savingProvider} onClick={()=>invoke('forget_agent_key').then(()=>{setProviderSettings({...providerSettings,configured:false});setApiKey('');}).catch(e=>setError(message(e)))}>Remove saved key</button>}
       </section>}
       <details className="connection-settings"><summary>Storage</summary><p>Remove unused caches and trim stored display data. Models, history, recordings and active exports are preserved. Display data can be restored when needed.</p><button disabled={cleaningCache} onClick={()=>void cleanCache()}>{cleaningCache?'Cleaning cache…':'Clean cache'}</button></details>
@@ -1075,7 +1144,9 @@ export function App({host}:{host?:SessionHost}={}) {
     {host.active&&createPortal(activityRail,host.rail)}
     {host.active&&createPortal(noticesPanel,host.notices)}
     {host.active&&createPortal(modelPanel,host.tools.model)}
-    {host.active&&motionTools.map(tool=>createPortal(motionPanel(tool.id),host.tools[tool.id],tool.id))}
+    {host.active&&createPortal(motionPanel('move'),host.tools.move,'move')}
+    {host.active&&createPortal(motionPanel('simulate'),host.tools.simulate,'simulate')}
+    {host.active&&createPortal(motionPanel('test'),host.tools.test,'test')}
     {host.active&&createPortal(assistantPanel,host.tools.assistant)}
     {canvasPanel}{host.active&&dialogs}
   </>;
@@ -1087,7 +1158,7 @@ export function App({host}:{host?:SessionHost}={}) {
         {noticesPanel}
         <div className="workbench-body">
           {modelPanel}
-          {motionPanel(motionTask)}
+          {motionTask==='test'?motionPanel('test'):<div className="simulation-sections"><details open><summary>Move<small>Position parts using joints</small></summary>{motionPanel('move')}</details><details open><summary>Physics<small>Preview forces and contact</small></summary>{motionPanel('simulate')}</details></div>}
           <div className="canvas-stack">
             {canvasPanel}
 

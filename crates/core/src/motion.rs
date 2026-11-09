@@ -423,6 +423,18 @@ impl Core {
             collision,
         })
     }
+    /// Add a joint without replacing existing mechanism settings.
+    pub async fn add_joint(&self, workspace: &str, base: &str, joint: crate::kinematics::Joint, actor: &str) -> Result<Job> {
+        let mut definition = {
+            let workspaces = self.workspaces.lock().await;
+            let ws = workspaces.get(workspace).ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+            if ws.stored.current != base { return Err(Error::domain("REVISION_CONFLICT", "Expected revision no longer current")); }
+            crate::kinematics::decode(&ws.stored.revisions[base].inputs.mechanism)?
+        };
+        definition.joints.push(joint);
+        let draft = self.stage_mechanism(workspace, base, None, definition, actor).await?;
+        self.build(workspace, base, &draft.id, actor).await
+    }
     pub async fn stage_mechanism(
         &self,
         workspace: &str,

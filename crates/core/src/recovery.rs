@@ -1,6 +1,6 @@
 //! Reconstruct native geometry without silently changing a revision or allocating
 //! another display mesh. Derived buffers can be repaired from a verified worker.
-use crate::{Core, Error, Inputs, Result, Worker, id};
+use crate::{Core, Error, Result, Worker, id};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -166,7 +166,7 @@ impl Core {
                 return Err(error);
             }
         };
-        let built=worker.request(revision,"build",json!({"source_root":source,"entry_point":inputs.entry_point,"parameters":inputs.parameters,"annotations":inputs.annotations,"collision":inputs.mechanism.get("collision"),"expected_dependencies":inputs.dependencies,"allow_empty":inputs.files==Inputs::default().files&&inputs.parameters==json!({}),"generate_mesh":false,"input_digest":input_digest,"geometry_cache":offered}),cancel).await;
+        let built=worker.request(revision,"build",json!({"source_root":source,"entry_point":inputs.entry_point,"parameters":inputs.parameters,"annotations":inputs.annotations,"collision":inputs.mechanism.get("collision"),"expected_dependencies":inputs.dependencies,"allow_empty":inputs.files.get(&inputs.entry_point).is_some_and(|source| source.trim()=="# Describe a part to get started.")&&inputs.parameters==json!({}),"generate_mesh":false,"input_digest":input_digest,"geometry_cache":offered}),cancel).await;
         let result = built.and_then(|result| verify(&expected, &result["data"]));
         if let Err(error) = result {
             let _ = worker.stop().await;
