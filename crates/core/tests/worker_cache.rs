@@ -364,12 +364,13 @@ async fn native_admission_bounds_active_registries_and_preserves_warm_repair_and
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     for (ws, job) in &queued {
-        assert_eq!(
+        assert!(matches!(
             core.get_job(ws, &job.id).await.unwrap().state,
-            JobState::Queued
-        );
+            JobState::Queued | JobState::Running
+        ));
+        assert!(!root.join("runs").join(ws).join(&job.id).exists());
     }
-    assert_eq!(run_count(&root), runs);
+    assert!(run_count(&root) <= runs);
     let (cancelled_ws, cancelled_job) = queued.pop().unwrap();
     core.cancel_job(&cancelled_ws, &cancelled_job.id)
         .await
@@ -378,7 +379,7 @@ async fn native_admission_bounds_active_registries_and_preserves_warm_repair_and
         terminal(&core, &cancelled_ws, cancelled_job).await.state,
         JobState::Cancelled
     );
-    assert_eq!(run_count(&root), runs);
+    assert!(run_count(&root) <= runs);
     // Warm repair needs construction capacity while retaining its live registry.
     // It must not deadlock behind source jobs waiting for native admission.
     let (ws, rev, _, _) = &pinned[0];

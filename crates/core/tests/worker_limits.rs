@@ -33,7 +33,12 @@ fn reaped(cache: &Path) {
         .unwrap()
         .parse()
         .unwrap();
-    // The guardian reaped its still-owned child before reporting completion.
+    // If the anchor terminates the supervisor, the OS may briefly retain the
+    // orphaned interpreter as a zombie before reaping it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(
         unsafe { libc::kill(pid, 0) },
         -1,

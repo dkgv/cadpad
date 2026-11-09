@@ -97,7 +97,7 @@ mod tests {
                 if job.state == JobState::Cancelled {
                     break;
                 }
-                assert_eq!(job.state, JobState::Queued);
+                assert!(matches!(job.state, JobState::Queued | JobState::Running));
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })

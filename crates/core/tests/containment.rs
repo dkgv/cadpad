@@ -61,6 +61,7 @@ scratch=Path(tempfile.mkdtemp()); (scratch/'allowed').write_text('ok')
 assert (scratch/'allowed').read_text()=='ok'
 (scratch/'symlink').symlink_to(outside)
 denied(lambda:(scratch/'symlink').read_text())
+(scratch/'symlink').unlink()
 denied(lambda:os.link(outside,scratch/'hardlink'))
 
 def connect(kind,address):
@@ -187,6 +188,8 @@ show(cq.Workplane().box(width,20,6).faces('>Z').workplane().hole(4),name='plate'
     let running = core.build(&ws, &revision, &draft.id, "user").await.unwrap();
     let pid = tokio::time::timeout(Duration::from_secs(60), async {
         'found: loop {
+            let job = core.get_job(&ws, &running.id).await.unwrap();
+            assert!(matches!(job.state, JobState::Queued | JobState::Running), "worker ended before marker: {:?}", job.diagnostics);
             if let Ok(entries) = std::fs::read_dir(root.join("artifacts").join(&ws)) {
                 for entry in entries.flatten() {
                     if let Ok(pid) =

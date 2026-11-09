@@ -348,7 +348,7 @@ mod tests {
         );
         assert_eq!(
             core.get_job(&ws, &job.id).await.unwrap().state,
-            JobState::Queued
+            JobState::Running
         );
         assert_eq!(core.get_project(&ws).await.unwrap()["revision"], rev);
         assert!(!core.root.join("runs").exists());

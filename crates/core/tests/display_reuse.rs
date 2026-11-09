@@ -37,6 +37,9 @@ async fn finished(core: &Core, ws: &str, job: Job) -> String {
     job.resulting_revision.unwrap()
 }
 async fn build(core: &Core, ws: &str) -> String {
+    build_source(core, ws, SOURCE).await
+}
+async fn build_source(core: &Core, ws: &str, source: &str) -> String {
     let base = core.get_project(ws).await.unwrap()["revision"]
         .as_str()
         .unwrap()
@@ -46,7 +49,7 @@ async fn build(core: &Core, ws: &str) -> String {
             ws,
             &base,
             None,
-            BTreeMap::from([("model.py".into(), SOURCE.into())]),
+            BTreeMap::from([("model.py".into(), source.into())]),
             "reuse-test",
         )
         .await
@@ -182,7 +185,7 @@ async fn restart_can_reuse_verified_display_without_skipping_source_and_missing_
     })
     .await
     .unwrap();
-    let second = build(&core, &ws).await;
+    let second = build_source(&core, &ws, &format!("{SOURCE}\n# second build")).await;
     assert_ne!(first, second);
     assert_eq!(calls(&root, &ws, &second), 0);
     let project = core.get_project(&ws).await.unwrap();
@@ -191,7 +194,7 @@ async fn restart_can_reuse_verified_display_without_skipping_source_and_missing_
         .as_str()
         .unwrap();
     std::fs::remove_file(cache(&root, &ws, &second).join(handle)).unwrap();
-    let third = build(&core, &ws).await;
+    let third = build_source(&core, &ws, &format!("{SOURCE}\n# third build")).await;
     let project = core.get_project(&ws).await.unwrap();
     assert_eq!(calls(&root, &ws, &third), 1);
     verify(&core, &root, &ws, &project).await;

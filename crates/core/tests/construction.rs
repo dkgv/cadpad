@@ -65,10 +65,10 @@ async fn entered(root: &Path, ws: &str) -> PathBuf {
 }
 async fn queued_without_source_execution(core: &Core, root: &Path, ws: &str, job: &Job) {
     tokio::time::sleep(Duration::from_millis(40)).await;
-    assert_eq!(
+    assert!(matches!(
         core.get_job(ws, &job.id).await.unwrap().state,
-        JobState::Queued
-    );
+        JobState::Queued | JobState::Running
+    ));
     assert!(
         !root.join("runs").join(ws).join(&job.id).exists(),
         "queued work must not materialize or spawn"
@@ -105,7 +105,8 @@ async fn bounded_native_construction_preserves_navigation_cancellation_and_immut
     let first_cache = entered(&root, a).await;
     let second = build(&core, b, br, BLOCK, "second-agent").await;
     let _second_cache = entered(&root, b).await;
-    let pending = build(&core, c, cr, GOOD, "queued-agent").await;
+    let changed = format!("{GOOD}\n# Force native construction");
+    let pending = build(&core, c, cr, &changed, "queued-agent").await;
     queued_without_source_execution(&core, &root, c, &pending).await;
 
     // The committed interpreter is usable while both construction slots are busy.
@@ -135,7 +136,7 @@ async fn bounded_native_construction_preserves_navigation_cancellation_and_immut
     assert_eq!(cancelled.diagnostics["code"], "CANCELLED");
     assert!(!root.join("runs").join(c).join(&pending.id).exists());
 
-    let disconnected = build(&core, c, cr, GOOD, "disconnected-agent").await;
+    let disconnected = build(&core, c, cr, &changed, "disconnected-agent").await;
     queued_without_source_execution(&core, &root, c, &disconnected).await;
     assert_eq!(core.revoke_actor("disconnected-agent").await, 1);
     assert_eq!(

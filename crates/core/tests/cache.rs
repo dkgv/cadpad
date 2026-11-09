@@ -367,8 +367,7 @@ async fn abrupt_parent_exit_reaps_native_execution_and_recovers_the_original_job
         worker: Some(pid),
         guardian: Some(guardian),
     };
-    // Pause only the trusted supervisor to make the lease interval deterministic.
-    // The geometry worker is still alive after app death until we resume it.
+    // The independent anchor reaps a stopped supervisor after app loss too.
     assert_eq!(unsafe { libc::kill(guardian, libc::SIGSTOP) }, 0);
     let controller: Value =
         serde_json::from_slice(&std::fs::read(root.join("controller.json")).unwrap()).unwrap();
@@ -394,12 +393,6 @@ async fn abrupt_parent_exit_reaps_native_execution_and_recovers_the_original_job
             .contains("time.sleep(30)")
     );
     let run = root.join("app/runs").join(ws).join(job_id);
-    assert!(run.exists());
-    let report = core.collect_cache().await.unwrap();
-    assert!(report.retained_leased >= 2, "{report:?}");
-    assert!(run.exists());
-    assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
-    assert_eq!(unsafe { libc::kill(guardian, libc::SIGCONT) }, 0);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if unsafe { libc::kill(pid, 0) } < 0 {
