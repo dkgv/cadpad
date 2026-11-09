@@ -23,6 +23,7 @@ export type SelectOrigin='replacement'|'additive'|'mode'|'marquee'|'marquee-add'
 export type SelectHandler=(entity:Entity|null,origin?:SelectOrigin,batch?:Entity[])=>void;
 type HighlightKind='hover'|'selected'|'reference'|'motion';
 export interface Part {
+  accuracy?:string;
   id: string; instance_id: string; name: string; position: Vec3;
   bounds: { min: Vec3; max: Vec3; size: Vec3 }; volume: number | null; area: number;
   features?:Record<string,string[]>;
@@ -692,7 +693,10 @@ export class CadViewport {
   resetView(){this.pointerLeave();if(this.presented)this.viewer.reset();}
   view(direction: 'iso' | 'front' | 'rear' | 'top' | 'bottom' | 'left' | 'right' | Vec3) {
     this.pointerLeave();if(!this.presented)return;
-    if(typeof direction==='string'){this.viewer.presetCamera(direction);return;}
+    if(typeof direction==='string'){
+      const directions:Record<string,Vec3>={front:[0,-1,0],rear:[0,1,0],left:[-1,0,0],right:[1,0,0],top:[0,0,1],bottom:[0,0,-1],iso:[1,-1,1]};
+      direction=directions[direction];
+    }
     const current=this.viewer.getCameraLocationSettings();
     const target=new THREE.Vector3(...current.target);
     const distance=new THREE.Vector3(...current.position).distanceTo(target);

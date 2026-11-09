@@ -50,9 +50,6 @@ export function ViewCube({getQuaternion,onView}:Props){
   },[]);
 
   return <div className="view-cube" role="group" aria-label="View orientation" onPointerDown={event=>event.stopPropagation()}>
-    <button type="button" className="view-cube-home" aria-label="Isometric view" title="Isometric view" onClick={()=>onView('iso')}>
-      <span aria-hidden="true"/>
-    </button>
     <div className="view-cube-stage">
       <div className="view-cube-orient" ref={orient}>
         <div className="view-cube-geom">
@@ -61,7 +58,7 @@ export function ViewCube({getQuaternion,onView}:Props){
               {[-1,0,1].flatMap(row=>[-1,0,1].map(column=>{
                 const center=row===0&&column===0,target=cubeTarget(direction,column,row);
                 const title=`${center?label:targetLabel(target)} view`;
-                return <button key={`${row}:${column}`} type="button" className={`view-cube-target ${center?'face':row&&column?'corner':'edge'}`} aria-label={title} title={title} onClick={()=>onView(center?direction:target)}>{center?label:null}</button>;
+                return <button key={`${row}:${column}`} type="button" className={`view-cube-target ${center?'face':row&&column?'corner':'edge'}`} style={row&&column?{transform:`translate(${column*50}%, ${row*50}%)`,borderRadius: '50%',zIndex:2}:undefined} aria-label={title} title={title} onClick={()=>onView(center?direction:target)}>{center?label:null}</button>;
               }))}
             </div>
           ))}

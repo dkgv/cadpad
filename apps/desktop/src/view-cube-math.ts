@@ -11,5 +11,5 @@ export function cameraToCssMatrix(qx:number,qy:number,qz:number,qw:number){
   const m00=1-(yy+zz),m01=xy+wz,m02=xz-wy;
   const m10=xy-wz,m11=1-(xx+zz),m12=yz+wx;
   const m20=xz+wy,m21=yz-wx,m22=1-(xx+yy);
-  return `matrix3d(${m00},${-m10},${m20},0,${-m01},${m11},${-m21},0,${m02},${-m12},${m22},0,0,0,0,1)`;
+  return `matrix3d(${m00},${-m01},${m02},0,${-m10},${m11},${-m12},0,${m20},${-m21},${m22},0,0,0,0,1)`;
 }
