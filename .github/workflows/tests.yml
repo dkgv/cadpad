@@ -36,7 +36,7 @@ permissions:
 jobs:
   rust:
     name: Rust tests
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +45,7 @@ jobs:
 
   python:
     name: Python tests
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5

@@ -31,7 +31,7 @@ concurrency:
 jobs:
   macos:
     name: macOS release candidate
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 240
     steps:
       - name: Checkout
