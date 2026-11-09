@@ -51,7 +51,7 @@ SOURCE_INPUTS = (
     "fixtures/physics_linkage.acceptance.json", "scripts/check_linkage.py",
     "crates/core/src/portable.rs", "crates/core/src/portable_recordings.rs",
     "crates/core/src/playback.rs", "crates/core/src/projects.rs", "crates/core/src/motion.rs",
-    "crates/core/src/tools.rs", "docs/tool-schema-v1.json", "crates/core/tests/playback.rs",
+    "crates/core/src/tools.rs", "crates/core/tests/fixtures/tool-schema-v1.json", "crates/core/tests/playback.rs",
     "crates/core/src/events.rs", "crates/agent/src/service.rs", "crates/agent/src/runner.rs",
     "crates/agent/tests/loop.rs", "apps/desktop/tests/workspace.test.mjs",
     "apps/desktop/tests/repair-view.test.mjs",
