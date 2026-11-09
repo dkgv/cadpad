@@ -130,11 +130,12 @@ def test_disposable_cache_failure_preserves_the_same_canonical_publication(tmp_p
         from cadpad_worker import geometry_cache
         monkeypatch.setattr(geometry_cache,'MAX_ENTRY_BYTES',1)
     else:
-        original=Model.artifact
-        def artifact(self,data,suffix):
-            if suffix=='.brep':raise OSError('fixture cache write failure')
-            return original(self,data,suffix)
-        monkeypatch.setattr(Model,'artifact',artifact)
+        import os
+        original=os.replace
+        def replace(source,target):
+            if str(target).endswith('.brep'):raise OSError('fixture cache write failure')
+            return original(source,target)
+        monkeypatch.setattr(os,'replace',replace)
     second,restored=build(tmp_path/'second')
     assert restored==result
     assert second._geometry_cache.manifest() is None
