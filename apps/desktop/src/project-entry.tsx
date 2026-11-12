@@ -1,11 +1,12 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {Icon,errorSummary} from './ui';
+import {SourceCatalog} from './source-catalog';
 
 export type EntrySelection={request_id:string;folder:string;entries:string[];current_entry?:string|null};
 type EntryPlan={direct:boolean;has_main:boolean;recommended:string|null;source_hash:string;diagnostic?:string|null;options:{id:string;label:string;available:boolean;reason:string;source:string|null}[]};
 export function ProjectEntry({selection,busy,error,onOpen,onCancel}:{selection:EntrySelection;busy:boolean;error:string;onOpen:(entry:string,adapter?:string)=>void;onCancel:()=>void}){
-  const dialog=useRef<HTMLDialogElement>(null),manual=useRef(false);
+  const dialog=useRef<HTMLDialogElement>(null),manual=useRef(false),requested=useRef('');
   const [query,setQuery]=useState('');
   const [entry,setEntry]=useState(()=>selection.current_entry||selection.entries.find(path=>path==='main.py')||selection.entries.find(path=>path==='model.py')||selection.entries[0]||'');
   const [plan,setPlan]=useState<EntryPlan|null>(null),[loading,setLoading]=useState(false),[analysisError,setAnalysisError]=useState(''),[attempt,setAttempt]=useState(0);
@@ -13,10 +14,10 @@ export function ProjectEntry({selection,busy,error,onOpen,onCancel}:{selection:E
   useEffect(()=>{if(!dialog.current?.open)dialog.current?.showModal();},[]);
   useEffect(()=>{
     if(!entry)return;let active=true;setLoading(true);setPlan(null);setAnalysisError('');setBuilder('');manual.current=false;
-    invoke<EntryPlan>('project_entry_plan',{requestId:selection.request_id,entry}).then(result=>{
+    invoke<EntryPlan>('project_entry_plan',{requestId:selection.request_id,entry,builder:requested.current||null}).then(result=>{
       if(!active||!Array.isArray(result.options))return;
-      setPlan(result);setBuilder(result.recommended||result.options.find(option=>option.available)?.id||'');
-      if(!manual.current)setMode(!result.direct&&!!result.recommended?'adapter':'existing');
+      setPlan(result);setBuilder(requested.current||result.recommended||result.options.find(option=>option.available)?.id||'');
+      if(!manual.current)setMode(requested.current||!result.direct&&!!result.recommended?'adapter':'existing');
     }).catch(error=>{if(active)setAnalysisError(errorSummary(JSON.stringify(error)));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};
   },[entry,selection.request_id,attempt]);
@@ -26,9 +27,10 @@ export function ProjectEntry({selection,busy,error,onOpen,onCancel}:{selection:E
   return <dialog ref={dialog} className="project-entry-dialog" aria-labelledby="project-entry-title" onCancel={event=>{event.preventDefault();if(!busy)onCancel();}}>
     <form onSubmit={event=>{event.preventDefault();if(entry&&!busy&&(mode==='existing'||selected))onOpen(entry,mode==='adapter'?builder:undefined);}}>
       <header><div><h2 id="project-entry-title">Set up entry point</h2><span className="project-entry-folder"><Icon name="folder" size={15}/>{selection.folder}</span></div><button type="button" className="icon-button" aria-label="Cancel opening project" disabled={busy} onClick={onCancel}><Icon name="close"/></button></header>
+      <details className="entry-catalog" open><summary>Browse project builders</summary><SourceCatalog requestId={selection.request_id} disabled={busy} onChoose={(path,builder)=>{requested.current=builder;if(path===entry){setBuilder(builder);setMode('adapter');setAttempt(value=>value+1);}else setEntry(path);}}/></details>
       <p>Choose the Python source for this model.</p>
       {selection.entries.length>6&&<input className="project-entry-search" type="search" aria-label="Find Python file" placeholder="Find a Python file…" value={query} onChange={event=>setQuery(event.target.value)} disabled={busy}/>}
-      <fieldset className="project-entry-list" disabled={busy}><legend>Python files</legend>{entries.map(path=><label key={path} className={path===entry?'selected':''}><input type="radio" name="entry-point" value={path} checked={path===entry} onChange={()=>setEntry(path)}/><code>{path}</code></label>)}{!entries.length&&<p className="muted">No matching files.</p>}</fieldset>
+      <fieldset className="project-entry-list" disabled={busy}><legend>Python files</legend>{entries.map(path=><label key={path} className={path===entry?'selected':''}><input type="radio" name="entry-point" value={path} checked={path===entry} onChange={()=>{requested.current='';setEntry(path);}}/><code>{path}</code></label>)}{!entries.length&&<p className="muted">No matching files.</p>}</fieldset>
       {loading&&<p className="entry-analysis" role="status">Finding geometry builders…</p>}
       {plan&&<fieldset className="entry-method" disabled={busy}><legend>How to open it</legend>
         <label><input type="radio" name="entry-method" checked={mode==='adapter'} disabled={!available} onChange={()=>{manual.current=true;setMode('adapter');}}/><span><strong>Create a Cadpad entry point</strong><small>Call a geometry builder and display its result. Skip the script’s main export routine.</small></span></label>

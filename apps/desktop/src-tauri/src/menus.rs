@@ -127,7 +127,7 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
     for (id, label) in [
         ("face", "Pick Faces"),
         ("edge", "Pick Edges"),
-        ("part", "Pick Parts"),
+        ("part", "Pick Objects"),
     ] {
         selection.push((
             id,
@@ -152,9 +152,9 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
     )?;
     let mut scopes = Vec::new();
     for (id, label) in [
-        ("selected", "Selected Part"),
+        ("selected", "Selected Object"),
         ("pinned", "Pinned Dimensions"),
-        ("all", "All Visible Parts"),
+        ("all", "All Visible Objects"),
     ] {
         scopes.push((
             id,

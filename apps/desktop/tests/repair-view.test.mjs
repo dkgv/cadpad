@@ -54,7 +54,7 @@ beforeEach(()=>{
     display(host){const cadBody=document.createElement('div'),cadView=document.createElement('div');host.append(cadBody,cadView);return {cadBody,cadView,setSizes(){},resize(){globalThis.__cadpadViewportHarness.currentViewer?.resize();},showTools(){},showToolsPanel(){},showInfo(){},dispose(){cadBody.remove();cadView.remove();}};},
     viewer(_display,_options,notify){
       const scene=new THREE.Scene(),canvas=document.createElement('canvas'),state=new Map([['control','orbit'],['ortho',true]]);
-      viewer={scene,state,renderer:{domElement:canvas},ready:false,rendered:null,isoCalls:0,failNext:false,
+      viewer={scene,state,renderer:{domElement:canvas,renderLists:{dispose(){}},setSize(width,height){this.size=[width,height];}},ready:false,rendered:null,isoCalls:0,failNext:false,
         get nestedGroup(){return this.rendered.nestedGroup;},get camera(){return this.rendered.camera;},get ortho(){return this.state.get('ortho');},
         hasAnimationLoop:false,toggleAnimationLoop(flag){this.hasAnimationLoop=flag;},idPicker:{setDirty(){}},_studioManager:{setCamera(){}},
         render(tree){
@@ -313,4 +313,70 @@ test('move mode persistently marks draggable geometry and explains fixed parts i
   viewport.setVisible('carriage',true);assert.ok(viewport.highlights.some(item=>item.kind==='motion'));
   viewport.setManipulation(false,()=>{});assert.equal(viewport.highlights.filter(item=>item.kind==='motion').length,0);assert.equal(viewport.motionStatusElement.hidden,true);
   status.remove();
+});
+
+test('replaying unchanged assembly visibility causes no scene paints',async()=>{
+  const initial=model();await viewport.load(initial.scene,'r1',initial.artifact,'workspace-1');
+  let paints=0;const update=viewer.update.bind(viewer);viewer.update=(...args)=>{paints++;return update(...args);};
+  for(let i=0;i<100;i++)for(const part of initial.scene.parts)viewport.setVisible(part.instance_id,true);
+  assert.equal(paints,0);
+  viewport.setVisible('rail',false);assert.ok(paints>0);
+  const hiddenPaints=paints;viewport.setVisible('rail',false);assert.equal(paints,hiddenPaints);
+  viewport.setVisible('rail',true);assert.ok(paints>hiddenPaints);
+  const visiblePaints=paints;viewport.setVisible('rail',true);assert.equal(paints,visiblePaints);
+});
+
+
+test('hidden tabs release mesh arrays and picking/render resources while preserving interaction state',async()=>{
+  const initial=model();
+  const artifact=async handle=>(await initial.artifact(handle)).slice(0);
+  for(let cycle=0;cycle<24;cycle++){
+    await viewport.load(initial.scene,'r1',artifact,'workspace-1');
+    viewer.setCameraLocationSettings([130,90,160],null,[10,20,30],1.7);
+    viewport.setVisible('carriage',false);
+    viewport.selectEntity({revision:'r1',instance_id:'rail',entity_id:'face:0'});
+    const camera=viewer.getCameraLocationSettings();
+    assert.ok(viewport.pickGeometry.size>0);
+    assert.ok(viewport.revisionBytes.stats.bytes>0);
+    viewport.suspend();
+    assert.equal(viewer.ready,false);
+    assert.equal(viewer.rendered,null);
+    assert.equal(viewport.pickGeometry.size,0);
+    assert.deepEqual(viewport.revisionBytes.stats,{entries:0,bytes:0});
+    assert.equal(viewport.renderStorage,null);
+    assert.equal(viewport.renderedBuffers,null);
+    assert.deepEqual(viewer.renderer.size,[1,1]);
+    assert.equal(frames.size,0);
+    assert.deepEqual(viewport.sceneState('workspace-1','r1'),{hidden:['carriage'],selection:{revision:'r1',instance_id:'rail',entity_id:'face:0'}});
+    await viewport.load(initial.scene,'r1',artifact,'workspace-1');
+    cameraEqual(viewer.getCameraLocationSettings(),camera);
+    assert.equal(viewport.hasScene('workspace-1','r1'),true);
+    assert.equal(group('carriage').front.material.visible,false);
+    viewport.suspend();
+  }
+});
+
+test('suspending a pending tab rejects late geometry and keeps its caches empty',async()=>{
+  const initial=model(),pending=deferred();
+  const loading=viewport.load(initial.scene,'r1',async handle=>{await pending.promise;return initial.artifact(handle);},'workspace-1');
+  viewport.suspend();pending.resolve();await loading;
+  assert.equal(viewer.ready,false);
+  assert.equal(viewport.pickGeometry.size,0);
+  assert.deepEqual(viewport.revisionBytes.stats,{entries:0,bytes:0});
+  assert.equal(viewport.hasScene('workspace-1','r1'),false);
+});
+
+
+test('suspended mesh ArrayBuffers can be garbage collected', {skip:typeof globalThis.gc!=='function'}, async()=>{
+  const initial=model();
+  await viewport.load(initial.scene,'r1',async handle=>(await initial.artifact(handle)).slice(0),'workspace-1');
+  const bytes=new WeakRef(viewport.pickGeometry.values().next().value.buffers.vertices.buffer);
+  viewport.suspend();
+  let released=false;
+  for(let attempt=0;attempt<12;attempt++){
+    await new Promise(resolve=>setImmediate(resolve));
+    globalThis.gc();
+    if(!bytes.deref()){released=true;break;}
+  }
+  assert.ok(released,'the suspended viewer must not retain typed array storage through caches, geometry or callbacks');
 });

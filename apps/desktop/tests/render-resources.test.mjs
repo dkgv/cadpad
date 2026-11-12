@@ -81,3 +81,26 @@ test('pinned viewer constructs shared render buffers with distinct picking and s
     wires.dispose();assert.equal(live.size,0);assert.equal(info.memory.geometries,0);
   }finally{await fs.rm(directory,{recursive:true,force:true});}
 });
+
+test('Cadpad hover bypasses the pinned vendor GPU picker and mouse-move paints',async()=>{
+  const vendor=new URL('../../../node_modules/three-cad-viewer/dist/three-cad-viewer.esm.js',import.meta.url);
+  const text=await fs.readFile(vendor,'utf8'),parsed=ts.createSourceFile(vendor.pathname,text,ts.ScriptTarget.Latest,true);
+  let controllerClass;
+  function visit(node){if(ts.isClassDeclaration(node)&&node.name?.text==='PickingController')controllerClass=node;ts.forEachChild(node,visit);}visit(parsed);
+  assert.ok(controllerClass);
+  const methods=['hoverPreselectActive','handleHover'].map(name=>controllerClass.members.find(member=>member.name?.getText(parsed)===name)?.getText(parsed));
+  assert.ok(methods.every(Boolean));
+  let move;
+  function arrow(node){if(ts.isBinaryExpression(node)&&node.left.getText(parsed)==='this.onIdHoverMove')move=node.right.getText(parsed);ts.forEachChild(node,arrow);}arrow(controllerClass);
+  assert.ok(move);
+  const callbacks=[];let paints=0,picks=0;
+  const controller={...new Function(`return ({${methods.join(',')}})`)(),host:{shapes:{format:'CAD'},studioActive:false,ready:true,hasAnimationLoop:false,rendered:{controls:{isInteracting:()=>false}},update(){paints++;}},handleIdHover(){picks++;}};
+  const onMove=new Function('requestAnimationFrame',`return (${move})`).call(controller,callback=>callbacks.push(callback));
+  onMove({clientX:1,clientY:2});controller.handleHover();assert.equal(callbacks.length,1);assert.equal(picks,1);callbacks.pop()();assert.equal(paints,1);
+  const helper=await fs.readFile(new URL('../../../packages/viewer/src/render-policy.ts',import.meta.url),'utf8');
+  const compiled=ts.transpileModule(helper,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
+  const {useCadpadHover}=await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+  useCadpadHover({pickingController:controller});
+  for(let i=0;i<100;i++){onMove({clientX:i,clientY:i});controller.handleHover();}
+  assert.equal(callbacks.length,0);assert.equal(paints,1);assert.equal(picks,1);
+});

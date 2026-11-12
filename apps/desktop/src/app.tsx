@@ -1,3 +1,4 @@
+import {connectNativeStream,messageChannel} from './native-stream';
 import {JointWizard} from './joint-wizard';
 import {createPortal} from 'react-dom';
 import type {SessionHost,ToolTab} from './session-host';
@@ -16,10 +17,15 @@ import {MotionParts} from './motion-parts';
 import {BuildDiagnostics} from './build-diagnostics';
 import {ProjectEntry,type EntrySelection} from './project-entry';
 import {ModelHistory} from './model-history';
+import {ExternalChangesDialog} from './external-changes';
+import {AppAlert} from './app-alert';
 import {ProjectExplorer} from './explorer';
+import {SourceCatalog} from './source-catalog';
+import {QuickModelSelector} from './quick-model';
 import {LiveReply,FinishedReply,Markdown,type AgentStep} from './agent-steps';
 import {useDockDrag} from './dock-drag';
 import {ViewCube,type ViewCubeDirection} from './view-cube';
+import {SettingsDialog,type AgentSettings,type McpSettings,type ModelChoice} from './settings-dialog';
 
 const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren>(function ConversationScroll({children},forwardedRef){
   const nodeRef=useRef<HTMLDivElement|null>(null);
@@ -41,9 +47,12 @@ const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren
 type Parameter = {value:number;unit:string;minimum:number|null;maximum:number|null;description:string};
 type Recording = {id:string;name:string;revision:string;source_mode:string;frame_count:number;duration_s:number;capacity_reached:boolean};
 type PlaybackReply={snapshot:MotionSnapshot;recordings:Recording[];frame_times_s:number[]|null};
-export type Project = { import_candidates?:string[]; display_generation?:string;display_error?:{code:string;message:string}|null;external_tracking:boolean; recordings:Recording[]; workspace_id:string; revision:string; files?:string[]; assets?:Record<string,string>; entry_point?:string; model:SceneModel; parameters:Record<string,Parameter>;activity:Job[]; name:string|null; saved_revision:string|null; dirty:boolean;motion:MotionSnapshot };
+export type Project = { unsaved_changes?:boolean;model_parent?:string;model_source_dirty?:boolean;model_entry?:{entry:string;builder:string}|null; import_candidates?:string[]; display_generation?:string;display_error?:{code:string;message:string}|null;external_tracking:boolean; recordings:Recording[]; workspace_id:string; revision:string; files?:string[]; assets?:Record<string,string>; entry_point?:string; model:SceneModel; parameters:Record<string,Parameter>;activity:Job[]; name:string|null; saved_revision:string|null; dirty:boolean;motion:MotionSnapshot };
+/** Model views create private adapter revisions without editing the user's project. */
+export function hasUnsavedChanges(project:Project){
+  return project.unsaved_changes??(project.model_parent?!!project.model_source_dirty:project.dirty);
+}
 type Job = { id:string;state:string;diagnostics:unknown;actor?:string };
-type McpSettings = {config:unknown;bridge_installed:boolean;sessions:{id:string;client_name:string;connected:boolean;calls:number}[]};
 type AgentTurn = {id:string;workspace_id:string;chat_id?:string;state:'running'|'cancelling'|'cancelled'|'succeeded'|'failed';text:string;activity:string;error:{code:string;message:string}|null;artifacts:{handle:string;format:string;revision:string}[];steps?:AgentStep[];started_at?:number};
 type PendingAgentStart={workspace:string;cancelRequested:boolean;turn?:AgentTurn;stopping?:Promise<AgentTurn>};
 type ChatReference={letter:string;instance_id:string;entity_id:string;part:string;label:string;file?:string;line?:number};
@@ -78,8 +87,6 @@ async function encodeReferenceImage(file:File):Promise<AttachedImage>{
 type ViewStatus={workspace:string;revision:string;generation?:string;phase:'loading'|'ready'|'missing'|'failed';message?:string};
 type CameraAction=ViewCubeDirection|'fit';
 type InterferenceResult={revision:string;pose_version:number;exact:{pairs:{instances:[string,string];distance_mm:number;intersection_volume_mm3:number;interfering:boolean}[]}|null};
-type CliDetection = {backend:string;installed:boolean;authenticated:boolean;path?:string;detail:string};
-type AgentSettings = {provider:string;backend?:string;model:string;configured:boolean;credential_storage:string;cli?:CliDetection[];bridge_available?:boolean};
 const message = (error: unknown) => error instanceof Error ? error.message : typeof error === 'object' ? JSON.stringify(error,null,2) : String(error);
 const errorCode=(error:unknown)=>{
   if(error&&typeof error==='object'&&'code' in error&&typeof (error as {code:unknown}).code==='string')return (error as {code:string}).code;
@@ -108,7 +115,11 @@ export function App({host}:{host?:SessionHost}={}) {
   const [panelSizes,resizePanel]=usePanelSizes();
   const hoverStatus=useRef<HTMLSpanElement>(null);
   const container = useRef<HTMLDivElement>(null), viewer = useRef<CadViewport|null>(null);
+  const sessionAlive=useRef(true);
+  useEffect(()=>{sessionAlive.current=true;return()=>{sessionAlive.current=false;};},[]);
   const [project,setProject] = useState<Project|null>(null), [job,setJob] = useState<Job|null>(null);
+  /** Chrome Explorer follows the focused canvas model without remounting shared sidebars. */
+  const [focusProject,setFocusProject]=useState<Project|null>(null);
   const [error,setError] = useState(''), [selection,updateSelection] = useState<Entity|null>(null);
   const selectionIntent=useRef<{workspace:string;entity:Entity}|null>(null);
   // `references` is everything selected, in click order; `selection` is the
@@ -160,6 +171,23 @@ export function App({host}:{host?:SessionHost}={}) {
     setMotionTask(task);setMotionOpen(opening);if(opening)setModelOpen(false);setFocusedTool('motion');
   }
   useEffect(()=>{if(!host)return;setModelOpen(host.visibleTools.includes('model'));setAssistantOpen(host.visibleTools.includes('assistant'));setMotionOpen(host.visibleTools.some(tool=>['move','simulate','test'].includes(tool)));},[host?.visibleTools.join(',')]);
+  useEffect(()=>{
+    if(!host?.active||!project)return;
+    const onSelect=(event:Event)=>{
+      const detail=(event as CustomEvent<{workspace:string;revision:string;instanceId:string}>).detail;
+      if(detail.workspace!==project.workspace_id)return;
+      if(viewer.current?.hasScene(detail.workspace,detail.revision))viewer.current.select(detail.instanceId);
+      setSelection({revision:detail.revision,instance_id:detail.instanceId,entity_id:'part:0'});
+    };
+    const onVisibility=(event:Event)=>{
+      const detail=(event as CustomEvent<{workspace:string;hidden:string[]}>).detail;
+      if(detail.workspace!==project.workspace_id)return;
+      applyVisibility(new Set(detail.hidden));
+    };
+    window.addEventListener('cadpad-canvas-select',onSelect);
+    window.addEventListener('cadpad-canvas-visibility',onVisibility);
+    return()=>{window.removeEventListener('cadpad-canvas-select',onSelect);window.removeEventListener('cadpad-canvas-visibility',onVisibility);};
+  },[host?.active,project?.workspace_id,project?.revision]);
   const [advancedView,setAdvancedView]=useState(false);
   const [editing,setEditing]=useState(false);
   const menuAction=useRef<(action:string)=>void>(()=>{});
@@ -196,12 +224,31 @@ export function App({host}:{host?:SessionHost}={}) {
     return()=>window.clearTimeout(timer);
   },[selectionNotice]);
   const [cleaningCache,setCleaningCache]=useState(false);
-  const [workspaces,setWorkspaces]=useState<{workspace_id:string;name:string;running:number}[]>([]);
+  const [workspaces,setWorkspaces]=useState<{workspace_id:string;name:string;running:number;model_parent?:string}[]>([]);
   const [external,setExternal] = useState<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}|null>(null);
+  const [externalReviewOpen,setExternalReviewOpen]=useState(false);
+  useEffect(()=>setExternalReviewOpen(false),[project?.workspace_id]);
+  useEffect(()=>{if(!external?.changed)setExternalReviewOpen(false);},[external?.changed]);
   const [externalResolutions,setExternalResolutions]=useState<Record<string,'keep_cadpad'|'use_external'>>({});
   const reviewFingerprint=useRef('');
   const activeWorkspace = useRef<string|null>(null);
   const currentProject=useRef<Project|null>(null);
+  /** Shared chrome chats stay on the project; agent turns and Explorer follow the focused canvas. */
+  const displayProject=host?.chrome&&host.focusWorkspace&&host.focusWorkspace!==(project?.workspace_id||'')&&focusProject?.workspace_id===host.focusWorkspace?focusProject:project;
+  const remoteSelection=host?.chrome&&host.focusWorkspace!==project?.workspace_id;
+  const focusedSelection=remoteSelection&&displayProject&&host?.focusSelection&&host.focusSelection.workspace===displayProject.workspace_id&&host.focusSelection.revision===displayProject.revision?host.focusSelection:undefined;
+  const composerReferences=remoteSelection?focusedSelection?.entities??[]:references;
+  const composerOmitted=remoteSelection?focusedSelection?.omitted??new Set<string>():omitted;
+  useEffect(()=>{
+    if(!project||!hostRef.current?.onSelection)return;
+    hostRef.current.onSelection({workspace:project.workspace_id,revision:project.revision,entities:references,omitted,
+      capture:referenceView,toggleOmitted,clear:()=>{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}});
+  },[references,omitted,project?.workspace_id,project?.revision]);
+  const chatScope=()=>{
+    const projectWs=hostRef.current?.projectWorkspace,focusWs=hostRef.current?.focusWorkspace;
+    if(hostRef.current?.chrome&&projectWs)return projectWs;
+    return focusWs||projectWs||activeWorkspace.current;
+  };
   const [settingsOpen,setSettingsOpen]=useState(false),[mcpSettings,setMcpSettings]=useState<McpSettings|null>(null);
   const [agentActivity,setAgentActivity]=useState('');
   const [chat,setChat]=useState<ChatMessage[]>([]),[agentTurn,setAgentTurn]=useState<AgentTurn|null>(null);
@@ -229,10 +276,10 @@ export function App({host}:{host?:SessionHost}={}) {
   function draftFor(chatId:string){
     const selected=selectedChat.current;
     if(selected&&chatId===(selected.id??'new'))return prompt;
-    return chatDrafts.current.get(`${selected?.workspace||activeWorkspace.current||''}:${chatId}`)||'';
+    return chatDrafts.current.get(`${selected?.workspace||chatScope()||''}:${chatId}`)||'';
   }
   function setDraft(chatId:string,value:string){
-    const workspace=selectedChat.current?.workspace||activeWorkspace.current;
+    const workspace=selectedChat.current?.workspace||chatScope();
     if(!workspace)return;
     if(chatId===(selectedChat.current?.id??'new')||chatId===activeChatId){setPrompt(value);return;}
     chatDrafts.current.set(`${workspace}:${chatId}`,value);bumpChatDrafts(version=>version+1);
@@ -247,12 +294,13 @@ export function App({host}:{host?:SessionHost}={}) {
   }
   const pendingAgentStarts=useRef(new Map<string,PendingAgentStart>());
   const [agentStarts,setAgentStarts]=useState<Record<string,'starting'|'cancelling'>>({});
-  const agentSending=!!project&&!!agentStarts[project.workspace_id];
-  const agentStartCancelling=!!project&&agentStarts[project.workspace_id]==='cancelling';
+  const agentScope=host?.chrome?(host.projectWorkspace||host.focusWorkspace):project?.workspace_id;
+  const agentSending=!!agentScope&&!!agentStarts[agentScope];
+  const agentStartCancelling=!!agentScope&&agentStarts[agentScope]==='cancelling';
   // Chat loads and live turn updates are independent; streaming must not drop a
   // just-fetched user message that refreshChat is about to commit.
   const chatEpoch=useRef(0);
-  const [providerOpen,setProviderOpen]=useState(false),[providerSettings,setProviderSettings]=useState<AgentSettings|null>(null);
+  const [providerOpen,setProviderOpen]=useState(false),[providerSettings,setProviderSettings]=useState<AgentSettings|null>(null),[agentModels,setAgentModels]=useState<ModelChoice[]|null>(null);
   const [agentBackend,setAgentBackend]=useState('claude_cli');
   const [modelId,setModelId]=useState(''),[apiKey,setApiKey]=useState(''),[savingProvider,setSavingProvider]=useState(false);
   const liveTurn=useRef<AgentTurn|null>(null);
@@ -274,16 +322,16 @@ export function App({host}:{host?:SessionHost}={}) {
     if(chatChangePending.current===workspace)return;
     const epoch=++chatEpoch.current;
     const result=await invoke<{messages:ChatMessage[];turn:AgentTurn|null;active_chat_id?:string;chats?:ChatSummary[]}>('agent_conversation',{workspace});
-    if(activeWorkspace.current===workspace&&chatEpoch.current===epoch)acceptChat(workspace,result);
+    if(chatScope()===workspace&&chatEpoch.current===epoch)acceptChat(workspace,result);
   }
   async function changeChat(action:'new'|'select'|'remove'|'restore',id?:string):Promise<boolean>{
-    const workspace=activeWorkspace.current;if(!workspace||chatChangePending.current||pendingAgentStarts.current.has(workspace))return false;
+    const workspace=chatScope();if(!workspace||chatChangePending.current||pendingAgentStarts.current.has(workspace))return false;
     chatChangePending.current=workspace;setChatBusy(true);chatEpoch.current++;setError('');
     try{
       const result=await invoke<{messages:ChatMessage[];turn:AgentTurn|null;active_chat_id:string;chats:ChatSummary[]}>('agent_chat',{workspace,action,chatId:id??null});
-      if(activeWorkspace.current!==workspace)return false;
+      if(chatScope()!==workspace)return false;
       acceptChat(workspace,result);if(action==='new'){setPrompt('');setAttachedImage(null);}setOmitted(new Set());requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());return true;
-    }catch(error){if(activeWorkspace.current===workspace)setError(message(error));return false;}
+    }catch(error){if(chatScope()===workspace)setError(message(error));return false;}
     finally{chatChangePending.current=null;setChatBusy(false);}
   }
   function starting(workspace:string,state?:'starting'|'cancelling'){
@@ -326,16 +374,18 @@ export function App({host}:{host?:SessionHost}={}) {
     }catch(error){setError(message(error));}finally{setEditingMessageBusy(false);}
   }
   async function sendPrompt(submission?:string,chatId?:string){
-    const current=currentProject.current;
+    const current=displayProject||currentProject.current;
+    // Chrome keeps one project chat book mounted across model canvases.
+    const workspace=chatScope();
     const targetChat=chatId??selectedChat.current?.id??activeChatId??undefined;
     const submitted=submission??(targetChat?draftFor(targetChat):prompt);
-    if(chatChangePending.current||!current||activeWorkspace.current!==current.workspace_id||!submitted.trim()||pendingAgentStarts.current.has(current.workspace_id))return;
-    if(liveTurn.current?.workspace_id===current.workspace_id&&['running','cancelling'].includes(liveTurn.current.state))return;
-    const workspace=current.workspace_id,previousId=liveTurn.current?.id;
+    if(chatChangePending.current||!current||!workspace||!submitted.trim()||pendingAgentStarts.current.has(workspace))return;
+    if(liveTurn.current?.workspace_id===workspace&&['running','cancelling'].includes(liveTurn.current.state))return;
+    const previousId=liveTurn.current?.id;
     const pending:PendingAgentStart={workspace,cancelRequested:false};
     pendingAgentStarts.current.set(workspace,pending);starting(workspace,'starting');chatEpoch.current++;setError('');setNotice('');
     // Show the outbound message immediately; refreshChat reconciles with the server.
-    if(activeWorkspace.current===workspace){
+    if(chatScope()===workspace){
       const optimistic={role:'user',text:submitted,image:attachedImage?.data};
       const base=!targetChat||targetChat===activeChatId?chat:chatMessages[targetChat]||[];
       const next=[...base,optimistic];
@@ -343,17 +393,18 @@ export function App({host}:{host?:SessionHost}={}) {
       if(targetChat)setChatMessages(current=>({...current,[targetChat]:next}));
     }
     try{
-      const attached=current.revision===referencesNow.current[0]?.revision?referencesNow.current.filter(item=>!omitted.has(entityKey(item))):[];
-      const image=attachedImage?.data??(attached.length?referenceView():null);
-      const turn=await invoke<AgentTurn>('agent_start',{workspace,prompt:submitted,references:attached,image,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
+      const candidates=remoteSelection?focusedSelection?.entities??[]:referencesNow.current;
+      const attached=current.revision===candidates[0]?.revision?candidates.filter(item=>!composerOmitted.has(entityKey(item))):[];
+      const image=attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
+      const turn=await invoke<AgentTurn>('agent_start',{workspace,...(current.workspace_id!==workspace?{modelWorkspace:current.workspace_id}:{}),prompt:submitted,references:attached,image,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
       if(turn.workspace_id!==workspace)throw new Error('Agent reply belongs to another workspace');
       pending.turn=turn;
-      if(activeWorkspace.current===workspace&&(!liveTurn.current||liveTurn.current.id===turn.id||liveTurn.current.id===previousId))showTurn(turn);
+      if(chatScope()===workspace&&(!liveTurn.current||liveTurn.current.id===turn.id||liveTurn.current.id===previousId))showTurn(turn);
       if(pending.cancelRequested)await cancelAcceptedStart(pending);
-      if(activeWorkspace.current===workspace){if(!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);setAttachedImage(null);setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}await refreshChat(workspace);}
+      if(chatScope()===workspace){if(!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}await refreshChat(workspace);}
     }catch(error){
-      if(pending.cancelRequested&&!pending.turn){if(activeWorkspace.current===workspace)void refreshChat(workspace).catch(()=>{});return;}
-      if(activeWorkspace.current===workspace){const failure=error as {code?:string};if(failure.code==='LLM_NOT_CONFIGURED')setProviderOpen(true);setError(message(error));void refreshChat(workspace).catch(()=>{});}
+      if(pending.cancelRequested&&!pending.turn){if(chatScope()===workspace)void refreshChat(workspace).catch(()=>{});return;}
+      if(chatScope()===workspace){const failure=error as {code?:string};if(failure.code==='LLM_NOT_CONFIGURED')setProviderOpen(true);setError(message(error));void refreshChat(workspace).catch(()=>{});}
     }
     finally{if(pendingAgentStarts.current.get(workspace)===pending){pendingAgentStarts.current.delete(workspace);starting(workspace);}}
   }
@@ -376,13 +427,13 @@ export function App({host}:{host?:SessionHost}={}) {
     void encodeReferenceImage(file).then(image=>{setAttachedImage(image);setPanel('assistant');setError('');}).catch(error=>setError(message(error)));
   }
   function referenceChips():(ChatReference&{entity:Entity;omitted:boolean})[]{
-    const parts=project?.model.parts||[];let next=0;
-    const included=references.filter(item=>!omitted.has(entityKey(item))).length;
-    return references.map(entity=>{
-      const part=parts.find(item=>item.instance_id===entity.instance_id),left=omitted.has(entityKey(entity));
+    const parts=displayProject?.model.parts||[];let next=0;
+    const included=composerReferences.filter(item=>!composerOmitted.has(entityKey(item))).length;
+    return composerReferences.map(entity=>{
+      const part=parts.find(item=>item.instance_id===entity.instance_id),left=composerOmitted.has(entityKey(entity));
       const kind=entity.entity_id.split(':')[0],features=Object.entries(part?.features||{}).filter(([,ids])=>ids.includes(entity.entity_id)).map(([name])=>name);
       const letter=left||included<2?'':referenceLetter(next++);
-      return {entity,omitted:left,letter,instance_id:entity.instance_id,entity_id:entity.entity_id,part:part?.name||entity.instance_id,label:features.length?features.join(', '):kind==='part'?'Whole part':humanLabel(kind),file:part?.source?.file,line:part?.source?.line};
+      return {entity,omitted:left,letter,instance_id:entity.instance_id,entity_id:entity.entity_id,part:part?.name||entity.instance_id,label:features.length?features.join(', '):kind==='part'?'Object':humanLabel(kind),file:part?.source?.file,line:part?.source?.line};
     });
   }
   function toggleOmitted(entity:Entity){setOmitted(current=>{const next=new Set(current),key=entityKey(entity);next.has(key)?next.delete(key):next.add(key);return next;});}
@@ -399,7 +450,7 @@ export function App({host}:{host?:SessionHost}={}) {
     setSavingProvider(true);setError('');
     try{
       const settings=await invoke<AgentSettings>('configure_agent',{backend:agentBackend,model:modelId,apiKey:apiKey||null});
-      setProviderSettings(settings);setAgentBackend(settings.backend||settings.provider);setApiKey('');
+      setProviderSettings(settings);setAgentBackend(settings.backend||settings.provider);setModelId(settings.model||'');setApiKey('');
       setProviderOpen(!settings.configured);
       setNotice(settings.configured?'Agent settings saved. Send your request to start modeling.':settings.credential_storage==='local_cli'?'CLI selected. Sign in with that CLI if Cadpad still shows it as unavailable.':'Model saved. Add your API key to start modeling.');
     }
@@ -531,8 +582,8 @@ export function App({host}:{host?:SessionHost}={}) {
       }
     }finally{sendingMotion.current=false;scheduleTarget();}
   }
-  function adopt(next:Project) { if(hostRef.current&&next.workspace_id!==hostRef.current.workspaceId){hostRef.current.onOpen(next);return;} if(!next||typeof next.workspace_id!=='string'||typeof next.revision!=='string'||!Array.isArray(next.model?.parts)||!Array.isArray(next.activity)||!next.parameters||typeof next.parameters!=='object')throw new Error('The workspace reply is invalid. Open another project or rebuild this workspace; existing projects are unchanged.'); const switching=currentProject.current?.workspace_id!==next.workspace_id;const rebuilding=currentProject.current?.revision!==next.revision;activeWorkspace.current=next.workspace_id;currentProject.current=next;setProject(next);hostRef.current?.onProject(next);if(switching||rebuilding){for(const timer of settleTimers.current.values())window.clearTimeout(timer);settleTimers.current.clear();if(interactiveThrottle.current!==null){window.clearTimeout(interactiveThrottle.current);interactiveThrottle.current=null;}if(draftUiFrame.current!==null){cancelAnimationFrame(draftUiFrame.current);draftUiFrame.current=null;}if(motionUiFrame.current!==null){cancelAnimationFrame(motionUiFrame.current);motionUiFrame.current=null;}pendingTargets.current.clear();draftCoordinates.current.clear();currentMotion.current=null;setManipulating(false);setSimulationRunning(false);setSimulationDynamic({});setPlaybackRunning(false);timeline.current=null;}receiveMotion(next.motion);if(switching)setJob(next.activity.find(job=>['queued','running'].includes(job.state))||next.activity.at(-1)||null); }
-  useEffect(()=>{invoke<{workspace_id:string;name:string;running:number}[]>('workspaces').then(setWorkspaces).catch(e=>setError(message(e)));},[project?.workspace_id,project?.name,job?.state]);
+  function adopt(next:Project) { if(!sessionAlive.current)return; if(hostRef.current&&next.workspace_id!==hostRef.current.workspaceId){hostRef.current.onOpen(next);return;} if(!next||typeof next.workspace_id!=='string'||typeof next.revision!=='string'||!Array.isArray(next.model?.parts)||!Array.isArray(next.activity)||!next.parameters||typeof next.parameters!=='object')throw new Error('The workspace reply is invalid. Open another project or rebuild this workspace; existing projects are unchanged.'); const switching=currentProject.current?.workspace_id!==next.workspace_id;const rebuilding=currentProject.current?.revision!==next.revision;activeWorkspace.current=next.workspace_id;currentProject.current=next;setProject(next);hostRef.current?.onProject(next);if(switching||rebuilding){for(const timer of settleTimers.current.values())window.clearTimeout(timer);settleTimers.current.clear();if(interactiveThrottle.current!==null){window.clearTimeout(interactiveThrottle.current);interactiveThrottle.current=null;}if(draftUiFrame.current!==null){cancelAnimationFrame(draftUiFrame.current);draftUiFrame.current=null;}if(motionUiFrame.current!==null){cancelAnimationFrame(motionUiFrame.current);motionUiFrame.current=null;}pendingTargets.current.clear();draftCoordinates.current.clear();currentMotion.current=null;setManipulating(false);setSimulationRunning(false);setSimulationDynamic({});setPlaybackRunning(false);timeline.current=null;}receiveMotion(next.motion);if(switching)setJob(next.activity.find(job=>['queued','running'].includes(job.state))||next.activity.at(-1)||null); }
+  useEffect(()=>{invoke<{workspace_id:string;name:string;running:number;model_parent?:string}[]>('workspaces').then(setWorkspaces).catch(e=>setError(message(e)));},[project?.workspace_id,project?.name,job?.state]);
   async function switchWorkspace(workspace:string){
     if(hostRef.current){hostRef.current.onOpenWorkspace(workspace);return;}
     // Invalidate callbacks from the previous tab before awaiting IPC.
@@ -548,6 +599,10 @@ export function App({host}:{host?:SessionHost}={}) {
     const channel=new Channel<{workspace_id:string;kind:string;job?:Job;tool?:string}>();
     channel.onmessage=event=>{
       const current=currentProject.current;
+      const focusWs=hostRef.current?.chrome?hostRef.current.focusWorkspace:'';
+      if(focusWs&&event.workspace_id===focusWs&&focusWs!==current?.workspace_id&&(event.kind==='refresh'||event.job&&!['queued','running'].includes(event.job.state))){
+        invoke<Project>('project',{workspace:focusWs}).then(next=>{if(hostRef.current?.focusWorkspace===focusWs)setFocusProject(next);}).catch(()=>{});
+      }
       if(!current || event.workspace_id!==current.workspace_id&&event.kind!=='refresh')return;
       if(event.job){liveJob.current=event.job;setJob(event.job);}
       if(event.kind==='tool_started')setAgentActivity('Agent is working…');
@@ -556,10 +611,10 @@ export function App({host}:{host?:SessionHost}={}) {
         invoke<Project>('project',{workspace:current.workspace_id}).then(next=>{if(activeWorkspace.current===next.workspace_id)adopt(next);}).catch(e=>setError(message(e)));
       }
     };
-    invoke('connect_activity',{channel}).catch(e=>setError(message(e)));
+    return connectNativeStream('connect_activity',channel,e=>setError(message(e)));
   },[]);
   useEffect(()=>{
-    const channel=new Channel<{id:string;workspace_id:string;revision:string;command:string;arguments:Parameters<CadViewport['capture']>[0]&{visible:boolean;scope:Scope;motion?:MotionSnapshot}}>();
+    const channel=messageChannel<{id:string;workspace_id:string;revision:string;command:string;arguments:Parameters<CadViewport['capture']>[0]&{visible:boolean;scope:Scope;motion?:MotionSnapshot}}>(!!hostRef.current);
     const token=hostRef.current?hostRef.current.connectView(channel):invoke<string>('connect_view',{channel});
     channel.onmessage=async request=>{
       let reply: {data?:unknown;error?:{code:string;message:string}};
@@ -577,11 +632,12 @@ export function App({host}:{host?:SessionHost}={}) {
       if(viewerToken)invoke('complete_view',{token:viewerToken,requestId:request.id,reply}).catch(()=>{});
     };
     token.catch(e=>setError(message(e)));
+    return()=>{channel.onmessage=()=>{};if('id' in channel)void token.then(()=>invoke('disconnect_stream',{subscriptionId:channel.id})).catch(()=>{});};
   },[]);
   useEffect(()=>{
     const channel=new Channel<MotionSnapshot&{kind?:string}>();
     channel.onmessage=snapshot=>{if(snapshot.kind==='refresh'){void refreshMotion().catch(e=>setError(message(e)));return;}receiveMotion(snapshot);};
-    invoke('connect_motion',{channel}).catch(e=>setError(message(e)));
+    return connectNativeStream('connect_motion',channel,e=>setError(message(e)));
   },[]);
   useEffect(()=>{
     if(!settingsOpen||!providerOpen)return;
@@ -589,20 +645,31 @@ export function App({host}:{host?:SessionHost}={}) {
     void refresh();const timer=setInterval(refresh,2000);return()=>{active=false;clearInterval(timer);};
   },[settingsOpen,providerOpen]);
   useEffect(()=>{
-    if(!project)return;
+    if(!host?.chrome){setFocusProject(null);return;}
+    const target=host.focusWorkspace;
+    if(!target||target===host.workspaceId){setFocusProject(null);return;}
+    let cancelled=false;
+    invoke<Project>('project',{workspace:target}).then(next=>{
+      if(!cancelled&&hostRef.current?.focusWorkspace===target)setFocusProject(next);
+    }).catch(error=>{if(!cancelled&&hostRef.current?.chrome)setError(message(error));});
+    return()=>{cancelled=true;};
+  },[host?.chrome,host?.focusWorkspace,host?.workspaceId]);
+  const chatWorkspace=host?.chrome?(host.projectWorkspace||host.focusWorkspace):project?.workspace_id;
+  useEffect(()=>{
+    if(!chatWorkspace)return;
     pruneChatHosts(new Set());
     setChat([]);setChatList([]);setActiveChatId(null);setChatMessages({});setAgentActivity('');setAttachedImage(null);setImageDropDepth(0);showTurn(null);
-    refreshChat(project.workspace_id).catch(e=>setError(message(e)));
-  },[project?.workspace_id]);
+    refreshChat(chatWorkspace).catch(e=>setError(message(e)));
+  },[chatWorkspace]);
   useEffect(()=>{
-    const workspace=project?.workspace_id;if(!workspace)return;
+    if(!chatWorkspace)return;
     const open=new Set(chatTabIds(chatList,activeChatId));
     pruneChatHosts(open);
-    pruneChatDrafts(workspace,open);
-  },[project?.workspace_id,chatList,activeChatId]);
+    pruneChatDrafts(chatWorkspace,open);
+  },[chatWorkspace,chatList,activeChatId]);
   const visibleChatKey=JSON.stringify(visibleChatIds);
   useEffect(()=>{
-    const workspace=project?.workspace_id;if(!workspace)return;
+    if(!chatWorkspace)return;
     // Retain message bodies only for the selected chat and visible split panes.
     const visible=new Set(visibleChatIds);
     if(activeChatId)visible.add(activeChatId);
@@ -613,17 +680,24 @@ export function App({host}:{host?:SessionHost}={}) {
     let cancelled=false;
     for(const id of visible){
       if(!id||id==='new'||id===activeChatId||chatMessagesRef.current[id])continue;
-      void invoke<{messages:ChatMessage[]}>('agent_conversation',{workspace,chatId:id}).then(result=>{
-        if(cancelled||activeWorkspace.current!==workspace||!Array.isArray(result.messages))return;
+      void invoke<{messages:ChatMessage[]}>('agent_conversation',{workspace:chatWorkspace,chatId:id}).then(result=>{
+        if(cancelled||chatScope()!==chatWorkspace||!Array.isArray(result.messages))return;
         setChatMessages(current=>current[id]?current:{...current,[id]:result.messages});
       }).catch(()=>{});
     }
     return()=>{cancelled=true;};
-  },[project?.workspace_id,visibleChatKey,activeChatId]);
+  },[chatWorkspace,visibleChatKey,activeChatId]);
   useEffect(()=>{
     if(!providerOpen)return;
     invoke<AgentSettings>('agent_settings').then(settings=>{setProviderSettings(settings);setAgentBackend(settings.backend||settings.provider||'claude_cli');setModelId(settings.model);}).catch(e=>setError(message(e)));
   },[providerOpen]);
+  useEffect(()=>{
+    if(!providerOpen)return;
+    let active=true;
+    setAgentModels(null);
+    invoke<ModelChoice[]>('agent_models',{backend:agentBackend}).then(models=>{if(active)setAgentModels(Array.isArray(models)?models:[]);}).catch(()=>{if(active)setAgentModels([]);});
+    return()=>{active=false;};
+  },[providerOpen,agentBackend]);
   useEffect(()=>{
     const channel=new Channel<{kind:string;workspace_id:string;turn_id:string;delta?:string;turn?:AgentTurn}>();
     channel.onmessage=event=>{
@@ -645,7 +719,7 @@ export function App({host}:{host?:SessionHost}={}) {
       if(event.kind==='turn_finished')void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace)adopt(next);}).catch(error=>setError(message(error)));
       if(event.kind==='turn_finished'&&event.turn?.error?.code==='LLM_NOT_CONFIGURED')setProviderOpen(true);
     };
-    invoke('connect_agent',{channel}).catch(e=>setError(message(e)));
+    return connectNativeStream('connect_agent',channel,e=>setError(message(e)));
   },[]);
   useEffect(()=>{
     const turn=agentTurn,workspace=project?.workspace_id;
@@ -669,7 +743,7 @@ export function App({host}:{host?:SessionHost}={}) {
     const timer=setInterval(()=>void check(),2000);
     return()=>{active=false;clearInterval(timer);};
   },[project?.workspace_id,agentTurn?.id,agentTurn?.state]);
-  useEffect(() => { if(hostRef.current?.initialProject){adopt(hostRef.current.initialProject);return;}const request=hostRef.current?invoke<Project>('project',{workspace:hostRef.current.workspaceId}):invoke<Project>('initialize');request.then(adopt).catch(e=>setError(message(e))); },[]);
+  useEffect(() => { if(hostRef.current?.initialProject){adopt(hostRef.current.initialProject);return;}let active=true;const request=hostRef.current?invoke<Project>('project',{workspace:hostRef.current.workspaceId}):invoke<Project>('initialize');request.then(next=>{if(active)adopt(next);}).catch(e=>{if(active)setError(message(e));});return()=>{active=false;}; },[]);
   useEffect(()=>()=>{
     if(targetFrame.current!==null)cancelAnimationFrame(targetFrame.current);
     if(draftUiFrame.current!==null)cancelAnimationFrame(draftUiFrame.current);
@@ -701,13 +775,15 @@ export function App({host}:{host?:SessionHost}={}) {
   },[viewportAttempt]);
   useEffect(()=>{const retained=project&&viewer.current?.sceneState(project.workspace_id,project.revision);displayRetry.current=false;setHidden(new Set(retained?.hidden||[]));setSelection(intendedSelection(project)||retained?.selection||null);if(cameraIntent.current&&(cameraIntent.current.workspace!==project?.workspace_id||cameraIntent.current.revision!==project?.revision))cameraIntent.current=null;},[project?.workspace_id,project?.revision]);
   useEffect(() => {
+    if(host&&!host.visible){viewer.current?.suspend();return;}
     if (!project || !viewer.current || graphicsLost) return;
     let active=true;const viewport=viewer.current;
     const scoped=()=>active&&currentProject.current?.workspace_id===project.workspace_id&&currentProject.current?.revision===project.revision&&currentProject.current?.display_generation===project.display_generation;
     const status=(phase:ViewStatus['phase'],message?:string)=>{if(scoped())setViewStatus({workspace:project.workspace_id,revision:project.revision,generation:project.display_generation,phase,message});};
     if(project.display_error&&viewport.sceneState(project.workspace_id,project.revision)){status('missing',project.display_error.message);return;}
     status('loading');
-    viewport.load(project.display_error?{parts:[]}:project.model,project.revision,handle => invoke<ArrayBuffer>('artifact',{
+    const browseGenerated=!host?.modelEntry&&!!project.model_entry;
+    viewport.load(project.display_error||browseGenerated?{parts:[]}:project.model,project.revision,handle => invoke<ArrayBuffer>('artifact',{
       workspace:project.workspace_id,revision:project.revision,handle
     }),project.workspace_id).then(()=>{
       if(!scoped())return;
@@ -733,7 +809,7 @@ export function App({host}:{host?:SessionHost}={}) {
       status('failed',message(error));
     });
     return () => { active=false;viewport.cancelLoad(); };
-  },[project?.workspace_id,project?.revision,project?.display_generation,project?.display_error?.code,viewAttempt,graphicsLost,viewportAttempt]);
+  },[project?.workspace_id,project?.revision,project?.display_generation,project?.display_error?.code,viewAttempt,graphicsLost,viewportAttempt,host?.visible]);
   useEffect(() => { viewer.current?.setDimensions(dimensions,scope); },[dimensions,scope,viewportAttempt]);
   useEffect(()=>{viewer.current?.setSelectionMode(selectionMode);},[selectionMode,viewportAttempt]);
   useEffect(()=>{viewer.current?.setAdvancedTools(advancedView);},[advancedView,viewportAttempt]);
@@ -794,7 +870,9 @@ export function App({host}:{host?:SessionHost}={}) {
     setImportCandidates(candidates);setImportChoice(candidates[0]??'');
   },[project?.workspace_id,project?.import_candidates]);
   async function run(command:string,args:Record<string,unknown>={}) {
-    const workspace=currentProject.current?.workspace_id??project?.workspace_id;
+    const focus=hostRef.current?.chrome?focusProject:null;
+    const target=focus&&hostRef.current?.focusWorkspace===focus.workspace_id?focus:currentProject.current;
+    const workspace=target?.workspace_id??project?.workspace_id;
     if(!workspace||mutationBusy.current)return;
     if(liveJob.current&&['queued','running'].includes(liveJob.current.state)){
       setError('Wait for the current build to finish before changing the model.');
@@ -803,11 +881,20 @@ export function App({host}:{host?:SessionHost}={}) {
     mutationBusy.current=true;
     setBusy(true);setError('');setNotice('');
     try {
-      const revision=currentProject.current?.revision;
-      if(!revision||activeWorkspace.current!==workspace)return;
+      const revision=target?.revision;
+      if(!revision)return;
       const next=await invoke<Job&{cancelled?:boolean}>(command,{workspace,revision,...args});
-      if(activeWorkspace.current===workspace&&!next.cancelled){liveJob.current=next;setJob(next);}
-    } catch(e){if(activeWorkspace.current===workspace)setError(message(e));}finally{mutationBusy.current=false;setBusy(false);}
+      if(!next.cancelled){
+        liveJob.current=next;setJob(next);
+        if(focus&&workspace===focus.workspace_id)invoke<Project>('project',{workspace}).then(setFocusProject).catch(()=>{});
+      }
+    } catch(e){setError(message(e));}finally{mutationBusy.current=false;setBusy(false);}
+  }
+  async function openModelEntry(entry:string,builder:string){
+    setLibraryOpen(false);
+    if(!hostRef.current?.onOpenModel){await run('work_on_project_builder',{entry,builder});return;}
+    // Leave the Explorer row clickable. The canvas shows loading immediately, and a later click cancels this open.
+    await hostRef.current.onOpenModel(entry,builder);
   }
   async function download(format:string) {
     if(!project)return;
@@ -817,6 +904,18 @@ export function App({host}:{host?:SessionHost}={}) {
       if(!result.cancelled && activeWorkspace.current===workspace)setNotice(`${result.name} exported from the committed model.`);
     } catch(e){if(activeWorkspace.current===workspace)setError(message(e));}
   }
+  const [libraryOpen,setLibraryOpen]=useState(false);
+  const [quickModelOpen,setQuickModelOpen]=useState(false);
+  useEffect(()=>setLibraryOpen(false),[project?.workspace_id]);
+  useEffect(()=>{if(!project)setQuickModelOpen(false);},[project?.workspace_id]);
+  useEffect(()=>{
+    if(host&&!host.active)return;
+    const openQuickModel=(event:KeyboardEvent)=>{
+      if(!(event.metaKey||event.ctrlKey)||!event.shiftKey||event.altKey||event.code!=='KeyO'||!currentProject.current)return;
+      event.preventDefault();setQuickModelOpen(true);
+    };
+    window.addEventListener('keydown',openQuickModel);return()=>window.removeEventListener('keydown',openQuickModel);
+  },[host?.active]);
   const [entrySelection,setEntrySelection]=useState<EntrySelection|null>(null);
   const [entryError,setEntryError]=useState('');
   async function openSelectedEntry(entry?:string,adapter?:string){
@@ -826,7 +925,7 @@ export function App({host}:{host?:SessionHost}={}) {
       const result=await invoke<{cancelled?:boolean;project:Project;job:Job}>('open_project_entry',{requestId:selection.request_id,entry:entry??null,...(adapter?{adapter}:{})});
       setEntrySelection(null);
       if(result.cancelled)return;
-      if(hostRef.current){hostRef.current.onOpen(result.project);return;}
+      if(hostRef.current){hostRef.current.onOpen(result.project,{replace:true});return;}
       adopt(result.project);setJob(result.job);setSelection(null);setExternal(null);setNotice('');
     }catch(error){if(entry===undefined)setEntrySelection(null);else setEntryError(message(error));}finally{setBusy(false);}
   }
@@ -844,7 +943,7 @@ export function App({host}:{host?:SessionHost}={}) {
         const result=await invoke<{cancelled?:boolean;choose_entry?:EntrySelection;project:Project;job:Job}>(command);
         if(result.cancelled)return;
         if(result.choose_entry){setEntryError('');setEntrySelection(result.choose_entry);return;}
-        if(hostRef.current){hostRef.current.onOpen(result.project);setEntrySelection(null);return;}
+        if(hostRef.current){hostRef.current.onOpen(result.project,{replace:true});setEntrySelection(null);return;}
         adopt(result.project);setJob(result.job);
       }
       setSelection(null);setExternal(null);setNotice('');
@@ -880,7 +979,7 @@ export function App({host}:{host?:SessionHost}={}) {
   const autoSaving=useRef(false),autoSaveTimer=useRef<number|null>(null);
   async function autoSaveBound(){
     const current=currentProject.current;
-    if(!current?.dirty||current.saved_revision==null||autoSaving.current)return;
+    if(!current||!hasUnsavedChanges(current)||current.saved_revision==null||autoSaving.current)return;
     if(liveJob.current&&['queued','running'].includes(liveJob.current.state))return;
     autoSaving.current=true;
     const workspace=current.workspace_id;
@@ -891,11 +990,11 @@ export function App({host}:{host?:SessionHost}={}) {
     finally{autoSaving.current=false;}
   }
   useEffect(()=>{
-    if(!project?.dirty||project.saved_revision==null)return;
+    if(!project||!hasUnsavedChanges(project)||project.saved_revision==null)return;
     if(autoSaveTimer.current!==null)window.clearTimeout(autoSaveTimer.current);
     autoSaveTimer.current=window.setTimeout(()=>void autoSaveBound(),450);
     return()=>{if(autoSaveTimer.current!==null)window.clearTimeout(autoSaveTimer.current);};
-  },[project?.dirty,project?.revision,project?.saved_revision,project?.workspace_id,job?.state,agentTurn?.state,external?.changed]);
+  },[project?.dirty,project?.unsaved_changes,project?.model_source_dirty,project?.revision,project?.saved_revision,project?.workspace_id,job?.state,agentTurn?.state,external?.changed]);
   useEffect(() => {
     if(!project || !project.external_tracking){setExternal(null);return;}
     let active=true;
@@ -968,14 +1067,14 @@ export function App({host}:{host?:SessionHost}={}) {
     }
   };
   useEffect(()=>{
-    let active=true;const channel=new Channel<string>();channel.onmessage=action=>{if(active)menuAction.current(action);};
-    void (hostRef.current?hostRef.current.connectMenu(channel):invoke('connect_native_menu',{channel})).catch(e=>{if(active)setError(message(e));});return()=>{active=false;};
+    let active=true;const channel=messageChannel<string>(!!hostRef.current);channel.onmessage=action=>{if(active)menuAction.current(action);};
+    void (hostRef.current?hostRef.current.connectMenu(channel):invoke('connect_native_menu',{channel})).catch(e=>{if(active)setError(message(e));});return()=>{active=false;channel.onmessage=()=>{};};
   },[]);
   useEffect(()=>{
     const refresh=()=>setEditing(!!document.activeElement?.matches('input:not([type=range]):not([type=checkbox]),textarea,[contenteditable=true]'));
     document.addEventListener('focusin',refresh);document.addEventListener('focusout',refresh);return()=>{document.removeEventListener('focusin',refresh);document.removeEventListener('focusout',refresh);};
   },[]);
-  useEffect(()=>{if(host&&!host.active)return;void invoke('update_native_menu',{status:{has_project:!!project,has_parts:!!project?.model.parts.length,working,busy,can_undo:!!project?.activity.some(job=>job.state==='succeeded'),editing,dimensions,advanced:advancedView,document_name:project?.name||'Untitled',inspector:panel,model_browser_open:modelOpen,motion_panel_open:motionOpen,has_selection:!!selection,has_hidden_parts:!!hidden.size,selection_mode:selectionMode,dimension_scope:scope,workspaces:workspaces.map(ws=>({id:ws.workspace_id,name:ws.name,selected:ws.workspace_id===project?.workspace_id,running:!!ws.running}))}}).catch(e=>setError(message(e)));},[project?.workspace_id,project?.name,project?.revision,project?.model.parts.length,working,busy,editing,dimensions,advancedView,panel,modelOpen,motionOpen,selection,hidden,selectionMode,scope,workspaces,host?.active]);
+  useEffect(()=>{if(host&&!host.active)return;void invoke('update_native_menu',{status:{has_project:!!project,has_parts:!!project?.model.parts.length,working,busy,can_undo:!!project?.activity.some(job=>job.state==='succeeded'),editing,dimensions,advanced:advancedView,document_name:project?.name||'Untitled',inspector:panel,model_browser_open:modelOpen,motion_panel_open:motionOpen,has_selection:!!selection,has_hidden_parts:!!hidden.size,selection_mode:selectionMode,dimension_scope:scope,workspaces:workspaces.filter(ws=>!ws.model_parent).map(ws=>({id:ws.workspace_id,name:ws.name,selected:ws.workspace_id===(project?.model_parent||project?.workspace_id),running:!!ws.running}))}}).catch(e=>setError(message(e)));},[project?.workspace_id,project?.name,project?.revision,project?.model.parts.length,working,busy,editing,dimensions,advancedView,panel,modelOpen,motionOpen,selection,hidden,selectionMode,scope,workspaces,host?.active]);
   useEffect(()=>{
     const dialog=settingsDialog.current;if(!dialog)return;
     if(providerOpen&&!dialog.open)dialog.showModal();else if(!providerOpen&&dialog.open)dialog.close();
@@ -984,6 +1083,8 @@ export function App({host}:{host?:SessionHost}={}) {
   const agentChromeStatus=agentStartCancelling?'Stopping…':agentWorking?agentTurn.activity:agentSending?'Starting request…':'';
   const projectBound=!!project&&(project.saved_revision!=null||project.external_tracking);
   const retainedView=!!project&&!!viewer.current?.hasScene(project.workspace_id,project.revision);
+  const generatedProjectView=!host?.modelEntry&&!!project?.model_entry;
+  const modelInCanvas=!!project?.model.parts.length&&!generatedProjectView&&!project.display_error&&!libraryOpen&&(scenePhase==='ready'||retainedView);
   const [modelHistory,setModelHistory]=useState<{label?:string;revision:string;restored:boolean;initial:boolean;actor:string;parts:number;created_at?:number}[]>([]);
   useEffect(()=>{
     if(!project)return;
@@ -995,10 +1096,12 @@ export function App({host}:{host?:SessionHost}={}) {
       <div className="document-title" data-tauri-drag-region title={projectBound?`Open project folder · ${project?.name||'Untitled'}`:`Model · ${project?.name||'Untitled'}`}>
         <Icon name={projectBound?'folder':'cube'} size={16}/>
         <span className="document-identity"><span className="document-name">{project?.name||'Untitled'}</span></span>
-        {project?.dirty&&<span className="document-edited">Edited</span>}
+        {project&&hasUnsavedChanges(project)&&<span className="document-edited">Edited</span>}
       </div>
       <span className="header-spacer" data-tauri-drag-region/>
       <ModelHistory entries={modelHistory} disabled={working} onUndo={()=>void run('undo')} onRestore={target=>void run('restore_checkpoint',{target})}/>
+      {external?.changed&&<button type="button" className="external-changes-trigger" aria-haspopup="dialog" aria-label="Review files changed outside Cadpad" onClick={()=>setExternalReviewOpen(true)}><Icon name="file" size={14}/>Files changed <span>{Object.keys(external.changes).length}</span></button>}
+
 
       <button id="tab-assistant" className="titlebar-assistant"  aria-label="Toggle Assistant panel" title="Toggle Assistant" aria-controls="panel-assistant-dock" aria-expanded={host?host.visibleTools.includes('assistant'):assistantOpen} onClick={()=>{if(host)host.showTool('assistant',true);else setAssistantOpen(!assistantOpen);setFocusedTool('assistant');}}><Icon name="chat" size={16}/><span>Assistant</span></button>
     </header>);
@@ -1009,16 +1112,17 @@ export function App({host}:{host?:SessionHost}={}) {
       </nav>);
   const noticesPanel=(        <div className="workspace-notices inspector-page">      {notice&&<p className="notice">{notice}</p>}
       {project?.display_error&&<section><p>{project.display_error.message}</p><button disabled={working} onClick={()=>run('repair_display')}>Restore display</button><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></section>}
-      {external?.changed&&<section className="external-changes"><h3>Files changed outside Cadpad</h3><p>Your current model is still available.</p><ul>{Object.entries(external.changes).map(([path,state])=><li key={path}>{path} · {state}{external.conflicts?.includes(path)&&<label>Changed in both places<select aria-label={`Resolve ${path}`} value={externalResolutions[path]||''} onChange={event=>setExternalResolutions({...externalResolutions,[path]:event.target.value as 'keep_cadpad'|'use_external'})}><option value="" disabled>Choose a version</option><option value="keep_cadpad">Keep Cadpad changes</option><option value="use_external">Use external version</option></select></label>}</li>)}</ul><button disabled={working||external.conflicts?.some(path=>!externalResolutions[path])} onClick={()=>run('reload_project',{fingerprint:external.fingerprint,resolutions:externalResolutions})}>Reload and build</button></section>}
 
-      {error&&<section className="error-banner" role="alert"><div><strong>Action needs attention</strong><p>{errorSummary(error)}</p><details><summary>Details</summary><pre>{error}</pre></details></div><button className="icon-button" aria-label="Dismiss error" onClick={()=>setError('')}><Icon name="close" size={15}/></button></section>}
+
+
 </div>);
+  const explorer=displayProject||project;
   const modelPanel=(          <aside className="model-browser explorer-panel inspector-page" id="panel-model" aria-label="Explorer" hidden={!host&&!modelOpen}>
             {!host&&<PanelResizeHandle panel="model" value={panelSizes.model} onChange={value=>resizePanel('model',value)}/>}
             {!host&&<header className="dock-heading"><strong>Explorer</strong><button className="icon-button" aria-label="Close Explorer" onClick={()=>{setModelOpen(false);requestAnimationFrame(()=>document.getElementById('tab-model')?.focus());}}><Icon name="close" size={16}/></button></header>}
             <div className="model-browser-content">
-          {project?<ProjectExplorer workspace={project.workspace_id} parts={project.model.parts} parameters={Object.entries(project.parameters).map(([name,p])=><label className="parameter" key={`${project.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} assets={project.assets||{}} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{if(viewer.current?.hasScene(project.workspace_id,project.revision))viewer.current.select(id);setSelection({revision:project.revision,instance_id:id,entity_id:'part:0'});}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to explore its parts.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
-      {selection&&<section><h3>Selection</h3><p className="selection-name">{project?.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Whole part':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate part</button><p className="muted">Measured on the current model.</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</section>}
+          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">Measured on the current model.</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} projectName={explorer.name||undefined} onBrowseLibrary={()=>setLibraryOpen(true)} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={host?busy||agentSending||agentWorking:working} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} assets={explorer.assets||{}} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its source and geometry.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
+
         </div>
           </aside>);
   const motionPanel=(task:MotionTask)=>(            <aside className="motion-sidebar inspector-page" id={host?`panel-${task}`:"panel-motion"} aria-label={motionTools.find(tool=>tool.id===task)!.title} hidden={!host&&!motionOpen}>
@@ -1027,12 +1131,12 @@ export function App({host}:{host?:SessionHost}={}) {
               <div className="motion-sidebar-content">
 
           {motion?.playback&&<div className="motion-session" role="status"><strong>Watching a replay</strong><p>The canvas shows a saved moment. Return to live movement before moving parts or starting a simulation.</p><button disabled={playbackBusy} onClick={()=>{setPlaybackRunning(false);void playbackAction({action:'leave'});}}>Leave playback</button></div>}
-          {motion?.mode==='simulate'&&task==='move'&&!motion.playback&&<div className="motion-session"><strong>Physics is paused</strong><p>Return to the position from before the simulation to move parts by hand, or open Physics to continue.</p><button disabled={simulationBusy||!!motion.recording} onClick={()=>{setSimulationRunning(false);void simulationAction({action:'stop'});}}>Stop and restore pose</button>{motion.recording&&<p>Finish or discard your recording first.</p>}</div>}
+          {motion?.mode==='simulate'&&task==='move'&&!motion.playback&&<div className="motion-session"><strong>Physics is paused</strong><p>Return to the position from before the simulation to move objects by hand, or open Physics to continue.</p><button disabled={simulationBusy||!!motion.recording} onClick={()=>{setSimulationRunning(false);void simulationAction({action:'stop'});}}>Stop and restore pose</button>{motion.recording&&<p>Finish or discard your recording first.</p>}</div>}
           {(!host||task!=='test')&&<div hidden={task==='test'}>
           {motion?.recording&&!motion.playback&&<div className="motion-capture-bar"><span>Recording · {motion.recording.duration_s.toFixed(2)} s{motion.recording.capacity_reached?' · full':''}</span><button disabled={playbackBusy} onClick={()=>void playbackAction({action:'finish_recording'})}>Finish recording</button></div>}
           {task==='move'&&project&&<JointWizard key={`${project.workspace_id}:${project.revision}`} parts={project.model.parts} motion={motion} disabled={working||motion?.mode==='simulate'||!!motion?.playback||!!motion?.recording} onSave={async joint=>{await run('add_joint',{joint});}}/>}
-        {task==='simulate'&&project&&motion&&!motion.collision&&<div className="panel-empty"><h3>Physics needs contact geometry</h3><p>{simulationUnavailable||'Ask the assistant to configure collision shapes for this assembly before simulating forces.'}</p><button onClick={()=>{setPrompt('Set up this assembly for physics simulation, including collision shapes and which parts stay fixed.');setPanel('assistant');}}>Set up with assistant</button></div>}
-        {project&&motion?.collision&&(!host||task==='simulate')&&<div className="physics-workflow" hidden={task!=='simulate'}><h3>{motion.mode==='simulate'?'Run and observe':'Choose what can move'}</h3><section><p className="muted">Parts respond to gravity, motor forces and contact. This is an approximate physics preview.</p>{motion.mode==='simulate'&&!motion.playback?<><p className="muted">{motion.simulation?.current.time_s.toFixed(3)} s · fixed step 1/120 s · approximate proxy inertia and contacts</p><button disabled={simulationBusy} onClick={()=>setSimulationRunning(!simulationRunning)} className="primary-button">{simulationRunning?'Pause simulation':'Run simulation'}</button><button disabled={simulationBusy||simulationRunning} onClick={()=>void simulationAction({action:'advance',steps:2})}>Advance 1/60 s</button><button disabled={simulationBusy||!!motion.recording} onClick={()=>{setSimulationRunning(false);void simulationAction({action:'stop'});}}>Stop and restore pose</button></>:<><p className="muted">Keep the base in place and let the moving parts respond to forces. Review the choices below, then start.</p>{project.model.parts.map(part=><label className="parameter" key={part.instance_id}><span>{part.name}</span><select value={(simulationDynamic[part.instance_id]??motion.joints.some(joint=>joint.child===part.instance_id))?'dynamic':'fixed'} onChange={event=>setSimulationDynamic({...simulationDynamic,[part.instance_id]:event.target.value==='dynamic'})}><option value="fixed">Stay in place</option><option value="dynamic">Can move</option></select></label>)}<PhysicsSettings density={simulationDensity} friction={simulationFriction} bounce={simulationRestitution} gravity={simulationGravity} onDensity={setSimulationDensity} onFriction={setSimulationFriction} onBounce={setSimulationRestitution} onGravity={setSimulationGravity}/><button className="primary-button" disabled={simulationBusy||!!motion.recording||!!motion.playback||!!simulationUnavailable} onClick={()=>void startSimulation()}>Run simulation</button>{simulationUnavailable&&<p className="muted">{simulationUnavailable}</p>}</>}<details><summary>Advanced motor settings</summary><p className="muted">Sliders: N, N/m, N s/m. Hinges: N m, N m/rad, N m s/rad.</p><label>Maximum force / torque<input type="number" min={0.000001} value={motorForce} onChange={event=>setMotorForce(Number(event.target.value))}/></label><label>Spring stiffness<input type="number" min={0} value={motorStiffness} onChange={event=>setMotorStiffness(Number(event.target.value))}/></label><label>Damping<input type="number" min={0} value={motorDamping} onChange={event=>setMotorDamping(Number(event.target.value))}/></label></details></section>{motion?.mode==='simulate'&&motion.simulation&&<section><ExternalLoads key={`${motion.workspace_id}:${motion.revision}`} simulation={motion.simulation} disabled={simulationBusy||simulationRunning||!!motion.playback} onApply={loads=>void simulationAction({action:'loads',loads},motion)}/></section>}</div>}
+        {task==='simulate'&&project&&motion&&!motion.collision&&<div className="panel-empty"><h3>Physics needs contact geometry</h3><p>{simulationUnavailable||'Ask the assistant to configure collision shapes for this assembly before simulating forces.'}</p><button onClick={()=>{setPrompt('Set up this assembly for physics simulation, including collision shapes and which objects stay fixed.');setPanel('assistant');}}>Set up with assistant</button></div>}
+        {project&&motion?.collision&&(!host||task==='simulate')&&<div className="physics-workflow" hidden={task!=='simulate'}><h3>{motion.mode==='simulate'?'Run and observe':'Choose what can move'}</h3><section><p className="muted">Objects respond to gravity, motor forces and contact. This is an approximate physics preview.</p>{motion.mode==='simulate'&&!motion.playback?<><p className="muted">{motion.simulation?.current.time_s.toFixed(3)} s · fixed step 1/120 s · approximate proxy inertia and contacts</p><button disabled={simulationBusy} onClick={()=>setSimulationRunning(!simulationRunning)} className="primary-button">{simulationRunning?'Pause simulation':'Run simulation'}</button><button disabled={simulationBusy||simulationRunning} onClick={()=>void simulationAction({action:'advance',steps:2})}>Advance 1/60 s</button><button disabled={simulationBusy||!!motion.recording} onClick={()=>{setSimulationRunning(false);void simulationAction({action:'stop'});}}>Stop and restore pose</button></>:<><p className="muted">Keep the base in place and let moving objects respond to forces. Review the choices below, then start.</p>{project.model.parts.map(part=><label className="parameter" key={part.instance_id}><span>{part.name}</span><select value={(simulationDynamic[part.instance_id]??motion.joints.some(joint=>joint.child===part.instance_id))?'dynamic':'fixed'} onChange={event=>setSimulationDynamic({...simulationDynamic,[part.instance_id]:event.target.value==='dynamic'})}><option value="fixed">Stay in place</option><option value="dynamic">Can move</option></select></label>)}<PhysicsSettings density={simulationDensity} friction={simulationFriction} bounce={simulationRestitution} gravity={simulationGravity} onDensity={setSimulationDensity} onFriction={setSimulationFriction} onBounce={setSimulationRestitution} onGravity={setSimulationGravity}/><button className="primary-button" disabled={simulationBusy||!!motion.recording||!!motion.playback||!!simulationUnavailable} onClick={()=>void startSimulation()}>Run simulation</button>{simulationUnavailable&&<p className="muted">{simulationUnavailable}</p>}</>}<details><summary>Advanced motor settings</summary><p className="muted">Sliders: N, N/m, N s/m. Hinges: N m, N m/rad, N m s/rad.</p><label>Maximum force / torque<input type="number" min={0.000001} value={motorForce} onChange={event=>setMotorForce(Number(event.target.value))}/></label><label>Spring stiffness<input type="number" min={0} value={motorStiffness} onChange={event=>setMotorStiffness(Number(event.target.value))}/></label><label>Damping<input type="number" min={0} value={motorDamping} onChange={event=>setMotorDamping(Number(event.target.value))}/></label></details></section>{motion?.mode==='simulate'&&motion.simulation&&<section><ExternalLoads key={`${motion.workspace_id}:${motion.revision}`} simulation={motion.simulation} disabled={simulationBusy||simulationRunning||!!motion.playback} onApply={loads=>void simulationAction({action:'loads',loads},motion)}/></section>}</div>}
       {!!motion?.joints.some(joint=>joint.kind!=='fixed'&&joint.drivable!==false)&&(!host||task==='move'&&motion.mode!=='simulate'||task==='simulate'&&motion.mode==='simulate')&&<section className="manual-motion" hidden={task==='move'?motion.mode==='simulate':motion.mode!=='simulate'}>{motion.mode==='simulate'?<><h3>Motor targets</h3><div className="joint-controls">{motion.joints.filter(joint=>joint.kind!=='fixed'&&joint.drivable!==false).map(joint=><JointControl key={`${motion.revision}:${joint.id}`} joint={joint} name={humanLabel(project?.model.parts.find(part=>part.instance_id===joint.child)?.name||joint.id)} coordinate={draftCoordinates.current.get(joint.id)??joint.coordinate} disabled={!!motion.playback} motor={motion.mode==='simulate'} onPreview={next=>{viewer.current?.previewCoordinate(joint.id,next);queueJoint(joint.id,next,joint.unit,false);}} onCommit={next=>queueJoint(joint.id,next,joint.unit,true)}/>)}</div></>:project&&<MotionParts parts={project.model.parts} motion={motion} dragging={manipulating} disabled={!!motion.playback} coordinates={draftCoordinates.current} onDragging={setManipulating} onLocate={id=>{const entity={revision:project.revision,instance_id:id,entity_id:'part:0'};viewer.current?.selectEntity(entity);setSelection(entity);}} onPreview={(joint,next)=>{viewer.current?.previewCoordinate(joint.id,next);queueJoint(joint.id,next,joint.unit,false);}} onCommit={(joint,next)=>queueJoint(joint.id,next,joint.unit,true)}/>}<details className="motion-technical"><summary>Movement limits and collisions</summary>{motion.constraints&&<p className="muted">{motion.mode==='simulate'?`Approximate loop closure · ${(motion.constraints.position_error_m*1000).toPrecision(3)} mm · ${motion.constraints.axis_error_rad.toPrecision(3)} rad`:'Coupled mechanism · model constraints satisfied'}</p>}<p className="muted">{motion.mode==='simulate'?'Approximate dynamic contacts · force-limited motors':motion.collision?`Swept collision blocking · conservative proxies · ${(motion.collision.clearance_m*1000).toPrecision(3)} mm margin`:'Joint limits apply. Collision blocking is not configured.'}</p>{!!motion.collision?.ignored_pairs.length&&<details><summary>{motion.collision.ignored_pairs.length} intentional contact pair(s) excluded</summary>{motion.collision.ignored_pairs.map(pair=><p key={pair.join(':')}>{pair.join(' ↔ ')}</p>)}</details>}</details></section>}
 
 
@@ -1043,14 +1147,14 @@ export function App({host}:{host?:SessionHost}={}) {
           <div hidden={task!=='test'}>{project&&(!host||task==='test')&&<Requirements workspace={project.workspace_id} revision={project.revision} motion={motion} onSnapshot={snapshot=>{setSimulationRunning(false);setPlaybackRunning(false);pendingTargets.current.clear();receiveMotion(snapshot);}} onChanged={()=>{const workspace=project.workspace_id;void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace&&currentProject.current?.revision===next.revision){currentProject.current=next;setProject(next);}}).catch(e=>setError(message(e)));}} agentBusy={agentWorking||agentSending} onCreate={intent=>prepareMotionTest(intent)} onEdit={(id,intent)=>prepareMotionTest(intent,id)}/>}</div>
         </div>
             </aside>);
-  const canvasPanel=(            <section className="workspace" aria-label="3D modeling canvas">
+  const canvasPanel=(            <section className={`workspace ${modelInCanvas?'has-model':''}`} aria-label="3D modeling canvas">
       <div className="workspace-stage">
-      <nav className="viewport-tools" aria-label="Model tools">
-        <div className="tool-group"><Icon name="cube" size={16}/><button className="native-picker" aria-label="Selection kind" title="Click picks one item. Shift-drag selects by rectangle. ⌘/Ctrl-click adds or removes." aria-haspopup="menu" onClick={event=>nativePopup('selection',event.currentTarget)}>Pick {({face:'faces',edge:'edges',part:'parts'})[selectionMode]}<Icon name="chevron" size={10}/></button></div><span className="tool-divider"/>
+      {modelInCanvas&&<nav className="viewport-tools" aria-label="Model tools">
+        <div className="tool-group"><Icon name="cube" size={16}/><button className="native-picker" aria-label="Selection kind" title="Click picks one item. Shift-drag selects by rectangle. ⌘/Ctrl-click adds or removes." aria-haspopup="menu" onClick={event=>nativePopup('selection',event.currentTarget)}>Pick {({face:'faces',edge:'edges',part:'objects'})[selectionMode]}<Icon name="chevron" size={10}/></button></div><span className="tool-divider"/>
         <button className={dimensions?'active':''} aria-pressed={dimensions} onClick={()=>setDimensions(!dimensions)}><Icon name="measure" size={16}/>Dimensions</button>
 
-        {dimensions&&<button className="native-picker" aria-label="Dimension scope" aria-haspopup="menu" onClick={event=>nativePopup('scope',event.currentTarget)}>{({selected:'Selected part',pinned:'Pinned',all:'All visible'})[scope]}<Icon name="chevron" size={10}/></button>}
-      </nav>
+        {dimensions&&<button className="native-picker" aria-label="Dimension scope" aria-haspopup="menu" onClick={event=>nativePopup('scope',event.currentTarget)}>{({selected:'Selected object',pinned:'Pinned',all:'All visible'})[scope]}<Icon name="chevron" size={10}/></button>}
+      </nav>}
       <div className="viewport" ref={container} aria-busy={scenePhase==='loading'||scenePhase==='lost'}/>
       {(scenePhase==='lost'||scenePhase==='loading'||scenePhase==='failed'||scenePhase==='missing'&&!retainedView)&&<div className={`view-recovery ${retainedView?'retained-view':''}`}><div className="view-recovery-card" role={scenePhase==='failed'?'alert':'status'}>
         <strong>{startupError?'Unable to start the 3D view':scenePhase==='lost'?'Waiting for graphics…':scenePhase==='loading'?'Loading model…':scenePhase==='missing'?'Display data needs restoring':'Unable to display this model'}</strong>
@@ -1061,15 +1165,16 @@ export function App({host}:{host?:SessionHost}={}) {
 
       {!!importCandidates.length&&<div className="import-setup-backdrop"><section className="import-setup" role="dialog" aria-modal="true" aria-labelledby="import-setup-title"><header><h2 id="import-setup-title">Import model</h2><button className="icon-button" aria-label="Close import setup" onClick={()=>setImportCandidates([])}><Icon name="close" size={15}/></button></header><div className="import-setup-body"><p>Choose a model from this project folder.</p><div className="import-file-list" role="radiogroup" aria-label="Model file">{importCandidates.map(path=><button key={path} role="radio" aria-checked={importChoice===path} className={importChoice===path?'selected':''} onClick={()=>setImportChoice(path)}><Icon name="file" size={18}/><span>{path.split('/').at(-1)}</span><small>{path.split('.').at(-1)?.toUpperCase()}</small></button>)}</div><p className="import-setup-hint">The original file stays in your folder.</p></div><footer><button disabled={working} onClick={()=>setImportCandidates([])}>Skip for now</button><button className="primary-button" disabled={working||!importChoice} onClick={()=>{const path=importChoice;setImportCandidates([]);void run('import_model',{selectedPath:path});}}><Icon name="import" size={14}/>Import</button></footer></section></div>}
 
-      {!project?.model.parts.length&&job?.state!=='failed'&&<div className="empty"><h1>Start a model</h1><p>Import a model or ask the assistant to create one.</p><div className="start-actions"><div className="start-file-actions"><button className="primary-button" disabled={working||!project} aria-label="Import model" onClick={()=>void run('import_model')}><Icon name="import" size={15}/>Import model…</button></div></div></div>}
-      {!advancedView&&!!project?.model.parts.length&&<nav className="camera-controls" aria-label="Camera views">
+      {host?.modelEntry&&!project?.model.parts.length&&job&&['queued','running'].includes(job.state)&&<div className="empty model-opening" role="status"><span className="model-opening-spinner" aria-hidden="true"/><h1>Opening model…</h1><p>Building geometry for this tab.</p></div>}
+      {(!host?.modelEntry||libraryOpen)&&(generatedProjectView||!project?.model.parts.length||libraryOpen)&&(job?.state!=='failed'||libraryOpen)&&(project?.external_tracking&&(project.files?.length??0)>1?<div className="project-library">{!!project.model.parts.length&&!generatedProjectView&&<button type="button" className="library-back" onClick={()=>setLibraryOpen(false)}>Back to model</button>}<h1>{project.name||'Project library'}</h1>{job&&['queued','running'].includes(job.state)&&<p className="library-load-status" role="status">Building selected entry…</p>}<p>Browse source entries to build geometry, or ask the assistant for a change.</p><SourceCatalog workspace={project.workspace_id} revision={project.revision} disabled={host?busy||agentSending||agentWorking:working} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/></div>:<div className="empty"><h1>Start a model</h1><p>Import a model or ask the assistant to create one.</p><div className="start-actions"><div className="start-file-actions"><button className="primary-button" disabled={working||!project} aria-label="Import model" onClick={()=>void run('import_model')}><Icon name="import" size={15}/>Import model…</button></div></div></div>)}
+      {!advancedView&&modelInCanvas&&<nav className="camera-controls" aria-label="Camera views">
         <ViewCube getQuaternion={()=>viewer.current?.cameraQuaternion()??null} onView={chooseCamera}/>
         <button className="camera-fit" aria-label="Fit model in view" title="Fit model" onClick={()=>chooseCamera('fit')}><Icon name="fit" size={18}/><small>Fit</small></button>
       </nav>}
       {!project?.model.parts.length&&job?.state==='failed'&&<div className="build-empty"><strong>Model could not build</strong><p>Review the error below to continue.</p></div>}
       </div>
       {job?.state==='failed'&&!agentWorking&&!agentSending&&<BuildDiagnostics key={job.id} diagnostics={job.diagnostics} onRetry={()=>void run('rebuild')} onSetup={project?.external_tracking?()=>void setupProjectEntry():undefined}/>}
-      <footer><span>Millimetres <span className="footer-dot">·</span> {project?.model.parts.length||0} parts</span><span className="hover-status" aria-label="Hovered geometry" ref={hoverStatus}/><span>{manipulating&&motion?.mode==='manipulate'&&!motion.playback?'Drag a moving part to slide or rotate it':'Drag to orbit'} <span className="footer-dot">·</span> ⇧ drag to pan <span className="footer-dot">·</span> Scroll to zoom</span></footer>
+      <footer><span>Millimetres <span className="footer-dot">·</span> {generatedProjectView?0:project?.model.parts.length||0} parts</span><span className="hover-status" aria-label="Hovered geometry" ref={hoverStatus}/><span>{manipulating&&motion?.mode==='manipulate'&&!motion.playback?'Drag a moving part to slide or rotate it':'Drag to orbit'} <span className="footer-dot">·</span> ⇧ drag to pan <span className="footer-dot">·</span> Scroll to zoom</span></footer>
     </section>);
   const openChatIds=chatTabIds(chatList,activeChatId);
   const chatHostMap=Object.fromEntries(openChatIds.map(id=>[id,chatHost(id)]));
@@ -1077,7 +1182,7 @@ export function App({host}:{host?:SessionHost}={}) {
         {!host&&<PanelResizeHandle panel="assistant" value={panelSizes.assistant} onChange={value=>resizePanel('assistant',value)}/>}
         {!host&&<header className="dock-heading"><button className="assistant-heading" aria-controls="panel-assistant" onClick={()=>setPanel('assistant')}><Icon name="chat" size={17}/>Assistant</button><button className="icon-button" aria-label="Hide Assistant panel" onClick={()=>{setAssistantOpen(false);requestAnimationFrame(()=>document.getElementById('tab-assistant')?.focus());}}><Icon name="close" size={16}/></button></header>}
         <AssistantChatDock
-          workspaceKey={project?.workspace_id||'none'}
+          workspaceKey={chatWorkspace||project?.workspace_id||'none'}
           chats={chatList}
           activeId={activeChatId}
           busy={!project||chatBusy||agentSending}
@@ -1104,7 +1209,7 @@ export function App({host}:{host?:SessionHost}={}) {
                   {live&&!!agentTurn?.artifacts.length&&<section className="agent-artifacts">{agentTurn.artifacts.map(artifact=><button key={artifact.handle} onClick={()=>saveAgentArtifact(artifact)}>Save {artifact.format} export</button>)}</section>}
                 </div>
               </ConversationScroll>
-              <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&selectionNotice&&<div className="composer-notice" role="status">{selectionNotice}<button type="button" className="icon-button" aria-label="Dismiss selection notice" onClick={()=>setSelectionNotice('')}><Icon name="close" size={12}/></button></div>}{activePane&&!!references.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<textarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&references.length?(references.length>1?'Ask about A, B…  (⇧-click to add or remove)':'Ask about this selection…  (⇧-click to add more)'):activePane&&attachedImage?'Ask about this image…':'Ask for a part or a change…'} value={draft} onPaste={event=>{
+              <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&selectionNotice&&<div className="composer-notice" role="status">{selectionNotice}<button type="button" className="icon-button" aria-label="Dismiss selection notice" onClick={()=>setSelectionNotice('')}><Icon name="close" size={12}/></button></div>}{activePane&&!!composerReferences.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>remoteSelection?focusedSelection?.toggleOmitted(chip.entity):toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<textarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&composerReferences.length?(composerReferences.length>1?'Ask about A, B…  (⇧-click to add or remove)':'Ask about this selection…  (⇧-click to add more)'):activePane&&attachedImage?'Ask about this image…':'Ask for a part or a change…'} value={draft} onPaste={event=>{
                 const text=event.clipboardData.getData('text/plain');
                 if(!text)return;
                 event.preventDefault();
@@ -1117,37 +1222,39 @@ export function App({host}:{host?:SessionHost}={}) {
         />
         {!!imageDropDepth&&<div className="assistant-image-drop" aria-hidden="true">Drop image to attach</div>}
       </aside>);
-  const dialogs=(<>    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}
-    <dialog ref={settingsDialog} className="settings-dialog" onCancel={()=>setProviderOpen(false)} onClose={()=>setProviderOpen(false)} onClick={event=>{if(event.target===event.currentTarget)setProviderOpen(false);}}><div className="settings-sheet"><div className="settings-heading"><h2>Settings</h2><button className="icon-button" aria-label="Close settings" onClick={()=>setProviderOpen(false)}><Icon name="close"/></button></div><div className="settings-body">      {providerOpen&&<section className="provider-settings"><strong>Built-in agent</strong><p>Use a local CLI with your existing Claude, ChatGPT/Codex, or Cursor subscription, or an Anthropic API key. CLIs talk to Cadpad through MCP.</p>
-        <label>Provider<select value={agentBackend} onChange={event=>setAgentBackend(event.target.value)}>{[
-          ['claude_cli','Claude Code CLI'],
-          ['codex_cli','Codex CLI'],
-          ['cursor_cli','Cursor CLI'],
-          ['anthropic_api','Anthropic API key'],
-        ].map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>
-        {agentBackend!=='anthropic_api'&&providerSettings?.cli?.filter(item=>item.backend===agentBackend).map(item=><p key={item.backend} className="muted">{item.installed?(item.authenticated?item.detail:`Installed · ${item.detail}`):item.detail}{item.path?` · ${item.path}`:''}</p>)}
-        {agentBackend!=='anthropic_api'&&<section className="agent-connection-setup"><strong>Cadpad modeling connection</strong><p>{providerSettings?.bridge_available?'MCP bridge available. Cadpad configures this connection automatically when launching your agent.':'MCP bridge unavailable. Modeling requires this connection. Restart Cadpad through the desktop launcher to restore it.'}</p><ol><li>Install your selected CLI and sign in.</li><li>Check that the MCP bridge is available below.</li><li>Save settings to enable modeling tools.</li></ol><button type="button" disabled={savingProvider} onClick={()=>invoke<AgentSettings>('agent_settings').then(setProviderSettings).catch(error=>setError(message(error)))}>Recheck connection</button></section>}
-        {agentBackend==='anthropic_api'&&<><label>Model ID<input value={modelId} placeholder="Model ID from your API account" onChange={event=>setModelId(event.target.value)} autoComplete="off"/></label>
-        <label>API key<input type="password" value={apiKey} placeholder={providerSettings?.configured?'Saved key · leave blank to keep':'Enter API key'} onChange={event=>setApiKey(event.target.value)} autoComplete="off"/></label></>}
-        <button disabled={savingProvider||(agentBackend==='anthropic_api'?!modelId.trim():!providerSettings?.bridge_available)} onClick={()=>void saveProvider()}>{savingProvider?'Saving…':'Save settings'}</button>
-        {agentBackend==='anthropic_api'&&providerSettings?.configured&&<button disabled={savingProvider} onClick={()=>invoke('forget_agent_key').then(()=>{setProviderSettings({...providerSettings,configured:false});setApiKey('');}).catch(e=>setError(message(e)))}>Remove saved key</button>}
-      </section>}
-      <details className="connection-settings"><summary>Storage</summary><p>Remove unused caches and trim stored display data. Models, history, recordings and active exports are preserved. Display data can be restored when needed.</p><button disabled={cleaningCache} onClick={()=>void cleanCache()}>{cleaningCache?'Cleaning cache…':'Clean cache'}</button></details>
-      <details className="connection-settings" onToggle={event=>setSettingsOpen(event.currentTarget.open)}><summary>External agents</summary>
-        <p>Launch Cadpad first, then add this configuration to your MCP client.</p>
-        {mcpSettings&&<><textarea readOnly aria-label="MCP client configuration" value={JSON.stringify(mcpSettings.config,null,2)}/>{!mcpSettings.bridge_installed&&<p>The MCP bridge executable is missing. Restart through the desktop launcher.</p>}
-          {mcpSettings.sessions.map(session=><div className="external-session" key={session.id}><span>{session.client_name} · {session.connected?'connected':'disconnected'}</span>{session.connected&&<button onClick={()=>invoke('disconnect_external',{sessionId:session.id}).catch(e=>setError(message(e)))}>Disconnect</button>}</div>)}</>}
-      </details>
-</div></div></dialog></>);
+  const dialogs=(<>{error&&<AppAlert message={error} active={!host||host.active} onDismiss={()=>setError('')}/>}{externalReviewOpen&&external?.changed&&<ExternalChangesDialog changes={external.changes} conflicts={external.conflicts} resolutions={externalResolutions} busy={working} onResolve={(path,value)=>setExternalResolutions(values=>({...values,[path]:value}))} onClose={()=>setExternalReviewOpen(false)} onReload={()=>{setExternalReviewOpen(false);void run('reload_project',{fingerprint:external.fingerprint,resolutions:externalResolutions});}}/>}{project&&<QuickModelSelector open={quickModelOpen} workspace={project.workspace_id} revision={project.revision} activeEntry={host?.modelEntry?.entry} activeBuilder={host?.modelEntry?.builder} busy={host?busy||agentSending||agentWorking:working} onClose={()=>setQuickModelOpen(false)} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/>}    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}
+    <SettingsDialog
+      open={providerOpen}
+      dialogRef={settingsDialog}
+      agentBackend={agentBackend}
+      modelId={modelId}
+      apiKey={apiKey}
+      savingProvider={savingProvider}
+      cleaningCache={cleaningCache}
+      providerSettings={providerSettings}
+      mcpSettings={mcpSettings}
+      models={agentModels}
+      onClose={()=>setProviderOpen(false)}
+      onBackend={setAgentBackend}
+      onModel={setModelId}
+      onApiKey={setApiKey}
+      onSave={()=>void saveProvider()}
+      onForgetKey={()=>invoke('forget_agent_key').then(()=>{if(providerSettings)setProviderSettings({...providerSettings,configured:false});setApiKey('');}).catch(e=>setError(message(e)))}
+      onRecheck={()=>invoke<AgentSettings>('agent_settings').then(setProviderSettings).catch(error=>setError(message(error)))}
+      onCleanCache={()=>void cleanCache()}
+      onExternalOpen={setSettingsOpen}
+      onDisconnect={sessionId=>invoke('disconnect_external',{sessionId}).catch(e=>setError(message(e)))}
+      onError={setError}
+    /></>);
   if(host)return <>
-    {host.active&&createPortal(headerBar,host.header)}
-    {host.active&&createPortal(activityRail,host.rail)}
-    {host.active&&createPortal(noticesPanel,host.notices)}
-    {host.active&&createPortal(modelPanel,host.tools.model)}
+    {host.chrome&&createPortal(headerBar,host.header)}
+    {host.chrome&&createPortal(activityRail,host.rail)}
+    {host.chrome&&createPortal(noticesPanel,host.notices)}
+    {host.chrome&&createPortal(modelPanel,host.tools.model)}
     {host.active&&createPortal(motionPanel('move'),host.tools.move,'move')}
     {host.active&&createPortal(motionPanel('simulate'),host.tools.simulate,'simulate')}
     {host.active&&createPortal(motionPanel('test'),host.tools.test,'test')}
-    {host.active&&createPortal(assistantPanel,host.tools.assistant)}
+    {host.chrome&&createPortal(assistantPanel,host.tools.assistant)}
     {canvasPanel}{host.active&&dialogs}
   </>;
   return <div className={`app ${/Mac/.test(navigator.platform)?'macos':''}`} style={{'--model-width':`${panelSizes.model}px`,'--assistant-width':`${panelSizes.assistant}px`,'--motion-width':`${panelSizes.motion}px`} as React.CSSProperties}>

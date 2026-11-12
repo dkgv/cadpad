@@ -5,10 +5,11 @@ mod builtin;
 mod frontend_assets;
 mod menus;
 use builtin::{
-    agent_chat, agent_conversation, agent_settings, agent_start, agent_stop, agent_turn,
-    configure_agent, connect_agent, forget_agent_key,
+    agent_chat, agent_conversation, agent_models, agent_settings, agent_start, agent_stop,
+    agent_turn, configure_agent, connect_agent, forget_agent_key,
 };
 mod files;
+mod subscriptions;
 use agents::{
     clean_cache, complete_view, connect_activity, connect_motion, connect_view,
     disconnect_external, interference, joint_coordinate, mcp_settings, motion, motion_tests,
@@ -31,12 +32,21 @@ async fn initialize(core: State<'_, Core>) -> Result<Value, Value> {
     let mut workspaces = core.list_workspaces().await;
     workspaces.sort();
     let focused = core.focused_workspace().await;
-    let workspace = match focused.as_ref().or_else(|| workspaces.first()) {
+    let mut workspace = match focused.as_ref().or_else(|| workspaces.first()) {
         Some(id) => id.clone(),
         None => core.create_workspace("local-user").await.map_err(error)?,
     };
+    // Model tabs keep their own focused workspace id; boot always remounts the project root
+    // so dock restore can reattach modelEntry tabs and Explorer selection.
+    if let Some(parent) = core.model_parent(&workspace).await {
+        workspace = parent;
+    }
     core.focus_workspace(&workspace).await.map_err(error)?;
     files::project_with_imports(&core, &workspace).await
+}
+#[tauri::command]
+fn retain_workspace_memory(core: State<'_, Core>, workspaces: Vec<String>) {
+    core.retain_workspace_memory(workspaces);
 }
 #[tauri::command]
 async fn project(core: State<'_, Core>, workspace: String) -> Result<Value, Value> {
@@ -240,10 +250,13 @@ fn main() {
             app.manage(server);
             app.manage(core);
             app.manage(files::PendingProjectFolder::default());
+            app.manage(subscriptions::Subscriptions::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             initialize,
+            retain_workspace_memory,
+            subscriptions::disconnect_stream,
             project,
             read_source,
             example,
@@ -266,6 +279,11 @@ fn main() {
             files::open_project_entry,
             files::configure_project_entry,
             files::project_entry_plan,
+            files::project_source_index,
+            files::project_meshes,
+            files::inspect_project_mesh,
+            files::work_on_project_builder,
+            files::open_project_model,
             save_project,
             check_external,
             reload_project,
@@ -292,6 +310,7 @@ fn main() {
             repair_display,
             rebuild,
             interference,
+            agent_models,
             agent_settings,
             configure_agent,
             forget_agent_key,

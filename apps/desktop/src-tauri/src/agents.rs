@@ -8,9 +8,13 @@ fn error(error: cadpad_core::Error) -> Value {
     error_value(&error)
 }
 #[tauri::command]
-pub async fn connect_view(core: State<'_, Core>, channel: Channel<Value>) -> Result<String, Value> {
+pub async fn connect_view(
+    core: State<'_, Core>,
+    subscriptions: State<'_, crate::subscriptions::Subscriptions>,
+    channel: Channel<Value>,
+) -> Result<String, Value> {
     let (token, mut requests) = core.attach_view();
-    tauri::async_runtime::spawn(async move {
+    subscriptions.spawn(channel.id(), async move {
         while let Some(request) = requests.recv().await {
             if channel.send(json!(request)).is_err() {
                 break;
@@ -72,9 +76,13 @@ pub async fn disconnect_external(
 }
 
 #[tauri::command]
-pub async fn connect_activity(core: State<'_, Core>, channel: Channel<Value>) -> Result<(), Value> {
+pub async fn connect_activity(
+    core: State<'_, Core>,
+    subscriptions: State<'_, crate::subscriptions::Subscriptions>,
+    channel: Channel<Value>,
+) -> Result<(), Value> {
     let mut events = core.subscribe_activity();
-    tauri::async_runtime::spawn(async move {
+    subscriptions.spawn(channel.id(), async move {
         loop {
             match events.recv().await {
                 Ok(event) => {
@@ -95,9 +103,13 @@ pub async fn connect_activity(core: State<'_, Core>, channel: Channel<Value>) ->
 }
 
 #[tauri::command]
-pub async fn connect_motion(core: State<'_, Core>, channel: Channel<Value>) -> Result<(), Value> {
+pub async fn connect_motion(
+    core: State<'_, Core>,
+    subscriptions: State<'_, crate::subscriptions::Subscriptions>,
+    channel: Channel<Value>,
+) -> Result<(), Value> {
     let mut snapshots = core.subscribe_motion();
-    tauri::async_runtime::spawn(async move {
+    subscriptions.spawn(channel.id(), async move {
         loop {
             match snapshots.recv().await {
                 Ok(snapshot) => {

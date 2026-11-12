@@ -10,6 +10,13 @@ pub async fn agent_settings(agent: State<'_, AgentService>) -> Result<Value, Val
     agent.settings().await.map_err(error)
 }
 #[tauri::command]
+pub async fn agent_models(
+    agent: State<'_, AgentService>,
+    backend: Option<String>,
+) -> Result<Value, Value> {
+    agent.models(backend.unwrap_or_default()).await.map_err(error)
+}
+#[tauri::command]
 pub async fn configure_agent(
     agent: State<'_, AgentService>,
     backend: Option<String>,
@@ -37,9 +44,10 @@ pub async fn agent_start(
     references: Option<Vec<cadpad_core::tools::Entity>>,
     image: Option<String>,
     chat_id: Option<String>,
+    model_workspace: Option<String>,
 ) -> Result<Value, Value> {
     agent
-        .start_in_chat(
+        .start_in_chat_for_model(
             workspace,
             prompt,
             cadpad_agent::references::Attachments {
@@ -47,6 +55,7 @@ pub async fn agent_start(
                 image,
             },
             chat_id,
+            model_workspace,
         )
         .await
         .map(|turn| json!(turn))
@@ -89,10 +98,11 @@ pub async fn agent_chat(
 #[tauri::command]
 pub async fn connect_agent(
     agent: State<'_, AgentService>,
+    subscriptions: State<'_, crate::subscriptions::Subscriptions>,
     channel: Channel<Value>,
 ) -> Result<(), Value> {
     let mut events = agent.subscribe();
-    tauri::async_runtime::spawn(async move {
+    subscriptions.spawn(channel.id(), async move {
         loop {
             match events.recv().await {
                 Ok(event) => {

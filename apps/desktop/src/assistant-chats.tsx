@@ -1,4 +1,4 @@
-import React,{useEffect,useMemo,useState} from 'react';
+import React,{useEffect,useMemo,useRef,useState} from 'react';
 import {Icon} from './ui';
 import {ChatHistory} from './chat-history';
 import {DockArea,DockContent,group,groups,placeTabs,removeTab,updateGroup,type DockEdge,type DockNode,type DockTab} from './dock-layout';
@@ -56,11 +56,14 @@ export function AssistantChatDock({
   onClose:(id:string)=>Promise<boolean>;
   onRestore:(id:string)=>Promise<boolean>;
 }){
-  const ids=useMemo(()=>chatTabIds(chats,activeId),[chats,activeId]);
+  const dock=useRef<HTMLDivElement>(null);
+  const [emptyClosed,setEmptyClosed]=useState(false);
+  const ids=useMemo(()=>chatTabIds(chats,activeId).filter(id=>!emptyClosed||chats.some(chat=>chat.id===id&&chat.message_count>0)),[chats,activeId,emptyClosed]);
+  useEffect(()=>{dock.current?.dispatchEvent(new CustomEvent('cadpad-chat-tabs-change',{bubbles:true,detail:{count:ids.length}}));},[ids.length,workspaceKey]);
   const [tree,setTree]=useState<DockNode>(()=>group(ids,activeId&&ids.includes(activeId)?activeId:ids[0]??null));
   const [removed,setRemoved]=useState<string|null>(null);
   const [focusedGroup,setFocusedGroup]=useState<string|undefined>();
-  useEffect(()=>{setTree(current=>syncChatDock(current,ids,activeId));setRemoved(null);setFocusedGroup(undefined);},[workspaceKey]);
+  useEffect(()=>{setEmptyClosed(false);setTree(current=>syncChatDock(current,ids,activeId));setRemoved(null);setFocusedGroup(undefined);},[workspaceKey]);
   useEffect(()=>{setTree(current=>syncChatDock(current,ids,activeId));},[ids.join('\0'),activeId]);
   const visibleIds=groups(tree).flatMap(pane=>pane.active&&ids.includes(pane.active)?[pane.active]:[]);
   const visibleKey=JSON.stringify(visibleIds);
@@ -88,24 +91,21 @@ export function AssistantChatDock({
     if(busy||!ids.includes(tab))return;
     const summary=chats.find(chat=>chat.id===tab);
     if(summary&&summary.message_count>0){
-      if(await onClose(tab))setRemoved(tab);
+      if(await onClose(tab)){setRemoved(tab);if(ids.length===1)setEmptyClosed(true);}
       return;
     }
-    setTree(current=>{
-      const next=removeTab(current,tab);
-      return groups(next).some(pane=>pane.tabs.length)?next:group([activeId||'new'],activeId||'new');
-    });
+    setEmptyClosed(true);
   }
   useEffect(()=>{
     const handler=(event:Event)=>{
       const id=(event as CustomEvent<{chatId:string}>).detail?.chatId;
-      if(id&&visibleIds.includes(id))void close(id);
+      if(dock.current?.contains(event.target as Node)&&id&&visibleIds.includes(id))void close(id);
     };
     document.addEventListener('cadpad-close-chat',handler);
     return()=>document.removeEventListener('cadpad-close-chat',handler);
   });
   return <DockDragProvider onDrop={(payload:DockDragPayload,target:DockTarget)=>{if(payload.area==='chats'&&target.area==='chats')drop(payload.active,payload.area,target.group,target.edge,target.before,payload);}}>
-    <div className="assistant-chat-dock">
+    <div ref={dock} className="assistant-chat-dock">
       <DockArea
         area="chats"
         tree={tree}
@@ -116,7 +116,7 @@ export function AssistantChatDock({
         onChange={setTree}
         onDrop={(tab,source,groupId,edge,before)=>drop(tab,source,groupId,edge,before)}
         onClose={id=>{void close(id);}}
-        extra={()=><><button type="button" className="icon-button" disabled={busy} title="New chat" aria-label="New chat" onClick={()=>void onNew()}><Icon name="plus" size={14}/></button><ChatHistory key={workspaceKey} chats={chats} activeId={activeId} busy={busy} onSelect={async id=>{const owner=groups(tree).find(pane=>pane.tabs.includes(id));return owner?focus(owner.id,id):false;}}/></>}
+        extra={()=><><button type="button" className="icon-button" disabled={busy} title="New chat" aria-label="New chat" onClick={()=>void onNew().then(created=>{if(created)setEmptyClosed(false);})}><Icon name="plus" size={14}/></button><ChatHistory key={workspaceKey} chats={chats} activeId={activeId} busy={busy} onSelect={async id=>{const owner=groups(tree).find(pane=>pane.tabs.includes(id));return owner?focus(owner.id,id):false;}}/></>}
       />
       <div className="chat-removal" hidden={!removed}>Chat removed. <button type="button" disabled={busy} onClick={async()=>{if(removed&&await onRestore(removed))setRemoved(null);}}>Undo</button></div>
       {busy&&<span className="visually-hidden">Wait for the assistant to finish or stop it before changing chats.</span>}

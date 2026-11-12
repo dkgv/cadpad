@@ -8,12 +8,15 @@ function Content({host,open}:{host:HTMLElement;open:boolean}){
   return <div ref={ref} className="sidebar-section-content" hidden={!open}/>;
 }
 const MIN_SECTION=96;
-export function SidebarSections({area,group,tabs,hosts,expanded,weights,onToggle,onDrop,onResize}:{area:'left'|'right';group:DockGroup;tabs:Record<string,DockTab>;hosts:Record<string,HTMLElement>;expanded:string[];weights:Partial<Record<string,number>>;onToggle:(id:string)=>void;onDrop:(tab:string,source:string,before?:string)=>void;onResize:(next:Record<string,number>)=>void}){
+export function SidebarSections({area,group,tabs,hosts,expanded,weights,onToggle,onDrop,onResize,sectionMode=false,loading={}}:{area:'left'|'right';group:DockGroup;tabs:Record<string,DockTab>;hosts:Record<string,HTMLElement>;expanded:string[];weights:Partial<Record<string,number>>;onToggle:(id:string)=>void;onDrop:(tab:string,source:string,before?:string)=>void;onResize:(next:Record<string,number>)=>void;sectionMode?:boolean;loading?:Record<string,boolean>}){
   const stack=useRef<HTMLDivElement>(null);
-  const drag=useDockDrag(),hover=drag?.drag?.target?.area===area&&drag.drag.target.group===group.id?drag.drag.target:null;
+  const single=group.tabs.length===1&&!sectionMode;
+  const active=group.active&&tabs[group.active]?group.active:group.tabs[0];
+  const viewTitle=group.tabs.includes('move')&&group.tabs.includes('simulate')?'Motion':tabs[active]?.title||'Sidebar';
+  const contextDrag=useDockDrag(),drag=sectionMode?null:contextDrag,hover=drag?.drag?.target?.area===area&&drag.drag.target.group===group.id?drag.drag.target:null;
   const before=hover?.edge==='center'?hover.before:null;
   const split=hover&&hover.edge!=='center'?hover:null;
-  const open=group.tabs.filter(id=>tabs[id]&&expanded.includes(id));
+  const open=group.tabs.filter(id=>tabs[id]&&(single||expanded.includes(id)));
   const weight= (id:string)=>Math.max(.2,weights[id]??1);
   function beginResize(event:React.PointerEvent<HTMLDivElement>,above:string,below:string){
     if(event.button!==0)return;
@@ -40,10 +43,11 @@ export function SidebarSections({area,group,tabs,hosts,expanded,weights,onToggle
     };
     window.addEventListener('pointermove',move,{capture:true,passive:false});window.addEventListener('pointerup',end,true);window.addEventListener('pointercancel',end,true);
   }
-  return <div ref={stack} className={`sidebar-sections ${open.length>1?'is-stacked':''} ${hover?.edge==='center'&&!hover.before?'drop-at-end':''}`} data-dock-area={area} data-dock-stack={group.id} onDragOver={event=>{if(event.dataTransfer.types.includes('application/x-cadpad-tab'))event.preventDefault();}} onDrop={event=>{try{const data=JSON.parse(event.dataTransfer.getData('application/x-cadpad-tab'));event.preventDefault();event.stopPropagation();onDrop(data.tab,data.area,(event.target as Element).closest<HTMLElement>('[data-sidebar-section]')?.dataset.sidebarSection);}catch{}}}>
+  return <div ref={stack} className={`sidebar-sections ${sectionMode?'sidebar-content-sections':''} ${open.length>1?'is-stacked':''} ${hover?.edge==='center'&&!hover.before?'drop-at-end':''}`} data-dock-area={sectionMode?undefined:area} data-dock-stack={sectionMode?undefined:group.id} onDragOver={event=>{if(event.dataTransfer.types.includes('application/x-cadpad-tab'))event.preventDefault();}} onDrop={event=>{try{const data=JSON.parse(event.dataTransfer.getData('application/x-cadpad-tab'));event.preventDefault();event.stopPropagation();onDrop(data.tab,data.area,(event.target as Element).closest<HTMLElement>('[data-sidebar-section]')?.dataset.sidebarSection);}catch{}}}>
+    {!sectionMode&&<header className="sidebar-view-heading"><button type="button" aria-label={`Move ${viewTitle} view`} title={viewTitle} onPointerDown={event=>{if(active)drag?.begin(event,{kind:single?'tab':'group',tabs:group.tabs,active,area,group:group.id,label:viewTitle});}}>{viewTitle}</button></header>}
     {group.tabs.map(id=>{
       if(!tabs[id])return null;
-      const opened=expanded.includes(id);
+      const opened=single||expanded.includes(id);
       const prior=open.slice(0,open.indexOf(id)).at(-1);
       const share=opened&&open.length>1;
       const fill=opened&&open.length===1;
@@ -57,7 +61,7 @@ export function SidebarSections({area,group,tabs,hosts,expanded,weights,onToggle
           onResize({[prior]:nextAbove,[id]:pair-nextAbove});
         }}/>}
         <section className={`sidebar-section ${opened?'expanded':''} ${share?'stacked':''} ${fill?'fill':''} ${before===id?'drop-before':''}`} data-sidebar-section={id} style={share?{'--section-weight':weight(id)} as CSSProperties:undefined}>
-          <header className="sidebar-section-heading"><button aria-expanded={opened} aria-controls={`sidebar-content-${id}`} aria-label={`${opened?'Collapse':'Expand'} ${tabs[id].title} section`} onClick={()=>onToggle(id)} onPointerDown={event=>drag?.begin(event,{kind:'tab',tabs:[id],active:id,area,group:group.id,label:tabs[id].title})}><Icon name="chevron" size={11}/><span>{tabs[id].title}</span></button></header>
+          {!single&&<header className="sidebar-section-heading"><button aria-expanded={opened} aria-controls={`sidebar-content-${id}`} aria-label={`${opened?'Collapse':'Expand'} ${tabs[id].title} section`} onClick={()=>onToggle(id)} onPointerDown={event=>drag?.begin(event,{kind:'tab',tabs:[id],active:id,area,group:group.id,label:tabs[id].title})}><Icon name="chevron" size={11}/><span>{tabs[id].title}</span></button>{loading[id]&&<span className="sidebar-section-loading" role="status" aria-label={`Loading ${tabs[id].title}`}/>}</header>}
           <div id={`sidebar-content-${id}`} hidden={!opened}><Content host={hosts[id]} open={opened}/></div>
         </section>
       </React.Fragment>;
