@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {MeshBVH,LineSegmentsBVH} from 'three-mesh-bvh';
 
 export type SelectionMode = 'face'|'edge'|'part';
 export type MeshBuffers = Record<string,Float32Array|Uint32Array>;
@@ -34,6 +35,8 @@ class PickResources {
   readonly edgeIds:readonly (string|null)[];
   readonly surface:THREE.BufferGeometry;
   readonly lines:THREE.BufferGeometry;
+  readonly surfaceTree:MeshBVH|null;
+  readonly lineTree:LineSegmentsBVH|null;
   users=0;
   released=false;
   readonly buffers:MeshBuffers;
@@ -53,6 +56,10 @@ class PickResources {
     }
     this.lines=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(edges,3));
     this.surface=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(vertices,3)).setIndex(new THREE.BufferAttribute(triangles,1));
+    // Indirection keeps published triangle/edge order and cached bytes intact.
+    // Build once per shared geometry, rather than once per assembly occurrence.
+    this.surfaceTree=triangles.length>=384?new MeshBVH(this.surface,{indirect:true}):null;
+    this.lineTree=edges.length>=768?new LineSegmentsBVH(this.lines,{indirect:true}):null;
   }
   release(){if(--this.users===0){this.released=true;this.surface.dispose();this.lines.dispose();this.onRelease();}}
 }
@@ -74,6 +81,8 @@ export class PickGeometry {
     this.faceIds=resources.faceIds;this.edgeIds=resources.edgeIds;resources.users++;
     this.lines=new THREE.LineSegments(resources.lines,new THREE.LineBasicMaterial());this.lines.matrixAutoUpdate=false;
     this.surface=new THREE.Mesh(resources.surface,new THREE.MeshBasicMaterial({side:THREE.DoubleSide}));this.surface.matrixAutoUpdate=false;
+    if(resources.surfaceTree)this.surface.raycast=(raycaster,hits)=>resources.surfaceTree!.raycastObject3D(this.surface,raycaster,hits);
+    if(resources.lineTree)this.lines.raycast=(raycaster,hits)=>resources.lineTree!.raycastObject3D(this.lines,raycaster,hits);
   }
   /** New index views share immutable vertex bytes; dispose only the overlay. */
   highlight(kind:SelectionMode,index:number):THREE.BufferGeometry|null{

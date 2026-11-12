@@ -13,6 +13,7 @@
     "desktop": "cargo build --locked -p cadpad-core -p cadpad-mcp --bins && npm run tauri -w @cadpad/desktop -- dev",
     "test:viewer": "node --experimental-strip-types --test packages/viewer/tests/*.test.ts",
     "bench:reference": "node --experimental-strip-types scripts/check_reference_picking.ts",
+    "bench:dense-picking": "node --experimental-strip-types scripts/check_dense_picking.ts",
     "bench:render-buffers": "node scripts/check_render_buffers.mjs",
     "bench:revision-buffers": "node --experimental-strip-types scripts/check_revision_buffers.ts",
     "test:ui": "node --test apps/desktop/tests/*.test.mjs",

@@ -4,6 +4,33 @@ import * as THREE from 'three';
 import {PrimitiveSpans,PickGeometry,scenePicking,pickTopology,pickTopologyInRect,type PickInstance} from '../src/picking.ts';
 
 const size={width:200,height:200};
+test('indexed dense picking preserves bytes, native identities, clipping and transformed poses',()=>{
+  const source=new THREE.SphereGeometry(4,32,20),wire=new THREE.WireframeGeometry(source);
+  const buffers={vertices:source.attributes.position.array as Float32Array,triangles:Uint32Array.from(source.index!.array),triangles_per_face:new Uint32Array(source.index!.count/3).fill(1),edges:wire.attributes.position.array as Float32Array,segments_per_edge:new Uint32Array(wire.attributes.position.count/2).fill(1)};
+  const bytes=Object.values(buffers).map(array=>Array.from(array));
+  const pool=scenePicking(),geometry=pool(buffers),other=pool(buffers);
+  const fastSurface=geometry.surface.raycast,fastLines=geometry.lines.raycast;
+  assert.notEqual(fastSurface,THREE.Mesh.prototype.raycast);assert.notEqual(fastLines,THREE.LineSegments.prototype.raycast);
+  const matrix=new THREE.Matrix4().compose(new THREE.Vector3(1,-1,0),new THREE.Quaternion().setFromEuler(new THREE.Euler(.2,.3,.4)),new THREE.Vector3(1.2,.8,1.1));
+  const instances=[{instance_id:'dense',matrix,geometry}];
+  for(const perspective of [false,true]){
+    const view=camera(perspective);
+    for(const near of [.1,19]){
+      view.near=near;view.updateProjectionMatrix();
+      for(const mode of ['face','edge','part'] as const)for(let i=0;i<30;i++){
+        const point=new THREE.Vector2(Math.sin(i*2.399)*.7,Math.cos(i*1.71)*.7);
+        geometry.surface.raycast=fastSurface;geometry.lines.raycast=fastLines;
+        const indexed=pickTopology(view,point,size,mode,instances);
+        geometry.surface.raycast=THREE.Mesh.prototype.raycast;geometry.lines.raycast=THREE.LineSegments.prototype.raycast;
+        assert.deepEqual(indexed,pickTopology(view,point,size,mode,instances));
+      }
+    }
+  }
+  assert.deepEqual(Object.values(buffers).map(array=>Array.from(array)),bytes);
+  assert.equal(geometry.surface.geometry,other.surface.geometry);
+  geometry.dispose();assert.equal(pool.size,1);other.dispose();assert.equal(pool.size,0);
+  source.dispose();wire.dispose();
+});
 function camera(perspective=false){
   const camera=perspective?new THREE.PerspectiveCamera(60,1,0.1,100):new THREE.OrthographicCamera(-10,10,10,-10,0.1,100);
   camera.position.set(0,0,20);camera.lookAt(0,0,0);camera.updateMatrixWorld();return camera;

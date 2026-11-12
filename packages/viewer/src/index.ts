@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import {dimensionStroke,moveDimensionStroke,placeDimensionLabels,angleGeometry,dimensionText,placeAnnotation} from './dimension-display';
 export {dimensionText} from './dimension-display';
 import {setRenderedVisibility} from './visibility';
+import {useCadpadHover} from './render-policy';
 import {sceneEntity,sameEntity,referenceLetter} from './entities';
 export {sceneEntity,sameEntity,referenceLetter} from './entities';
 import {revisionBuffers,type BufferDescriptor} from './buffers';
@@ -126,6 +127,8 @@ export class CadViewport {
   private pickingPool=scenePicking();
   private pickingWorkspace:string|null=null;
   private disposed = false;
+  private suspended = false;
+  private cancelBufferPlan:(()=>void)|null=null;
   private presented = false;
   private repairCamera:{position:Vec3;quaternion:[number,number,number,number];target:Vec3;zoom:number;orthographic:boolean}|null=null;
   private renderedBuffers:ReturnType<typeof shareRenderBuffers>|null=null;
@@ -153,7 +156,7 @@ export class CadViewport {
     try{
       container.appendChild(this.host);
       this.display = allocatedDisplay = new Display(this.host, { cadWidth: container.clientWidth, height: container.clientHeight,
-        treeWidth: 250, tools: false, measureTools: false, selectTool: false, theme: 'light',
+        treeWidth: 250, tools: false, measureTools: false, selectTool: false, theme: 'browser',
         externalMeasurementBackend: true, explodeTool: false, zscaleTool: false, zebraTool: false, studioTool: false, glass: true, pinning: false });
       this.viewer = allocatedViewer = new Viewer(this.display, { up: 'Z', ortho: true, axes: false }, changes => {
         // The pinned viewer notifies after building the groups and before its
@@ -164,6 +167,7 @@ export class CadViewport {
           this.renderStorage.finishSwap();
         }
       });
+      useCadpadHover(this.viewer);
       // Three's listeners are registered by its constructor first. Its restored
       // handler recreates device state before we request a display-only reload.
       this.viewer.renderer.domElement.addEventListener('webglcontextlost',this.graphicsLost);
@@ -214,7 +218,7 @@ export class CadViewport {
   }
 
   private resizeViewport(){
-    if(this.contextLost)return;
+    if(this.contextLost||this.suspended)return;
     const width=Math.max(1,this.container.clientWidth),height=Math.max(1,this.container.clientHeight);
     // Viewer chrome floats over the scene. Reserving a band for it, or leaving
     // the viewer toolbar in normal flow, clips the model.
@@ -236,7 +240,24 @@ export class CadViewport {
   sceneState(workspace:string,revision:string){
     return !this.disposed&&this.parts.length>0&&workspace===this.pickingWorkspace&&revision===this.revision?{selection:this.selectedEntity?{...this.selectedEntity}:null,hidden:this.parts.filter(part=>!this.visible.has(part.instance_id)).map(part=>part.instance_id)}:null;
   }
-  cancelLoad(){this.loadSequence++;}
+  cancelLoad(){this.loadSequence++;this.cancelBufferPlan?.();this.cancelBufferPlan=null;}
+
+  /** Hidden tabs retain interaction state, not mesh arrays, BVHs or GPU geometry. */
+  suspend(){
+    if(this.disposed||this.suspended)return;
+    if(this.presented)this.rememberCamera();
+    this.suspended=true;this.presented=false;this.cancelLoad();
+    this.clearPressMarker();this.cancelDrag();this.cancelSimulationFrame();this.cancelHover();
+    this.hovered=null;this.clearHighlights();this.clearBadges();this.clearAnnotations();
+    this.renderStorage?.dispose();this.renderStorage=null;
+    this.renderedBuffers?.dispose();this.renderedBuffers=null;
+    for(const geometry of this.pickGeometry.values())geometry.dispose();
+    this.pickGeometry.clear();this.pickingPool=scenePicking();this.revisionBytes.clear();
+    this.viewer.clear();
+    this.viewer.renderer.renderLists.dispose();
+    // WebKit also retains the canvas backing buffer after the scene is cleared.
+    this.viewer.renderer.setSize(1,1,false);
+  }
 
   private rememberCamera(){
     const camera=this.viewer.getCameraLocationSettings();
@@ -261,13 +282,15 @@ export class CadViewport {
 
   async load(model: SceneModel, revision: string, artifact: ArtifactLoader, workspace:string|null=null) {
     if(this.contextLost)throw new Error('The graphics connection is unavailable. Wait for it to return before retrying the view.');
-    const sequence = ++this.loadSequence;
+    this.cancelLoad();this.suspended=false;
+    const sequence = this.loadSequence;
     const picking = new Map<string, PickGeometry>();
     const preparePicking=workspace&&workspace===this.pickingWorkspace?this.pickingPool:scenePicking();
     const rawBuffers = new Map<string, MeshBuffers>();
     const topology = new Map(model.parts.map(part=>[part.instance_id,part.mesh]));
     const paths = new Map<string, Part>();
     const bufferPlan=this.revisionBytes.begin(workspace,artifact);
+    const releasePlan=()=>bufferPlan.discard();this.cancelBufferPlan=releasePlan;
     const shapes = await Promise.all(model.parts.map(async (part, index): Promise<Shapes> => {
       const buffers = Object.fromEntries(await Promise.all(Object.entries(part.mesh.buffers).map(async ([key, info]) => {
         const data = await bufferPlan.load(info);
@@ -315,7 +338,7 @@ export class CadViewport {
     this.selectedEntity=retainedSelection;this.selected=retainedSelection?.instance_id??null;this.hovered=null;
     if(clearSelection)this.onSelect(null,'replacement');
     this.visible = new Set(model.parts.filter(part=>!hidden.has(part.instance_id)).map(part=>part.instance_id));
-    if (!shapes.length){this.renderStorage?.finishSwap();this.setAdvancedTools(this.advancedTools);bufferPlan.commit();return;}
+    if (!shapes.length){this.renderStorage?.finishSwap();this.setAdvancedTools(this.advancedTools);bufferPlan.commit();bufferPlan.discard();if(this.cancelBufferPlan===releasePlan)this.cancelBufferPlan=null;return;}
     this.preparingRender=true;
     try{this.viewer.render({ version: 3, id: '/model', name: 'Model', parts: shapes,
       loc: [[0, 0, 0], [0, 0, 0, 1]] }, { metalness: 0.15, roughness: 0.65 },
@@ -337,7 +360,7 @@ export class CadViewport {
     this.drawReferences();
     this.refreshAnnotations();
     this.viewer.update(true);
-    bufferPlan.commit();
+    bufferPlan.commit();bufferPlan.discard();if(this.cancelBufferPlan===releasePlan)this.cancelBufferPlan=null;
     this.repairCamera=null;
   }
 
@@ -674,6 +697,9 @@ export class CadViewport {
   }
   setDimensions(visible: boolean, scope: Scope) { this.dimensions = visible; this.scope = scope; this.refreshAnnotations(); if (this.presented) this.viewer.update(true); }
   setVisible(instance: string, visible: boolean) {
+    // Opening an assembly replays visibility for every object. Most are already
+    // visible: avoid N full scene redraws and N scans of the assembly on load.
+    if(this.visible.has(instance)===visible)return;
     visible ? this.visible.add(instance) : this.visible.delete(instance);
     if(this.presented)for (const [path, part] of this.paths) if (part.instance_id === instance) setRenderedVisibility(this.viewer,path,visible);
     if(!visible&&this.selected===instance){this.selectEntity(null);this.onSelect(null);}
@@ -872,7 +898,7 @@ export class CadViewport {
   }
 
   dispose() {
-    this.revisionBytes.clear();
+    this.cancelLoad();this.revisionBytes.clear();
     this.renderStorage?.dispose();this.renderStorage=null;
     this.disposed = true;this.presented=false;this.repairCamera=null; this.loadSequence++;this.cancelSimulationFrame();this.cancelHover();
     this.renderedBuffers?.dispose();this.renderedBuffers=null;
