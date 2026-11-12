@@ -993,6 +993,44 @@ async fn viewport_references_reach_the_model_with_component_source_exact_propert
             .collect::<Vec<_>>(),
         [("A", "parts/plate.py"), ("B", "parts/plate.py")]
     );
+    // The shared chat belongs to the project, while references belong to a model tab.
+    let (model_workspace, job) = core
+        .open_project_model(&ws, &revision, "parts/plate.py", "build", "user")
+        .await
+        .unwrap();
+    let model_revision = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let job = core.get_job(&model_workspace, &job.id).await.unwrap();
+            if let Some(revision) = job.resulting_revision {
+                break revision;
+            }
+            assert_ne!(job.state, cadpad_core::JobState::Failed, "{:?}", job.diagnostics);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    let model_entity = cadpad_core::tools::Entity {
+        revision: model_revision.clone(),
+        ..entity("part:0")
+    };
+    let turn = service.start_in_chat_for_model(
+        ws.clone(), "Adjust this model".into(), attachments(vec![model_entity]), None,
+        Some(model_workspace.clone()),
+    ).await.unwrap();
+    assert_eq!(turn.workspace_id, ws, "the conversation remains on the project");
+    let completed = terminal(&service, &turn).await;
+    assert_eq!(completed.state, TurnState::Succeeded, "{:?}", completed.error);
+    let message = provider.0.lock().unwrap().clone().unwrap();
+    let context = match &message.content[0] {
+        Block::Text { text } => text,
+        other => panic!("expected reference context, got {other:?}"),
+    };
+    assert!(context.contains("parts/plate.py"));
+    assert!(!context.contains("\"unavailable\""), "model references resolve in their own workspace: {context}");
+    assert_eq!(service.conversation(&ws, None).unwrap()["messages"][2]["references"][0]["part"], "plate");
+    let unrelated = core.create_workspace("user").await.unwrap();
+    assert_eq!(service.start_in_chat_for_model(
+        ws.clone(), "Wrong model".into(), Default::default(), None, Some(unrelated),
+    ).await.unwrap_err().code(), "INVALID_REQUEST");
 }
 
 struct ChatHistoryProvider(Mutex<Vec<String>>, Option<Arc<tokio::sync::Semaphore>>);

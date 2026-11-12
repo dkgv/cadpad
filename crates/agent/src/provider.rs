@@ -103,7 +103,7 @@ impl Anthropic {
                 "Provider endpoint must be the official HTTPS API or a loopback test server",
             ));
         }
-        if model.is_empty() || model.len() > 128 || model.chars().any(char::is_control) {
+        if model.is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
             return Err(Error::domain("INVALID_PARAMETER", "Enter a model ID"));
         }
         let client = reqwest::Client::builder()

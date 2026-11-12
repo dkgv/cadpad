@@ -141,14 +141,7 @@ pub async fn detect(backend: Backend) -> Detection {
         detection.detail = "Uses an Anthropic API key from the keychain".into();
         return detection;
     }
-    let mut binary = None;
-    for name in candidates(backend) {
-        if let Some(path) = which(name).await {
-            binary = Some(path);
-            break;
-        }
-    }
-    let Some(binary) = binary else {
+    let Some(binary) = binary(backend).await else {
         detection.detail = format!(
             "Install the {} to use your subscription from Cadpad",
             backend.label()
@@ -214,6 +207,158 @@ pub struct LaunchRequest<'a> {
     pub project_directory: Option<&'a std::path::Path>,
     pub prompt: &'a str,
     pub client_name: &'a str,
+    /// Empty means the CLI's own default. A saved backend label is treated the same way.
+    pub model: &'a str,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// Model ids are passed as a single CLI argument, so they cannot look like flags.
+pub fn valid_model_id(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 200
+        && !model.starts_with('-')
+        && model.chars().all(|char| {
+            char.is_ascii_alphanumeric()
+                || matches!(char, '.' | '_' | '-' | ':' | '@' | '/' | '+' | '=' | '[' | ']' | ',')
+        })
+}
+
+/// The id to send to a provider, or empty when the user wants that provider's default.
+pub fn selected_model(model: &str) -> &str {
+    let model = model.trim();
+    if valid_model_id(model) { model } else { "" }
+}
+
+pub fn legacy_default_model(model: &str) -> bool {
+    let model = model.trim();
+    model.is_empty()
+        || [
+            Backend::AnthropicApi,
+            Backend::ClaudeCli,
+            Backend::CodexCli,
+            Backend::CursorCli,
+        ]
+        .into_iter()
+        .any(|backend| backend.label() == model)
+}
+
+pub fn parse_cursor_models(text: &str) -> Vec<ModelChoice> {
+    let mut models: Vec<ModelChoice> = Vec::new();
+    for line in text.lines() {
+        let Some((id, label)) = line.trim().split_once(" - ") else { continue };
+        let id = id.trim();
+        let label = label.trim();
+        if !valid_model_id(id) || label.is_empty() || models.iter().any(|model| model.id == id) {
+            continue;
+        }
+        models.push(ModelChoice { id: id.to_string(), label: label.to_string() });
+    }
+    models
+}
+
+pub fn parse_codex_models(value: &Value) -> Vec<ModelChoice> {
+    let Some(entries) = value.get("models").and_then(Value::as_array) else { return Vec::new() };
+    let mut rows = Vec::new();
+    for entry in entries {
+        if entry.get("visibility").and_then(Value::as_str) == Some("hide") { continue; }
+        let Some(id) = entry.get("slug").and_then(Value::as_str).filter(|id| valid_model_id(id)) else { continue };
+        let label = entry.get("display_name").and_then(Value::as_str).filter(|label| !label.is_empty()).unwrap_or(id);
+        let priority = entry.get("priority").and_then(Value::as_i64).unwrap_or(1_000);
+        rows.push((priority, ModelChoice { id: id.to_string(), label: label.to_string() }));
+    }
+    rows.sort_by_key(|(priority, _)| *priority);
+    rows.into_iter().map(|(_, model)| model).collect()
+}
+
+pub fn parse_anthropic_models(value: &Value) -> Vec<ModelChoice> {
+    let Some(entries) = value.get("data").and_then(Value::as_array) else { return Vec::new() };
+    let mut models: Vec<ModelChoice> = Vec::new();
+    for entry in entries {
+        let Some(id) = entry.get("id").and_then(Value::as_str).filter(|id| valid_model_id(id)) else { continue };
+        if models.iter().any(|model| model.id == id) { continue; }
+        let label = entry.get("display_name").and_then(Value::as_str).filter(|label| !label.is_empty()).unwrap_or(id);
+        models.push(ModelChoice { id: id.to_string(), label: label.to_string() });
+    }
+    models
+}
+
+pub fn parse_claude_model_help(help: &str) -> Vec<ModelChoice> {
+    let mut block = String::new();
+    let mut remaining = 0u8;
+    for line in help.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("--model") { remaining = 8; }
+        if remaining == 0 { continue; }
+        // The alias examples sit in the wrapped --model description, before the next flag.
+        if !trimmed.starts_with("--model") && trimmed.starts_with('-') { break; }
+        block.push_str(line);
+        block.push(' ');
+        remaining -= 1;
+    }
+    let mut models: Vec<ModelChoice> = Vec::new();
+    let mut rest = block.as_str();
+    while let Some(start) = rest.find('\'') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('\'') else { break };
+        let id = &rest[..end];
+        rest = &rest[end + 1..];
+        if valid_model_id(id) && !models.iter().any(|model| model.id == id) {
+            let mut label = id.to_string();
+            if let Some(first) = label.get_mut(..1) { first.make_ascii_uppercase(); }
+            models.push(ModelChoice { id: id.to_string(), label: format!("{label} (latest)") });
+        }
+    }
+    models
+}
+
+fn claude_fallback() -> Vec<ModelChoice> {
+    ["fable", "opus", "sonnet"].into_iter().map(|id| {
+        let mut label = id.to_string();
+        if let Some(first) = label.get_mut(..1) { first.make_ascii_uppercase(); }
+        ModelChoice { id: id.to_string(), label: format!("{label} (latest)") }
+    }).collect()
+}
+
+fn json_document(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end > start).then(|| &text[start..=end])
+}
+
+async fn binary(backend: Backend) -> Option<PathBuf> {
+    for name in candidates(backend) {
+        if let Some(path) = which(name).await { return Some(path); }
+    }
+    None
+}
+
+/// Models the installed CLI can run. Claude falls back to the aliases its help documents.
+pub async fn list_models(backend: Backend) -> Vec<ModelChoice> {
+    if backend == Backend::AnthropicApi { return Vec::new(); }
+    let Some(binary) = binary(backend).await else {
+        return if backend == Backend::ClaudeCli { claude_fallback() } else { Vec::new() };
+    };
+    match backend {
+        Backend::ClaudeCli => {
+            let help = run_status(&binary, &["--help"]).await.map(|(_, text)| text);
+            let parsed = help.as_deref().map(parse_claude_model_help).unwrap_or_default();
+            if parsed.is_empty() { claude_fallback() } else { parsed }
+        }
+        Backend::CodexCli => {
+            let Some((ok, text)) = run_status(&binary, &["debug", "models"]).await else { return Vec::new() };
+            if !ok { return Vec::new(); }
+            json_document(&text).and_then(|text| serde_json::from_str(text).ok()).map(|value| parse_codex_models(&value)).unwrap_or_default()
+        }
+        Backend::CursorCli => {
+            run_status(&binary, &["--list-models"]).await.map(|(_, text)| parse_cursor_models(&text)).unwrap_or_default()
+        }
+        Backend::AnthropicApi => Vec::new(),
+    }
 }
 
 pub struct Launch {
@@ -273,6 +418,8 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
         request.workspace_id
     );
     let system = format!("{system}\nProject folder: {}. This is the sole source of truth. Paths mentioned in old messages are historical context, not additional workspaces. Do not read, edit, synchronize or export to other project folders. Use Cadpad MCP for all model edits and managed exports. Never maintain a second copy of the model.", request.project_directory.map(|path| path.display().to_string()).unwrap_or_else(|| "unsaved Cadpad workspace".into()));
+    let model = selected_model(request.model);
+    let model_args: &[&str] = if model.is_empty() { &[] } else { &["--model", model] };
     let child = match request.backend {
         Backend::ClaudeCli => {
             let mcp_path = work_dir.join("mcp.json");
@@ -296,6 +443,7 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                     "--append-system-prompt",
                     &system,
                 ])
+                .args(model_args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -335,6 +483,7 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                     &args_config,
                     request.prompt,
                 ])
+                .args(model_args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -366,6 +515,7 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                     "--workspace",
                 ])
                 .arg(&work_dir)
+                .args(model_args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

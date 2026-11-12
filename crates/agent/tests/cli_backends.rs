@@ -252,3 +252,24 @@ async fn cli_stderr_is_drained_so_verbose_output_cannot_block_completion() {
     .unwrap();
     assert!(done);
 }
+
+#[test]
+fn model_catalogs_keep_selectable_ids_and_drop_hidden_or_unsafe_values() {
+    use cadpad_agent::cli::{parse_anthropic_models, parse_claude_model_help, parse_codex_models, parse_cursor_models, selected_model};
+    let cursor = parse_cursor_models("Available models\n\nauto - Auto (default)\ngpt-5.6-sol-high - GPT-5.6 Sol High\n--bad - Ignored\n");
+    assert_eq!(cursor.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["auto", "gpt-5.6-sol-high"]);
+    let codex = parse_codex_models(&json!({"models":[
+        {"slug":"gpt-6-sol","display_name":"GPT-6 Sol","visibility":"list","priority":4},
+        {"slug":"gpt-6.1-sol","display_name":"GPT-6.1-Sol","visibility":"list","priority":1},
+        {"slug":"hidden-model","display_name":"Hidden","visibility":"hide","priority":0},
+        {"slug":"-flag","display_name":"Unsafe","visibility":"list","priority":2}
+    ]}));
+    assert_eq!(codex.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["gpt-6.1-sol", "gpt-6-sol"]);
+    let claude = parse_claude_model_help("  --model <model>  alias (e.g. 'fable', 'opus', or 'sonnet')\n  -n, --name <name>  'ignored'\n");
+    assert_eq!(claude.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["fable", "opus", "sonnet"]);
+    let anthropic = parse_anthropic_models(&json!({"data":[{"id":"claude-sonnet","display_name":"Claude Sonnet"},{"id":"claude sonnet","display_name":"Spaced"}]}));
+    assert_eq!(anthropic.len(), 1);
+    assert_eq!(selected_model(" composer-2.5 "), "composer-2.5");
+    assert_eq!(selected_model("Cursor CLI"), "");
+    assert_eq!(selected_model("--model"), "");
+}

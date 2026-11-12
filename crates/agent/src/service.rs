@@ -302,7 +302,7 @@ impl AgentService {
         Ok(json!({
             "provider": settings.backend.as_str(),
             "backend": settings.backend.as_str(),
-            "model": settings.model,
+            "model": cli::selected_model(&settings.model),
             "configured": configured,
             "credential_storage": if settings.backend.is_cli() {"local_cli"} else {"system_keychain"},
             "cli": detections,
@@ -318,11 +318,11 @@ impl AgentService {
         let backend = Backend::parse(&backend)?;
         let model = model.trim().to_string();
         if backend == Backend::AnthropicApi {
-            if model.is_empty() || model.len() > 128 || model.chars().any(char::is_control) {
+            if cli::selected_model(&model).is_empty() {
                 return Err(Error::domain("INVALID_PARAMETER", "Enter an API model ID"));
             }
-        } else if model.len() > 128 || model.chars().any(char::is_control) {
-            return Err(Error::domain("INVALID_PARAMETER", "Invalid model ID"));
+        } else if !cli::legacy_default_model(&model) && cli::selected_model(&model).is_empty() {
+            return Err(Error::domain("INVALID_PARAMETER", "Enter a model ID"));
         }
         if backend.is_cli() {
             if self.inner.bridge.is_none() {
@@ -350,16 +350,51 @@ impl AgentService {
         }
         let next = Settings {
             backend,
-            model: if backend.is_cli() && model.is_empty() {
-                backend.label().into()
-            } else {
-                model
-            },
+            model: if backend.is_cli() { cli::selected_model(&model).to_string() } else { model },
         };
         write_json(&self.inner.root.join("settings.json"), &next).await?;
         *settings = next;
         drop(settings);
         self.settings().await
+    }
+    /// Models the selected provider can run. CLI catalogs come from the installed tool.
+    pub async fn models(&self, backend: String) -> Result<Value> {
+        let backend = if backend.trim().is_empty() {
+            self.inner.settings.lock().await.backend
+        } else {
+            Backend::parse(&backend)?
+        };
+        let models = if backend == Backend::AnthropicApi {
+            self.anthropic_models().await
+        } else {
+            cli::list_models(backend).await
+        };
+        Ok(json!(models))
+    }
+    async fn anthropic_models(&self) -> Vec<cli::ModelChoice> {
+        let credentials = self.inner.credentials.clone();
+        let key = match tokio::task::spawn_blocking(move || credentials.get()).await {
+            Ok(Ok(Some(key))) => key,
+            _ => return Vec::new(),
+        };
+        let Ok(client) = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(8))
+            .build()
+        else {
+            return Vec::new();
+        };
+        let Ok(response) = client
+            .get("https://api.anthropic.com/v1/models")
+            .header("x-api-key", key.expose())
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+        else {
+            return Vec::new();
+        };
+        if !response.status().is_success() { return Vec::new(); }
+        response.json::<Value>().await.ok().map(|value| cli::parse_anthropic_models(&value)).unwrap_or_default()
     }
     pub async fn forget_key(&self) -> Result<()> {
         let _settings = self.inner.settings.lock().await;
@@ -562,7 +597,26 @@ impl AgentService {
         attachments: Attachments,
         expected_chat: Option<String>,
     ) -> Result<Turn> {
+        self.start_in_chat_for_model(workspace, prompt, attachments, expected_chat, None)
+            .await
+    }
+    /// Keep conversations on the project while modeling the explicitly focused view.
+    pub async fn start_in_chat_for_model(
+        &self,
+        workspace: String,
+        prompt: String,
+        attachments: Attachments,
+        expected_chat: Option<String>,
+        model_workspace: Option<String>,
+    ) -> Result<Turn> {
         valid_workspace(&workspace)?;
+        let model_workspace = model_workspace.unwrap_or_else(|| workspace.clone());
+        valid_workspace(&model_workspace)?;
+        if model_workspace != workspace
+            && self.inner.core.model_parent(&model_workspace).await.as_deref() != Some(workspace.as_str())
+        {
+            return Err(Error::domain("INVALID_REQUEST", "The selected model does not belong to this project"));
+        }
         references::validate_image(&attachments.image)?;
         if prompt.trim().is_empty() {
             return Err(Error::domain(
@@ -577,7 +631,7 @@ impl AgentService {
         let chips = if attachments.references.is_empty() {
             vec![]
         } else {
-            let project = self.inner.core.get_project(&workspace).await?;
+            let project = self.inner.core.get_project(&model_workspace).await?;
             references::summarize(&project, &attachments.references)?
         };
         let settings = self.inner.settings.lock().await.clone();
@@ -702,6 +756,7 @@ impl AgentService {
         let service = self.clone();
         let task_turn = turn.clone();
         let pending = PendingReferences {
+            workspace: model_workspace,
             entities: attachments.references,
             chips,
             image: attachments.image,
@@ -852,6 +907,7 @@ impl AgentService {
             expired.store(true, std::sync::atomic::Ordering::SeqCst);
             deadline_core.revoke_actor(&actor).await;
         });
+        let model_workspace = pending.workspace.clone();
         let result = async {
             self.inner.core.ensure_actor_active(&turn.actor)?;
             let attachment = self
@@ -874,14 +930,15 @@ impl AgentService {
                 let prompt = if transcript.is_empty() { prompt } else {
                     format!("Prior conversation (context only; follow the latest user message):\n{}\n\nLatest user message:\n{}", transcript, prompt)
                 };
-                let project_directory = self.inner.core.project_directory(&turn.workspace_id).await.ok();
+                let project_directory = self.inner.core.project_directory(&model_workspace).await.ok();
                 let launch = cli::spawn(cli::LaunchRequest {
                     backend: settings.backend,
                     bridge: &bridge,
-                    workspace_id: &turn.workspace_id,
+                    workspace_id: &model_workspace,
                     project_directory: project_directory.as_deref(),
                     prompt: &prompt,
                     client_name: &format!("Cadpad · {}", settings.backend.label()),
+                    model: &settings.model,
                 })
                 .await?;
                 let service = self.clone();
@@ -936,7 +993,7 @@ impl AgentService {
                 runner::run(
                     self.inner.core.clone(),
                     runner::RunInput {
-                        workspace: turn.workspace_id.clone(),
+                        workspace: model_workspace.clone(),
                         actor: turn.actor.clone(),
                         prompt,
                         history,
@@ -1106,6 +1163,7 @@ impl AgentService {
     }
 }
 struct PendingReferences {
+    workspace: String,
     entities: Vec<cadpad_core::tools::Entity>,
     chips: Vec<ChatReference>,
     image: Option<String>,
@@ -1137,17 +1195,17 @@ impl AgentService {
                 detail: None,
             },
         );
-        let project = self.inner.core.get_project(&turn.workspace_id).await?;
+        let project = self.inner.core.get_project(&pending.workspace).await?;
         let pose_version = project["motion"]["pose_version"].as_u64().unwrap_or(0);
         let tools = runner::CoreTools {
             core: self.inner.core.clone(),
-            workspace: turn.workspace_id.clone(),
+            workspace: pending.workspace.clone(),
             actor: turn.actor.clone(),
         };
         let resolved = references::resolve(
             &tools,
             references::Request {
-                workspace: &turn.workspace_id,
+                workspace: &pending.workspace,
                 revision: &first.revision,
                 pose_version,
                 entities: &pending.entities,
