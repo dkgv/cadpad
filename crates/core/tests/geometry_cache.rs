@@ -230,12 +230,7 @@ async fn corrupt_native_bytes_regenerate_and_failed_candidates_preserve_the_comm
     .unwrap();
     // Touch a no-op comment so inputs change and skip-source cannot apply; the
     // shape builder must regenerate after the corrupt offer is refused.
-    let repaired = build(
-        &core,
-        &ws,
-        &format!("{SOURCE}\n# force-native\n"),
-    )
-    .await;
+    let repaired = build(&core, &ws, &format!("{SOURCE}\n# force-native\n")).await;
     let revision = verify_job(&repaired, true).to_owned();
     assert_eq!(
         normalized(previous["model"].clone())["parts"][0]["bounds"],
@@ -288,14 +283,16 @@ async fn matching_digest_reuses_across_an_intervening_different_revision() {
         "expected retained prior digest offers after intervening revision: {after_change}"
     );
     let restored = build(&core, &ws, SOURCE).await;
-    assert_eq!(restored.state, JobState::Succeeded, "{:?}", restored.diagnostics);
-    assert_ne!(
-        restored.resulting_revision.as_deref(),
-        Some(first.as_str())
-    );
     assert_eq!(
-        normalized(core.get_project(&ws).await.unwrap()["model"].clone())["parts"][0]["bounds"]
-            ["size"][0],
+        restored.state,
+        JobState::Succeeded,
+        "{:?}",
+        restored.diagnostics
+    );
+    assert_ne!(restored.resulting_revision.as_deref(), Some(first.as_str()));
+    assert_eq!(
+        normalized(core.get_project(&ws).await.unwrap()["model"].clone())["parts"][0]["bounds"]["size"]
+            [0],
         40.
     );
     let logs = restored.diagnostics["logs"].as_str().unwrap_or("");

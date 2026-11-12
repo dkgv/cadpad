@@ -519,7 +519,9 @@ fn path_carriage_with_wall(
     gravity: [f64; 3],
     wall_x_m: Option<f64>,
 ) -> (Simulation, Mechanism) {
-    let mut parts = vec![json!({"instance_id":"carriage","position":[0,0,0],"bounds":{"min":[-5,-5,-5],"max":[5,5,5]},"volume":1000})];
+    let mut parts = vec![
+        json!({"instance_id":"carriage","position":[0,0,0],"bounds":{"min":[-5,-5,-5],"max":[5,5,5]},"volume":1000}),
+    ];
     let mut covered = vec![json!("carriage")];
     let mut collision_bodies = json!({"carriage":[{"shape":{"type":"bounds"}}]});
     let mut physics_bodies = json!({"carriage":{"type":"dynamic","mass":{"type":"kilograms","mass_kg":1},"friction":0,"restitution":0}});

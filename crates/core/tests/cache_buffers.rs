@@ -623,10 +623,7 @@ async fn hard_disk_quota_admits_under_budget_and_rejects_after_managed_data_fill
     let job = terminal(&core, &ws, &job).await;
     assert_eq!(job.state, JobState::Failed, "{:?}", job.diagnostics);
     assert_eq!(job.diagnostics["code"], "DISK_QUOTA_EXCEEDED");
-    assert_eq!(
-        core.get_project(&ws).await.unwrap()["revision"],
-        first
-    );
+    assert_eq!(core.get_project(&ws).await.unwrap()["revision"], first);
     let still = core.disk_usage().unwrap();
     assert!(!still.within_quota);
     assert_eq!(still.quota_bytes, 1);

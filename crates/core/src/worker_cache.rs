@@ -4,10 +4,10 @@
 //! the count cap alone is not the aggregate RAM quota.
 use crate::{Worker, Workspace};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Deref,
     sync::{
-        Arc, Weak,
+        Arc, RwLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -20,6 +20,7 @@ pub(crate) struct WorkerCache {
     workspaces: Weak<Workspaces>,
     clock: AtomicU64,
     queued: AtomicBool,
+    retained: RwLock<Option<HashSet<String>>>,
 }
 struct QueuedMaintenance(Arc<WorkerCache>);
 impl Drop for QueuedMaintenance {
@@ -33,7 +34,12 @@ impl WorkerCache {
             workspaces: Arc::downgrade(workspaces),
             clock: AtomicU64::new(1),
             queued: AtomicBool::new(false),
+            retained: RwLock::new(None),
         }
+    }
+    pub(crate) fn retain(self: &Arc<Self>, workspaces: Vec<String>) {
+        *self.retained.write().unwrap() = Some(workspaces.into_iter().collect());
+        self.schedule();
     }
     pub(crate) fn next_use(&self) -> u64 {
         self.clock.fetch_add(1, Ordering::Relaxed)
@@ -95,10 +101,20 @@ impl WorkerCache {
                         .map(|_| (workspace.worker_last_used, id.clone()))
                 })
                 .collect::<Vec<_>>();
-            let remove = idle.len().saturating_sub(MAX_IDLE_WORKERS);
-            idle.sort_unstable();
+            idle.sort_unstable_by(|a, b| b.cmp(a));
+            let retained = self.retained.read().unwrap();
+            let mut kept = 0;
             idle.into_iter()
-                .take(remove)
+                .filter(|(_, id)| {
+                    if kept < MAX_IDLE_WORKERS
+                        && retained.as_ref().is_none_or(|ids| ids.contains(id))
+                    {
+                        kept += 1;
+                        false
+                    } else {
+                        true
+                    }
+                })
                 .filter_map(|(_, id)| workspaces.get_mut(&id).unwrap().worker.take())
                 .collect::<Vec<_>>()
         };
@@ -156,5 +172,96 @@ mod tests {
         cache.trim().await;
         assert!(cache.workspaces.upgrade().is_none());
         assert!(reopened.list_workspaces().await.contains(&ws));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hidden_workers_retire_after_the_last_busy_lease_without_deleting_projects() {
+        use super::*;
+        let temp = tempfile::tempdir().unwrap();
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let mut config =
+            crate::worker::WorkerConfig::development(&repo).uncontained_for_trusted_tests();
+        // A controlled interpreter proves process reaping without running a CAD build.
+        config.args = vec![
+            "-c".into(),
+            "import time;data=bytearray(32*1024*1024);time.sleep(30)".into(),
+        ];
+        config.module_path = None;
+        let core = crate::Core::open(temp.path().join("app"), config.clone())
+            .await
+            .unwrap();
+        let visible = core.create_workspace("user").await.unwrap();
+        let hidden = core.create_workspace("user").await.unwrap();
+        let mut pids = Vec::new();
+        for id in [&visible, &hidden] {
+            let marker = temp.path().join(format!("{id}.pid"));
+            let code = format!(
+                "import os,time;from pathlib import Path;data=bytearray(32*1024*1024);Path({}).write_text(str(os.getpid()));time.sleep(30)",
+                serde_json::to_string(&marker).unwrap()
+            );
+            config.args = vec!["-c".into(), code];
+            let worker = crate::Worker::spawn(&config, temp.path().join(id))
+                .await
+                .unwrap();
+            core.workspaces.lock().await.get_mut(id).unwrap().worker =
+                Some(Arc::new(Mutex::new(worker)));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !marker.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            pids.push(
+                std::fs::read_to_string(marker)
+                    .unwrap()
+                    .parse::<i32>()
+                    .unwrap(),
+            );
+        }
+        let lease = {
+            let mut all = core.workspaces.lock().await;
+            core.worker_cache
+                .acquire(all.get_mut(&hidden).unwrap())
+                .unwrap()
+        };
+        core.retain_workspace_memory(vec![visible.clone()]);
+        core.worker_cache.trim().await;
+        assert!(
+            core.workspaces.lock().await[&hidden].worker.is_some(),
+            "busy operations survive hiding a tab"
+        );
+        assert!(core.workspaces.lock().await[&visible].worker.is_some());
+        drop(lease);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if core.workspaces.lock().await[&hidden].worker.is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            core.list_workspaces().await.contains(&hidden),
+            "project state remains available for recovery"
+        );
+        core.retain_workspace_memory(vec![]);
+        core.worker_cache.trim().await;
+        assert!(core.workspaces.lock().await[&visible].worker.is_none());
+        assert!(core.list_workspaces().await.contains(&visible));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for pid in pids {
+                while unsafe { libc::kill(pid, 0) } == 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
+        })
+        .await
+        .expect("both memory-owning interpreters must actually be reaped");
     }
 }

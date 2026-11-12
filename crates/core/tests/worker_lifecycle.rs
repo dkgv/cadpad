@@ -134,7 +134,9 @@ async fn explicit_stop_reaps_guardian_and_busy_contained_interpreter_without_soc
     // guardian must not leak additional private lease/liveness sockets.
     let sockets = pids["sockets"].as_array().unwrap();
     assert!(
-        sockets.iter().all(|value| matches!(value.as_u64(), Some(3 | 4))),
+        sockets
+            .iter()
+            .all(|value| matches!(value.as_u64(), Some(3 | 4))),
         "unexpected inherited sockets: {pids}"
     );
     assert_eq!(pids["parent_signal_denied"], true);
@@ -462,4 +464,3 @@ async fn app_sigkill_terminates_a_stopped_contained_worker_without_cooperative_p
     gone(pids["guardian"].as_i64().unwrap() as i32).await;
     gone(pids["anchor"].as_i64().unwrap() as i32).await;
 }
-

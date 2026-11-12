@@ -984,7 +984,9 @@ fn measurement_count(check: &Check) -> usize {
 }
 /// Deterministic plain-language requirements and results for agents, MCP and UI.
 pub fn test_review(definition: &Definition, outcome: Option<&Outcome>) -> TestReview {
-    let measurements = outcome.map(|value| value.measurements.as_slice()).unwrap_or(&[]);
+    let measurements = outcome
+        .map(|value| value.measurements.as_slice())
+        .unwrap_or(&[]);
     let mut offset = 0;
     let checks = definition
         .checks
@@ -1018,7 +1020,11 @@ pub fn test_review(definition: &Definition, outcome: Option<&Outcome>) -> TestRe
             if scored == 0 {
                 format!(
                     "{} of {} checks passed",
-                    outcome.measurements.iter().filter(|item| item.passed).count(),
+                    outcome
+                        .measurements
+                        .iter()
+                        .filter(|item| item.passed)
+                        .count(),
                     outcome.measurements.len()
                 )
             } else {
@@ -1092,9 +1098,11 @@ mod review_tests {
         assert!(unread.checks[0].statement.contains("at least 5 mm"));
         assert!(unread.checks[0].statement.contains("world +X"));
         assert!(unread.checks[0].statement.contains("hinge motor disabled"));
-        assert!(unread.checks[0]
-            .statement
-            .contains("normal impulse of at least 0.000001 N s"));
+        assert!(
+            unread.checks[0]
+                .statement
+                .contains("normal impulse of at least 0.000001 N s")
+        );
         assert_eq!(
             unread.checks[1].statement,
             "slide finishes at 10 mm, within ±0.5 mm."

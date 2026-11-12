@@ -777,7 +777,10 @@ impl Definition {
         seed[driver] = target;
         match self.solve(mechanism, &seed, cancel) {
             Ok((q, report)) => return Ok(Some((q, report.iterations))),
-            Err(error) if error.code() != "INFEASIBLE_MECHANISM" && error.code() != "SINGULAR_MECHANISM" => {
+            Err(error)
+                if error.code() != "INFEASIBLE_MECHANISM"
+                    && error.code() != "SINGULAR_MECHANISM" =>
+            {
                 return Err(error);
             }
             Err(_) => {}
@@ -803,7 +806,8 @@ impl Definition {
                     lo = q;
                 }
                 Err(error)
-                    if error.code() == "INFEASIBLE_MECHANISM" || error.code() == "SINGULAR_MECHANISM" =>
+                    if error.code() == "INFEASIBLE_MECHANISM"
+                        || error.code() == "SINGULAR_MECHANISM" =>
                 {
                     hi = mid;
                 }
@@ -963,17 +967,19 @@ fn advance(
     )
 }
 
-
-
-
-
 #[cfg(test)]
 mod interactive_pose_tests {
     use serde_json::json;
     use std::time::{Duration, Instant};
     #[test]
     fn small_interactive_pose_steps_avoid_certified_path_work() {
-        let mut def = crate::kinematics::decode(&serde_json::from_str::<serde_json::Value>(include_str!("../../../fixtures/four_bar.mechanism.json")).unwrap()).unwrap();
+        let mut def = crate::kinematics::decode(
+            &serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../fixtures/four_bar.mechanism.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         def.collision = None;
         let parts = json!([
             {"instance_id":"ground","position":[0,0,0]},
@@ -983,21 +989,41 @@ mod interactive_pose_tests {
             {"instance_id":"stop","position":[88,33,1]}
         ]);
         let mut mechanism = crate::kinematics::Mechanism::new(def, &parts).unwrap();
-        mechanism.set_pose_cancel("crank", 0.9, "rad", None).unwrap();
+        mechanism
+            .set_pose_cancel("crank", 0.9, "rad", None)
+            .unwrap();
         let mut total = Duration::ZERO;
         for i in 0..40 {
             let target = 1.0 + (i as f64) * 0.05;
             let started = Instant::now();
-            mechanism.set_pose_cancel("crank", target, "rad", None).unwrap();
+            mechanism
+                .set_pose_cancel("crank", target, "rad", None)
+                .unwrap();
             total += started.elapsed();
             assert!(mechanism.last_trajectory().is_none());
-            assert!(!mechanism.evaluate().unwrap().constraints.unwrap().path_certified);
+            assert!(
+                !mechanism
+                    .evaluate()
+                    .unwrap()
+                    .constraints
+                    .unwrap()
+                    .path_certified
+            );
         }
-        assert!(total < Duration::from_millis(40), "interactive steps took {total:?}");
+        assert!(
+            total < Duration::from_millis(40),
+            "interactive steps took {total:?}"
+        );
     }
     #[test]
     fn quick_jumps_return_farthest_feasible_pose_instead_of_hard_failing() {
-        let mut def = crate::kinematics::decode(&serde_json::from_str::<serde_json::Value>(include_str!("../../../fixtures/four_bar.mechanism.json")).unwrap()).unwrap();
+        let mut def = crate::kinematics::decode(
+            &serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../fixtures/four_bar.mechanism.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         def.collision = None;
         let parts = json!([
             {"instance_id":"ground","position":[0,0,0]},
@@ -1009,16 +1035,30 @@ mod interactive_pose_tests {
         let mut mechanism = crate::kinematics::Mechanism::new(def, &parts).unwrap();
         for target in [1.5_f64, 3.0, -2.5, 6.0, -3.0, 7.0, 0.0, 4.2] {
             let from = mechanism.coordinates()[0];
-            let (applied, _) = mechanism.set_pose_cancel("crank", target, "rad", None).unwrap();
-            assert!((mechanism.coordinates()[0] - applied).abs() < 1e-12, "{from} -> {target}");
+            let (applied, _) = mechanism
+                .set_pose_cancel("crank", target, "rad", None)
+                .unwrap();
+            assert!(
+                (mechanism.coordinates()[0] - applied).abs() < 1e-12,
+                "{from} -> {target}"
+            );
             assert!(applied.is_finite());
             // Progress should never reverse away from the request past the start.
-            assert!((applied - target).abs() <= (from - target).abs() + 1e-9, "{from} -> {target} applied {applied}");
+            assert!(
+                (applied - target).abs() <= (from - target).abs() + 1e-9,
+                "{from} -> {target} applied {applied}"
+            );
         }
     }
     #[test]
     fn long_certified_trajectories_segment_instead_of_hitting_path_budget() {
-        let mut def = crate::kinematics::decode(&serde_json::from_str::<serde_json::Value>(include_str!("../../../fixtures/four_bar.mechanism.json")).unwrap()).unwrap();
+        let mut def = crate::kinematics::decode(
+            &serde_json::from_str::<serde_json::Value>(include_str!(
+                "../../../fixtures/four_bar.mechanism.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         def.collision = None;
         let parts = json!([
             {"instance_id":"ground","position":[0,0,0]},
@@ -1031,11 +1071,15 @@ mod interactive_pose_tests {
         let constraints = mechanism.definition().constraints.as_ref().unwrap();
         let start = mechanism.coordinates().to_vec();
         for target in [-3.0_f64, 6.5, 7.0] {
-            let trajectory = constraints.trajectory(&mechanism, &start, 0, target, None).unwrap();
+            let trajectory = constraints
+                .trajectory(&mechanism, &start, 0, target, None)
+                .unwrap();
             assert!(trajectory.nodes.len() > 2, "{target}");
             assert!(trajectory.report.path_certified);
         }
-        let (q, report) = constraints.continue_endpoint(&mechanism, &start, 0, 7.0, None).unwrap();
+        let (q, report) = constraints
+            .continue_endpoint(&mechanism, &start, 0, 7.0, None)
+            .unwrap();
         assert!((q[0] - 7.0).abs() < 1e-12);
         assert!(!report.path_certified);
     }

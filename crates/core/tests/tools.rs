@@ -7,8 +7,7 @@ use serde_json::{Value, json};
 
 #[test]
 fn versioned_schema_matches_rust_contract() {
-    let locked: Value =
-        serde_json::from_str(include_str!("fixtures/tool-schema-v1.json")).unwrap();
+    let locked: Value = serde_json::from_str(include_str!("fixtures/tool-schema-v1.json")).unwrap();
     assert_eq!(locked, json!({"protocol_version":1,"tools":definitions()}));
     for tool in definitions() {
         assert_eq!(tool.input_schema["additionalProperties"], false);

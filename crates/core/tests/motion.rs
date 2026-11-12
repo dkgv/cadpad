@@ -413,7 +413,7 @@ async fn moving_during_a_native_query_or_capture_never_publishes_a_stale_measure
             coordinate: 0.04,
             unit: "m".into(),
             check_collision: true,
-    },
+        },
     )
     .await
     .unwrap();
@@ -449,7 +449,7 @@ async fn moving_during_a_native_query_or_capture_never_publishes_a_stale_measure
             coordinate: 0.06,
             unit: "m".into(),
             check_collision: true,
-    },
+        },
     )
     .await
     .unwrap();
@@ -542,7 +542,7 @@ async fn hinge_pose_keeps_local_dimensions_and_exports_rotated_step_and_stl() {
             coordinate: std::f64::consts::FRAC_PI_2,
             unit: "rad".into(),
             check_collision: true,
-    },
+        },
     )
     .await
     .unwrap();
@@ -735,7 +735,7 @@ async fn slider_and_hinge_traverse_declared_metre_and_radian_limits_without_rebu
                     coordinate: target,
                     unit: "m".into(),
                     check_collision: true,
-    },
+                },
             )
             .await
             .unwrap();
@@ -759,12 +759,12 @@ async fn slider_and_hinge_traverse_declared_metre_and_radian_limits_without_rebu
                     coordinate: target,
                     unit: "rad".into(),
                     check_collision: true,
-    },
+                },
             )
             .await
             .unwrap();
         assert_eq!(moved.applied, target.clamp(-1.2, 1.2));
-        assert_eq!(moved.clamped, !( (-1.2..=1.2).contains(&target) ));
+        assert_eq!(moved.clamped, !((-1.2..=1.2).contains(&target)));
         version = moved.snapshot.pose_version;
     }
     let after = core.get_project(&ws).await.unwrap();

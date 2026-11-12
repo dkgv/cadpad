@@ -297,9 +297,10 @@ async fn native_admission_bounds_active_registries_and_preserves_warm_repair_and
             .unwrap_or_else(|| panic!("expected integer identity {value}"))
     }
     for (ws, rev, _, _) in &pinned {
-        let descriptors: Value =
-            serde_json::from_slice(&std::fs::read(cache(&root, ws, rev).join("open-fds.json")).unwrap())
-                .unwrap();
+        let descriptors: Value = serde_json::from_slice(
+            &std::fs::read(cache(&root, ws, rev).join("open-fds.json")).unwrap(),
+        )
+        .unwrap();
         let descriptors = descriptors
             .as_array()
             .unwrap()
@@ -516,9 +517,7 @@ async fn native_admission_lease_releases_after_owner_sigkill_cleans_up_a_stopped
     // and releases the capacity lease. Resume only if a race left it stopped.
     gone(pids).await;
     if alive(&pids["guardian"]) {
-        let _ = unsafe {
-            libc::kill(pids["guardian"].as_i64().unwrap() as i32, libc::SIGCONT)
-        };
+        let _ = unsafe { libc::kill(pids["guardian"].as_i64().unwrap() as i32, libc::SIGCONT) };
         gone(pids).await;
     }
     assert!(

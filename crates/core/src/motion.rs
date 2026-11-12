@@ -353,19 +353,12 @@ impl Core {
                 if check_collision {
                     if let Some(world) = world {
                         return sweep_in_chunks(
-                            mechanism,
-                            &validated,
-                            &world,
-                            &joint,
-                            coordinate,
-                            &unit,
-                            &cancel,
+                            mechanism, &validated, &world, &joint, coordinate, &unit, &cancel,
                         );
                     }
                 }
                 let mut next = mechanism;
-                let (target, _) =
-                    next.set_pose_cancel(&joint, coordinate, &unit, Some(&cancel))?;
+                let (target, _) = next.set_pose_cancel(&joint, coordinate, &unit, Some(&cancel))?;
                 next.clear_trajectory();
                 Ok((next, target, None, world.is_none() || check_collision))
             })
@@ -424,15 +417,30 @@ impl Core {
         })
     }
     /// Add a joint without replacing existing mechanism settings.
-    pub async fn add_joint(&self, workspace: &str, base: &str, joint: crate::kinematics::Joint, actor: &str) -> Result<Job> {
+    pub async fn add_joint(
+        &self,
+        workspace: &str,
+        base: &str,
+        joint: crate::kinematics::Joint,
+        actor: &str,
+    ) -> Result<Job> {
         let mut definition = {
             let workspaces = self.workspaces.lock().await;
-            let ws = workspaces.get(workspace).ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
-            if ws.stored.current != base { return Err(Error::domain("REVISION_CONFLICT", "Expected revision no longer current")); }
+            let ws = workspaces
+                .get(workspace)
+                .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+            if ws.stored.current != base {
+                return Err(Error::domain(
+                    "REVISION_CONFLICT",
+                    "Expected revision no longer current",
+                ));
+            }
             crate::kinematics::decode(&ws.stored.revisions[base].inputs.mechanism)?
         };
         definition.joints.push(joint);
-        let draft = self.stage_mechanism(workspace, base, None, definition, actor).await?;
+        let draft = self
+            .stage_mechanism(workspace, base, None, definition, actor)
+            .await?;
         self.build(workspace, base, &draft.id, actor).await
     }
     pub async fn stage_mechanism(

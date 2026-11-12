@@ -282,10 +282,7 @@ pub(crate) fn same_geometry_inputs(a: &Inputs, b: &Inputs) -> bool {
 /// Reproject saved annotations onto an already-published model. Returns `None`
 /// when an anchor needs live BRep that is not present in the publication.
 pub(crate) fn reproject(records: &[Annotation], model: &Value) -> Result<Option<Value>> {
-    let published = model["annotations"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let published = model["annotations"].as_array().cloned().unwrap_or_default();
     let mut saved = Vec::with_capacity(records.len());
     for record in records {
         match resolve_one(record, model, &published)? {
@@ -661,7 +658,11 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 fn angle_value(start: [f64; 3], vertex: [f64; 3], end: [f64; 3]) -> Option<f64> {
-    let a = [start[0] - vertex[0], start[1] - vertex[1], start[2] - vertex[2]];
+    let a = [
+        start[0] - vertex[0],
+        start[1] - vertex[1],
+        start[2] - vertex[2],
+    ];
     let b = [end[0] - vertex[0], end[1] - vertex[1], end[2] - vertex[2]];
     let la = (a[0].powi(2) + a[1].powi(2) + a[2].powi(2)).sqrt();
     let lb = (b[0].powi(2) + b[1].powi(2) + b[2].powi(2)).sqrt();
@@ -675,7 +676,11 @@ fn angle_value(start: [f64; 3], vertex: [f64; 3], end: [f64; 3]) -> Option<f64> 
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ];
-    Some((cross[0].powi(2) + cross[1].powi(2) + cross[2].powi(2)).sqrt().atan2(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))
+    Some(
+        (cross[0].powi(2) + cross[1].powi(2) + cross[2].powi(2))
+            .sqrt()
+            .atan2(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]),
+    )
 }
 impl Core {
     pub async fn edit_annotation(

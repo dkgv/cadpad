@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const SOURCE_FILE_LIMIT: usize = 4096;
+pub const PROJECT_BROWSER_SOURCE: &str = "# Cadpad project browser. Select a part in Explorer.\n";
 pub const SOURCE_LIMIT: usize = 1024 * 1024;
 pub const ASSET_LIMIT: usize = 64 * 1024 * 1024;
 const TOTAL_LIMIT: usize = 256 * 1024 * 1024;
@@ -72,6 +74,32 @@ pub fn valid_hash(hash: &str) -> bool {
         && hash
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+/// STL paths may live under `assets/`, which ordinary source paths reject.
+pub fn mesh_path(path: &str) -> Result<()> {
+    let portable = !path.is_empty()
+        && path.len() <= 240
+        && !path.contains(['\\', ':'])
+        && !path.chars().any(char::is_control)
+        && path.to_ascii_lowercase().ends_with(".stl")
+        && path.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment != "."
+                && segment != ".."
+                && !segment.starts_with('.')
+                && !segment.eq_ignore_ascii_case("revisions")
+                && !segment.eq_ignore_ascii_case("node_modules")
+                && !segment.eq_ignore_ascii_case("__pycache__")
+                && !segment.eq_ignore_ascii_case("venv")
+        });
+    if portable {
+        Ok(())
+    } else {
+        Err(Error::domain(
+            "INVALID_REQUEST",
+            "Choose an STL file inside this project",
+        ))
+    }
 }
 pub fn relative(path: &str) -> Result<()> {
     if path.is_empty()
@@ -204,15 +232,187 @@ fn scan_files(
                 self::relative(&relative)?;
             }
             files.push(relative);
-            if files.len() > 256 {
+            let limit = if sources_only { SOURCE_FILE_LIMIT } else { 256 };
+            if files.len() > limit {
                 return Err(Error::domain(
                     "INVALID_REQUEST",
-                    "Project exceeds 256 Python source files",
+                    if sources_only {
+                        "Project exceeds 4096 Python source files"
+                    } else {
+                        "Project exceeds 256 managed assets"
+                    },
                 ));
             }
         }
     }
     Ok(())
+}
+/// STL files already in the project folder, including `assets/`. Symlinks are skipped.
+pub fn list_mesh_files(directory: &Path) -> Result<Vec<String>> {
+    let root = directory.canonicalize()?;
+    let mut files = Vec::new();
+    walk_mesh_files(&root, &root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+fn walk_mesh_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> Result<()> {
+    if files.len() >= 256
+        || directory
+            .strip_prefix(root)
+            .unwrap_or(directory)
+            .components()
+            .count()
+            > 16
+    {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries {
+        if files.len() >= 256 {
+            break;
+        }
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.')
+            || matches!(
+                name.as_ref(),
+                "revisions" | "node_modules" | "__pycache__" | "venv"
+            )
+        {
+            continue;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            walk_mesh_files(root, &entry.path(), files)?;
+        } else if kind.is_file() && name.to_ascii_lowercase().ends_with(".stl") {
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .unwrap_or(entry.path().as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            if mesh_path(&relative).is_ok() {
+                files.push(relative);
+            }
+        }
+    }
+    Ok(())
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct StlSummary {
+    pub format: &'static str,
+    pub triangles: u64,
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+    pub size: [f64; 3],
+}
+fn stl_summary(format: &'static str, triangles: u64, min: [f64; 3], max: [f64; 3]) -> StlSummary {
+    StlSummary {
+        format,
+        triangles,
+        min,
+        max,
+        size: [max[0] - min[0], max[1] - min[1], max[2] - min[2]],
+    }
+}
+/// Bounds and triangle count only. The mesh is not stored or imported.
+pub fn summarize_stl(bytes: &[u8]) -> Result<StlSummary> {
+    if bytes.len() >= 84 {
+        let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as u64;
+        let binary_len = 84u64.saturating_add(count.saturating_mul(50));
+        if count > 0 && binary_len == bytes.len() as u64 {
+            return summarize_binary_stl(bytes, count);
+        }
+    }
+    let text = String::from_utf8_lossy(bytes);
+    if text.to_ascii_lowercase().contains("facet") {
+        return summarize_ascii_stl(&text);
+    }
+    Err(Error::domain(
+        "INVALID_GEOMETRY",
+        "STL is neither a valid binary nor ASCII mesh",
+    ))
+}
+fn summarize_binary_stl(bytes: &[u8], count: u64) -> Result<StlSummary> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for index in 0..count {
+        let start = 84 + index as usize * 50;
+        let record = &bytes[start..start + 50];
+        for vertex in 0..3 {
+            let offset = 12 + vertex * 12;
+            let point = [
+                f32::from_le_bytes(record[offset..offset + 4].try_into().unwrap()) as f64,
+                f32::from_le_bytes(record[offset + 4..offset + 8].try_into().unwrap()) as f64,
+                f32::from_le_bytes(record[offset + 8..offset + 12].try_into().unwrap()) as f64,
+            ];
+            if point.iter().any(|value| !value.is_finite()) {
+                return Err(Error::domain(
+                    "INVALID_GEOMETRY",
+                    "STL coordinates are not finite",
+                ));
+            }
+            for axis in 0..3 {
+                min[axis] = min[axis].min(point[axis]);
+                max[axis] = max[axis].max(point[axis]);
+            }
+        }
+    }
+    Ok(stl_summary("binary", count, min, max))
+}
+fn summarize_ascii_stl(text: &str) -> Result<StlSummary> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    let mut vertices = 0u64;
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.to_ascii_lowercase().starts_with("vertex") {
+            continue;
+        }
+        let mut values = line.split_whitespace().skip(1);
+        let point = [
+            values.next().and_then(|value| value.parse::<f64>().ok()),
+            values.next().and_then(|value| value.parse::<f64>().ok()),
+            values.next().and_then(|value| value.parse::<f64>().ok()),
+        ];
+        let Some(point) = point[0]
+            .zip(point[1])
+            .zip(point[2])
+            .map(|((x, y), z)| [x, y, z])
+        else {
+            return Err(Error::domain(
+                "INVALID_GEOMETRY",
+                "ASCII STL vertex is malformed",
+            ));
+        };
+        if point.iter().any(|value| !value.is_finite()) {
+            return Err(Error::domain(
+                "INVALID_GEOMETRY",
+                "STL coordinates are not finite",
+            ));
+        }
+        vertices += 1;
+        for axis in 0..3 {
+            min[axis] = min[axis].min(point[axis]);
+            max[axis] = max[axis].max(point[axis]);
+        }
+    }
+    if vertices == 0 || vertices % 3 != 0 {
+        return Err(Error::domain(
+            "INVALID_GEOMETRY",
+            "ASCII STL has no usable triangles",
+        ));
+    }
+    Ok(stl_summary("ascii", vertices / 3, min, max))
 }
 /// Configuration lives beside source, without imposing a project directory suffix.
 pub fn metadata_directory(directory: &Path) -> Result<PathBuf> {
@@ -231,6 +431,36 @@ pub fn python_entry_points(directory: &Path) -> Result<Vec<String>> {
     Ok(paths)
 }
 /// Add only Cadpad configuration; existing source and unrelated files stay in place.
+pub fn initialize_project_browser(directory: &Path) -> Result<()> {
+    let root = directory.canonicalize()?;
+    for index in 0..SOURCE_FILE_LIMIT {
+        let name = format!("cadpad_view_{index}.py");
+        let path = checked_path(&root, &name)?;
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let result = (|| {
+            file.write_all(PROJECT_BROWSER_SOURCE.as_bytes())?;
+            file.sync_all()?;
+            initialize_folder(&root, &name)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(path);
+        }
+        return result;
+    }
+    Err(Error::domain(
+        "INVALID_REQUEST",
+        "Project has too many source files",
+    ))
+}
+
 pub fn initialize_folder(directory: &Path, entry: &str) -> Result<()> {
     let root = directory.canonicalize()?;
     validate_path(entry)?;
@@ -318,7 +548,7 @@ pub fn read_project(directory: &Path) -> Result<Loaded> {
             "Invalid saved revision ID",
         ));
     }
-    if manifest.source_files.len() > 256 || manifest.assets.len() > 256 {
+    if manifest.source_files.len() > SOURCE_FILE_LIMIT || manifest.assets.len() > 256 {
         return Err(Error::domain(
             "INVALID_REQUEST",
             "Project manifest has too many files",
@@ -356,11 +586,18 @@ pub fn read_project(directory: &Path) -> Result<Loaded> {
     if !inputs.files.contains_key(&manifest.entry_point) {
         use std::io::Write;
         let path = checked_path(&root, &manifest.entry_point)?;
-        if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let source = "# Describe a part to get started.\n";
-        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
         file.write_all(source.as_bytes())?;
-        inputs.files.insert(manifest.entry_point.clone(), source.into());
+        inputs
+            .files
+            .insert(manifest.entry_point.clone(), source.into());
     }
     let mut blobs = BTreeMap::new();
     let mut asset_paths = Vec::new();
@@ -421,10 +658,10 @@ pub fn validate_inputs(inputs: &Inputs) -> Result<()> {
     crate::annotations::decode(&inputs.annotations)?;
     crate::kinematics::decode(&inputs.mechanism)?;
     validate_path(&inputs.entry_point)?;
-    if !inputs.files.contains_key(&inputs.entry_point) || inputs.files.len() > 256 {
+    if !inputs.files.contains_key(&inputs.entry_point) || inputs.files.len() > SOURCE_FILE_LIMIT {
         return Err(Error::domain(
             "INVALID_REQUEST",
-            "Project needs a present entry point and at most 256 source files",
+            "Project needs a present entry point and at most 4096 source files",
         ));
     }
     let mut total = 0;
@@ -961,4 +1198,69 @@ pub(crate) fn read_python_project_excluding(
     }
     validate_inputs(&inputs)?;
     Ok((inputs, blobs))
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::{list_mesh_files, mesh_path, summarize_stl};
+    use std::fs;
+    use std::io::Write;
+
+    fn put_f32(bytes: &mut [u8], offset: usize, value: f32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn stl_summary_reads_binary_and_ascii_without_keeping_the_mesh() {
+        let mut binary = vec![0u8; 84 + 50];
+        binary[80..84].copy_from_slice(&1u32.to_le_bytes());
+        put_f32(&mut binary, 96, 0.0);
+        put_f32(&mut binary, 100, 0.0);
+        put_f32(&mut binary, 104, 0.0);
+        put_f32(&mut binary, 108, 10.0);
+        put_f32(&mut binary, 124, 20.0);
+        put_f32(&mut binary, 128, 5.0);
+        let summary = summarize_stl(&binary).unwrap();
+        assert_eq!(summary.format, "binary");
+        assert_eq!(summary.triangles, 1);
+        assert_eq!(summary.min, [0.0, 0.0, 0.0]);
+        assert_eq!(summary.max, [10.0, 20.0, 5.0]);
+        assert_eq!(summary.size, [10.0, 20.0, 5.0]);
+
+        let ascii = b"solid part\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 4 0 0\nvertex 0 3 1\nendloop\nendfacet\nendsolid\n";
+        let summary = summarize_stl(ascii).unwrap();
+        assert_eq!(summary.format, "ascii");
+        assert_eq!(summary.triangles, 1);
+        assert_eq!(summary.size, [4.0, 3.0, 1.0]);
+        assert!(summarize_stl(b"not a mesh").is_err());
+        assert!(mesh_path("../part.stl").is_err());
+        assert!(mesh_path("model.py").is_err());
+        assert!(mesh_path("assets/part.stl").is_ok());
+    }
+
+    #[test]
+    fn project_mesh_list_includes_assets_and_skips_sources_and_revisions() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("refs")).unwrap();
+        fs::create_dir_all(root.path().join("assets")).unwrap();
+        fs::create_dir_all(root.path().join("revisions")).unwrap();
+        fs::write(root.path().join("refs/part.stl"), b"solid\n").unwrap();
+        fs::write(root.path().join("assets/mesh.stl"), b"solid\n").unwrap();
+        fs::write(root.path().join("model.py"), b"print(1)\n").unwrap();
+        fs::write(root.path().join("revisions/old.stl"), b"solid\n").unwrap();
+        let mut hidden = fs::File::create(root.path().join(".secret.stl")).unwrap();
+        hidden.write_all(b"solid\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            root.path().join("refs/part.stl"),
+            root.path().join("linked.stl"),
+        )
+        .unwrap();
+
+        let files = list_mesh_files(root.path()).unwrap();
+        assert_eq!(
+            files,
+            vec!["assets/mesh.stl".to_string(), "refs/part.stl".to_string()]
+        );
+    }
 }

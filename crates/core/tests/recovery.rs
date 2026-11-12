@@ -162,7 +162,7 @@ async fn missing_and_corrupt_display_data_restore_without_design_or_pose_changes
             coordinate: 0.03,
             unit: "m".into(),
             check_collision: true,
-    },
+        },
     )
     .await
     .unwrap();

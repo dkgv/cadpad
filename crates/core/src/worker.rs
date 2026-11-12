@@ -323,9 +323,9 @@ impl Worker {
                             && let Ok(value) = serde_json::from_slice::<Value>(line)
                             && value["kind"] == "started"
                         {
-                            break value["pid"].as_u64().and_then(|pid| {
-                                i32::try_from(pid).ok().filter(|pid| *pid > 1)
-                            });
+                            break value["pid"]
+                                .as_u64()
+                                .and_then(|pid| i32::try_from(pid).ok().filter(|pid| *pid > 1));
                         }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

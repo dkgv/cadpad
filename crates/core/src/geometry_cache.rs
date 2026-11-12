@@ -303,11 +303,10 @@ impl Core {
         }
         let inputs = draft.inputs.clone();
         let motion_model = model.clone();
-        let motion = tokio::task::spawn_blocking(move || {
-            crate::motion::State::new(&inputs, &motion_model)
-        })
-        .await
-        .map_err(|_| Error::domain("INVALID_MECHANISM", "Motion validation failed"))??;
+        let motion =
+            tokio::task::spawn_blocking(move || crate::motion::State::new(&inputs, &motion_model))
+                .await
+                .map_err(|_| Error::domain("INVALID_MECHANISM", "Motion validation failed"))??;
         let recording_publication = self.blob_publication.read().await;
         let (recordings, imports) = {
             let workspaces = self.workspaces.lock().await;
@@ -516,11 +515,10 @@ impl Core {
         }
         let inputs = draft.inputs.clone();
         let motion_model = model.clone();
-        let motion = tokio::task::spawn_blocking(move || {
-            crate::motion::State::new(&inputs, &motion_model)
-        })
-        .await
-        .map_err(|_| Error::domain("INVALID_MECHANISM", "Motion validation failed"))??;
+        let motion =
+            tokio::task::spawn_blocking(move || crate::motion::State::new(&inputs, &motion_model))
+                .await
+                .map_err(|_| Error::domain("INVALID_MECHANISM", "Motion validation failed"))??;
         let recording_publication = self.blob_publication.read().await;
         let (recordings, imports) = {
             let workspaces = self.workspaces.lock().await;

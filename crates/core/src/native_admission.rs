@@ -106,10 +106,7 @@ fn try_lease(root: &Path) -> Result<Option<Lease>> {
 
 #[cfg(test)]
 fn try_slot(root: &Path) -> Result<Option<Slot>> {
-    Ok(try_lease(root)?.map(|lease| Slot {
-        lease,
-        _ram: None,
-    }))
+    Ok(try_lease(root)?.map(|lease| Slot { lease, _ram: None }))
 }
 
 impl Core {

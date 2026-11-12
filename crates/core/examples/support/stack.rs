@@ -166,7 +166,12 @@ fn loads(force: f64) -> dynamics::Command {
 }
 fn sample(state: &motion::Snapshot, name: &str) -> BodySample {
     let pose = &state.evaluation.poses[name];
-    let velocity = state.simulation.as_ref().unwrap().current.linear_velocity_m_s[name];
+    let velocity = state
+        .simulation
+        .as_ref()
+        .unwrap()
+        .current
+        .linear_velocity_m_s[name];
     BodySample {
         x_mm: pose.position[0],
         z_mm: pose.position[2],
@@ -217,7 +222,9 @@ async fn phase(
                 (upper_support + lower_support - (upper.position[2] - lower.position[2])).max(0.),
             );
         }
-        lateral = lateral.max(lower.position[1].abs()).max(upper.position[1].abs());
+        lateral = lateral
+            .max(lower.position[1].abs())
+            .max(upper.position[1].abs());
         rot = rot.max(rotation(lower)).max(rotation(upper));
     }
     let exact = core
@@ -404,8 +411,7 @@ pub async fn run(config: WorkerConfig, scale: f64) -> Result<Report> {
     let expected_z_lower = case.half_extents_mm[2];
     let expected_z_upper = 3. * case.half_extents_mm[2];
     let interface = tol.friction * case.mass_kg * tol.gravity_m_s2;
-    let relative_acceleration =
-        case.slide_force_n / case.mass_kg - tol.friction * tol.gravity_m_s2;
+    let relative_acceleration = case.slide_force_n / case.mass_kg - tol.friction * tol.gravity_m_s2;
     let slide_time = f64::from(tol.slide_ticks) * dynamics::TIMESTEP_S;
     let expected_relative_velocity = relative_acceleration * slide_time;
     let mut checks = vec![];

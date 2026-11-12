@@ -274,11 +274,7 @@ fn body_inverse_inertia(body: &RigidBody, revolute: bool, axis: DVec3, anchor: D
         let r_perp = r - axis * r.dot(axis);
         let inertia = axis.dot(props.effective_angular_inertia() * axis)
             + body.mass() * r_perp.length_squared();
-        if inertia < 1e-16 {
-            0.
-        } else {
-            1. / inertia
-        }
+        if inertia < 1e-16 { 0. } else { 1. / inertia }
     } else {
         let inv = props.effective_inv_mass;
         axis.x * axis.x * inv.x + axis.y * axis.y * inv.y + axis.z * axis.z * inv.z

@@ -23,9 +23,9 @@ pub mod paths;
 pub mod playback;
 pub mod portable;
 mod portable_recordings;
+pub mod project_entry;
 pub mod project_result;
 pub mod projects;
-pub mod project_entry;
 pub mod recovery;
 pub mod runtime;
 pub mod tools;
@@ -162,6 +162,8 @@ pub struct Job {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredWorkspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_parent: Option<String>,
     schema_version: u32,
     id: String,
     current: String,
@@ -254,6 +256,10 @@ fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 impl Core {
+    /// Desktop visibility controls only warm idle workers; in-flight native leases are never stopped.
+    pub fn retain_workspace_memory(&self, workspaces: Vec<String>) {
+        self.worker_cache.retain(workspaces);
+    }
     pub async fn open(root: PathBuf, config: WorkerConfig) -> Result<Self> {
         Self::open_with_quotas(
             root,
@@ -444,6 +450,7 @@ impl Core {
             restored_from: None,
         };
         let stored = StoredWorkspace {
+            model_parent: None,
             geometry_cache: Value::Null,
             motion_tests: BTreeMap::new(),
             job_snapshots: BTreeMap::new(),
@@ -499,17 +506,30 @@ impl Core {
             let recording_fingerprint = playback::metadata_fingerprint(&ws.stored.recordings)?;
             let tests_fingerprint = motion_tests::catalog_fingerprint(&ws.stored.motion_tests)?;
             let revision = &ws.stored.revisions[&ws.stored.current];
+            let unsaved_changes = ws.stored.project.as_ref().is_none_or(|binding| {
+                ws.stored
+                    .revisions
+                    .get(&binding.saved_revision)
+                    .is_none_or(|saved| {
+                        !project_entry::same_project_content(&revision.inputs, &saved.inputs)
+                    })
+                    || binding.recording_fingerprint != recording_fingerprint
+                    || binding.motion_test_fingerprint != tests_fingerprint
+            });
             let mut activity = ws.stored.jobs.values().collect::<Vec<_>>();
             activity.sort_by_key(|job| (job.created_at, &job.id));
             if activity.len() > 50 {
                 activity.drain(..activity.len() - 50);
             }
+            let model_entry = project_entry::inputs_model_entry(&revision.inputs)
+                .map(|(entry, builder)| json!({"entry": entry, "builder": builder}));
             return Ok(
                 json!({"workspace_id":workspace_id,"revision":revision.id,"display_generation":ws.display_epoch.as_str(),"display_error":display_error,"files":revision.inputs.files.keys().collect::<Vec<_>>(),
-            "parameters":revision.inputs.parameters,"entry_point":revision.inputs.entry_point,"model":revision.model,"activity":activity,"total_jobs":ws.stored.jobs.len(),"protocol_version":1,
+            "parameters":revision.inputs.parameters,"entry_point":revision.inputs.entry_point,"model_entry":model_entry,"model":revision.model,"activity":activity,"total_jobs":ws.stored.jobs.len(),"protocol_version":1,
             "assets":revision.inputs.assets,"dependencies":revision.inputs.dependencies,"annotations":revision.inputs.annotations,"mechanism":revision.inputs.mechanism,"motion":motion,"external_tracking":ws.stored.project.is_some()||ws.stored.python_origin.is_some(),"recordings":ws.stored.recordings.values().collect::<Vec<_>>(),
             "name":ws.stored.project.as_ref().and_then(|binding|binding.directory.file_name()).map(|name|name.to_string_lossy().to_string()).or_else(||ws.stored.title.clone()),
             "saved_revision":ws.stored.project.as_ref().map(|binding|&binding.saved_revision),
+            "unsaved_changes":unsaved_changes,
             "dirty":ws.stored.project.as_ref().is_none_or(|binding|binding.saved_revision!=revision.id||binding.recording_fingerprint!=recording_fingerprint||binding.motion_test_fingerprint!=tests_fingerprint)}),
             );
         }
@@ -952,8 +972,7 @@ impl Core {
             Ok((worker, result, motion, rebound))
                 if !*cancel.borrow() && next.current == draft.base_revision =>
             {
-                if result["authoritative_reuse"].is_null() || !result["geometry_cache"].is_null()
-                {
+                if result["authoritative_reuse"].is_null() || !result["geometry_cache"].is_null() {
                     next.geometry_cache = geometry_cache::record(
                         &next.geometry_cache,
                         &revision_id,
@@ -1274,12 +1293,27 @@ impl Core {
         };
         self.build(workspace_id, base, &draft.id, actor).await
     }
-    pub async fn restore_checkpoint(&self, workspace: &str, expected: &str, target: &str) -> Result<Job> {
+    pub async fn restore_checkpoint(
+        &self,
+        workspace: &str,
+        expected: &str,
+        target: &str,
+    ) -> Result<Job> {
         let draft = {
             let mut all = self.workspaces.lock().await;
-            let ws = all.get_mut(workspace).ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
-            if ws.stored.current != expected { return Err(Error::domain("REVISION_CONFLICT", "The model changed. Try reverting again.")); }
-            let revision = ws.stored.revisions.get(target).ok_or_else(|| Error::domain("INVALID_REQUEST", "Restore point is unavailable"))?;
+            let ws = all
+                .get_mut(workspace)
+                .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+            if ws.stored.current != expected {
+                return Err(Error::domain(
+                    "REVISION_CONFLICT",
+                    "The model changed. Try reverting again.",
+                ));
+            }
+            let revision =
+                ws.stored.revisions.get(target).ok_or_else(|| {
+                    Error::domain("INVALID_REQUEST", "Restore point is unavailable")
+                })?;
             let mut draft = Self::input_draft(revision.inputs.clone(), expected, "local-user");
             draft.restore_revision = Some(target.into());
             let mut next = ws.stored.clone();
@@ -1288,7 +1322,8 @@ impl Core {
             ws.stored = next;
             draft
         };
-        self.build(workspace, expected, &draft.id, "local-user").await
+        self.build(workspace, expected, &draft.id, "local-user")
+            .await
     }
     pub async fn undo(&self, workspace_id: &str, expected: &str, actor: &str) -> Result<Job> {
         let draft = {
