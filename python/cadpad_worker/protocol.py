@@ -42,8 +42,8 @@ def main():
         request = {}
         log = BoundedLog()
         try:
-            if len(line) > 4 * 1024 * 1024:
-                raise DomainError("INVALID_REQUEST", "Request exceeds 4 MiB")
+            if len(line.encode("utf-8")) > 64 * 1024 * 1024:
+                raise DomainError("INVALID_REQUEST", "Request exceeds 64 MiB")
             decoded = json.loads(line)
             if not isinstance(decoded, dict):
                 raise DomainError("INVALID_REQUEST", "Expected a JSON-RPC request object")
@@ -57,10 +57,13 @@ def main():
             revision = request["revision"]
             method = request["method"]
             args = request.get("params", {})
-            if method not in ("build", "analyze_entry") and revision != model.revision:
+            if method not in ("build", "analyze_entry", "index_sources") and revision != model.revision:
                 raise DomainError("STALE_ENTITY", "Worker retains a different revision")
             with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-                if method == "analyze_entry":
+                if method == "index_sources":
+                    from .entrypoint import index_sources
+                    result = index_sources(args)
+                elif method == "analyze_entry":
                     from .entrypoint import analyze
                     result = analyze(args)
                 elif method == "build":

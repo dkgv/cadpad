@@ -306,7 +306,7 @@ class Model:
         finally:
             os.chdir(old_cwd)
             sys.path[:] = old_path
-        starter_entry = entry_path.read_text().strip() == "# Describe a part to get started."
+        starter_entry = entry_path.read_text().strip() in ("# Describe a part to get started.", "# Cadpad project browser. Select a part in Explorer.")
         if not self.parts and not (args.get("allow_empty", False) or starter_entry):
             raise DomainError("INVALID_GEOMETRY", "Model did not publish geometry. Use show_object(result), show(result, name=...), or assign the model to result.")
         for annotation in self.annotations:
