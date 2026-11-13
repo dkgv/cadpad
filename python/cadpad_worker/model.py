@@ -415,20 +415,41 @@ class Model:
             return reused
         # Retain tessellator face/edge spans for revision-scoped picking.
         # Buffers are little-endian f32/u32 artifacts.
-        from ocp_tessellate.tessellator import tessellate
-        tess = tessellate(shape.wrapped, cache_key=f"cadpad-mesh-v2:{FINGERPRINT_FORMAT}:{fingerprint}:quality=0.1", deviation=0.1,
-                          quality=0.1, angular_tolerance=0.2, compute_faces=True, compute_edges=True)
         from ocp_tessellate.ocp_utils import get_faces, get_edges
-        from ocp_tessellate.tessellator import discretize_edges
+        from ocp_tessellate.tessellator import discretize_edges, tessellate
+        from OCP.TopAbs import TopAbs_EDGE
+        from OCP.TopExp import TopExp_Explorer
         from OCP.TopTools import TopTools_IndexedMapOfShape
         from OCP.BRep import BRep_Tool
         displayed_faces = list(get_faces(shape.wrapped))
-        displayed_edges = list(get_edges(shape.wrapped))
+        # STL import is a shell of one triangular face per facet, not a solid.
+        # Those edges are the triangle boundaries. Publishing them makes the
+        # viewer draw a screen-space line over every facet.
+        triangle_mesh = not shape.Solids() and len(displayed_faces) > 1
+        if triangle_mesh:
+            for face in displayed_faces:
+                count = 0
+                explorer = TopExp_Explorer(face, TopAbs_EDGE)
+                while explorer.More():
+                    count += 1
+                    if count > 3:
+                        break
+                    explorer.Next()
+                if count != 3:
+                    triangle_mesh = False
+                    break
+        displayed_edges = [] if triangle_mesh else list(get_edges(shape.wrapped))
+        tess = tessellate(shape.wrapped, cache_key=f"cadpad-mesh-v2:{FINGERPRINT_FORMAT}:{fingerprint}:quality=0.1", deviation=0.1,
+                          quality=0.1, angular_tolerance=0.2, compute_faces=True, compute_edges=bool(displayed_edges))
         # The face tessellator omits standalone edges, including loose wires in
         # compounds that also contain faces. Discretize the original edge list
         # through the publisher's edge API so spans keep exact topology order.
         if len(displayed_edges) != len(tess["segments_per_edge"]):
             tess = dict(tess, **discretize_edges(displayed_edges, deflection=0.1))
+        if not displayed_edges:
+            # No topological edges to draw. Drop the tessellator's fallback,
+            # which otherwise emits every triangle edge.
+            tess = dict(tess, edges=[], segments_per_edge=[], edge_types=[])
         mappings = {}
         for kind, published, displayed, counts in (
                 ("face", shape.Faces(), displayed_faces, tess["triangles_per_face"]),

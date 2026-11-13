@@ -390,6 +390,34 @@ def test_pinned_geometric_circle_suppresses_automatic_duplicate_and_survives_rem
     assert resolve(fresh,[record])[0]["value"] == pytest.approx(5)
 
 
+def test_imported_stl_keeps_triangles_without_a_facet_wireframe(tmp_path):
+    import numpy as np
+    from cadpad_worker import stl
+    reference = tmp_path / "box.stl"
+    stl.export(cq.Workplane().box(10, 20, 30).val(), reference)
+    root = tmp_path / "source"
+    (root / "assets").mkdir(parents=True)
+    (root / "assets" / "box.stl").write_bytes(reference.read_bytes())
+    (root / "model.py").write_text(
+        'import cadquery as cq\n'
+        'show(import_stl("box.stl"), name="mesh", kind="surface")\n'
+        'show(cq.Workplane().box(10, 20, 30), name="solid")\n'
+    )
+    model = Model(tmp_path / "cache")
+    result = model.build(dict(source_root=str(root)), "r1")
+    mesh_part, solid_part = result["parts"]
+    mesh_buffers, solid_buffers = mesh_part["mesh"]["buffers"], solid_part["mesh"]["buffers"]
+    assert mesh_part["face_count"] == 12 and mesh_part["edge_count"] == 18
+    assert mesh_buffers["triangles"]["bytes"] > 0
+    assert mesh_buffers["edges"]["bytes"] == 0
+    assert mesh_part["mesh"]["edge_ids"] == []
+    segments = np.frombuffer((model.cache / mesh_buffers["segments_per_edge"]["handle"]).read_bytes(), dtype="<u4")
+    assert int(segments.sum()) == 0
+    solid_segments = np.frombuffer((model.cache / solid_buffers["segments_per_edge"]["handle"]).read_bytes(), dtype="<u4")
+    assert int(solid_segments.sum()) > 0
+    assert int(solid_segments.sum()) * 24 == solid_buffers["edges"]["bytes"]
+
+
 def test_distinct_shapes_never_share_the_tessellator_cache_and_topology_spans_match(tmp_path):
     from ocp_tessellate.tessellator import cache
     cache.clear()
