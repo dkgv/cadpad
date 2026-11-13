@@ -9,7 +9,7 @@ import {sceneEntity,sameEntity,referenceLetter} from './entities';
 export {sceneEntity,sameEntity,referenceLetter} from './entities';
 import {revisionBuffers,type BufferDescriptor} from './buffers';
 import {shareRenderBuffers,revisionRenderBuffers} from './render-buffers';
-import {PickGeometry,scenePicking,pickTopology,pickTopologyInRect,type SelectionMode,type MeshBuffers} from './picking';
+import {PickGeometry,scenePicking,pickTopology,pickTopologyInRect,geometryCenter,type SelectionMode,type MeshBuffers} from './picking';
 export type {SelectionMode} from './picking';
 import { partMotion, manipulationJoint, interpolateSimulation, previewJoint, sliderDelta, hingeDelta, unwrapStep, pathCoordinate, sliderScreenMap, hingeScreenMap, type MotionSnapshot, type JointState, type Ray } from './motion';
 export type {MotionSnapshot,JointState} from './motion';
@@ -420,7 +420,7 @@ export class CadViewport {
     const capability=entity&&this.motion?partMotion(this.motion,entity.instance_id):null;
     const color=motionHint?'#0b9b83':hover&&this.manipulate?(capability?.kind==='draggable'?'#0b9b83':capability?.kind==='linked'?'#b88830':'#8591a0'):hover?'#eab85d':'#2484c5';
     const mesh=geometry.highlight(kind,index);if(!mesh)return null;
-    mesh.computeBoundingBox();const anchor=mesh.boundingBox?mesh.boundingBox.getCenter(new THREE.Vector3()):new THREE.Vector3();
+    const anchor=geometryCenter(mesh);
     if(kind==='edge'||kind==='part'&&!geometry.buffers.triangles?.length){
       this.addHighlight(parent,this.selectionStroke(segmentPairs(mesh.getAttribute('position') as THREE.BufferAttribute),color,kind==='edge'?3.2:2.2),kindOf);
       mesh.dispose();

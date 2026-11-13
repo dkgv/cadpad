@@ -99,6 +99,17 @@ export class PickGeometry {
   }
   dispose(){if(this.disposed)return;this.disposed=true;this.resources.release();for(const object of [this.lines,this.surface])(object.material as THREE.Material).dispose();}
 }
+/** Center of the primitives this geometry draws. Face overlays share the part
+ * vertex buffer and only subset the index, so attribute bounds are the whole part. */
+export function geometryCenter(geometry:THREE.BufferGeometry){
+  const position=geometry.getAttribute('position');
+  const index=geometry.getIndex();
+  if(!position)return new THREE.Vector3();
+  if(!index){geometry.computeBoundingBox();return geometry.boundingBox!.getCenter(new THREE.Vector3());}
+  const box=new THREE.Box3(),point=new THREE.Vector3();
+  for(let i=0;i<index.count;i++)box.expandByPoint(point.fromBufferAttribute(position,index.getX(i)));
+  return box.isEmpty()?new THREE.Vector3():box.getCenter(point);
+}
 /** Byte identities, view ranges and topology all participate in reuse. Resources
  * can span overlapping scene replacements but leave the pool at their last owner. */
 export function scenePicking(){

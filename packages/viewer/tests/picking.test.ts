@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import {PrimitiveSpans,PickGeometry,scenePicking,pickTopology,pickTopologyInRect,type PickInstance} from '../src/picking.ts';
+import {PrimitiveSpans,PickGeometry,scenePicking,pickTopology,pickTopologyInRect,geometryCenter,type PickInstance} from '../src/picking.ts';
 
 const size={width:200,height:200};
 test('indexed dense picking preserves bytes, native identities, clipping and transformed poses',()=>{
@@ -84,6 +84,21 @@ test('edge candidates behind visible faces are rejected and coplanar edges stay 
   front.matrix.makeTranslation(0,0,30);edge.matrix.makeTranslation(0,0,30);
   assert.equal(pickTopology(view,new THREE.Vector2(),size,'edge',[edge,front]),null);
   edge.geometry.dispose();front.geometry.dispose();
+});
+test('face centers follow the indexed face instead of the shared part bounds',()=>{
+  const geometry=new PickGeometry({
+    vertices:new Float32Array([0,0,0,2,0,0,0,2,0,100,0,0,102,0,0,100,2,0]),
+    triangles:new Uint32Array([0,1,2,3,4,5]),triangles_per_face:new Uint32Array([1,1]),
+    edges:new Float32Array([-5,0,0,0,0,0,0,0,0,5,0,0]),segments_per_edge:new Uint32Array([1,1]),
+  });
+  const left=geometry.highlight('face',0)!,right=geometry.highlight('face',1)!;
+  left.computeBoundingBox();
+  assert.ok(left.boundingBox!.getCenter(new THREE.Vector3()).distanceTo(new THREE.Vector3(51,1,0))<1e-9);
+  assert.ok(geometryCenter(left).distanceTo(new THREE.Vector3(1,1,0))<1e-9);
+  assert.ok(geometryCenter(right).distanceTo(new THREE.Vector3(101,1,0))<1e-9);
+  assert.ok(geometryCenter(geometry.highlight('edge',1)!).distanceTo(new THREE.Vector3(2.5,0,0))<1e-9);
+  assert.ok(geometryCenter(geometry.highlight('part',0)!).distanceTo(new THREE.Vector3(51,1,0))<1e-9);
+  geometry.dispose();
 });
 test('highlight geometry retains the selected topology subset without changing source arrays',()=>{
   const face=plate().geometry,edge=wire().geometry;
