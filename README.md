@@ -1,63 +1,48 @@
 # Cadpad
 
-Cadpad is a desktop app for building and exploring 3D models with AI. Describe what you want to make, inspect the result, adjust it, and export it as STEP or STL.
+Desktop app for building and inspecting 3D models with AI. You describe a part or a change, Cadpad builds it as a [CadQuery](https://cadquery.readthedocs.io/) script, and you look at the result, adjust it, and export STEP or STL.
 
-Cadpad is a work in progress, developed primarily for macOS.
+CadQuery is the modeling API. Its geometry kernel is [OpenCASCADE](https://dev.opencascade.org/).
 
-## Usage
+Work in progress. Developed for macOS.
 
-Try the rail and carriage example to explore the workspace.
+## Use it
 
-- Configure the built-in assistant under **Cadpad → Settings…**, then describe a model or change in the assistant panel. You can also connect an external agent through MCP using the configuration under **External agents**.
-- Press **Cmd+O** to open a project folder. Save your work to the same folder or use **Save as** to create another. Press **Cmd+Shift+O** to jump to a model from the current project.
-- Select parts, faces, or edges to inspect them. Adjust published parameters and turn on **Dimensions** to see measurements.
-- Use **Move** to explore models with joints, and **Physics** to experiment with simulation.
-- Export your model as STEP or STL.
+### Projects
 
-Projects can also be opened and built without an assistant. Simulation and some interactions still need further validation.
+A project is a folder of Python source, reference files, and Cadpad settings.
 
-Open an existing CadQuery repository with **Cmd+O**. The folder opens directly
-into its project library. **Explorer → Models** lists detected geometry entries grouped by folder.
-The separate **Files** section shows Python source files and opens a source preview.
-Models is the primary view; Files starts collapsed. Built geometry for the active
-tab appears at the top of Models. Automatically adapted compounds expose their topology
-children as separate selectable geometry; this does not infer physical parts. Candidates are
-inferred without executing project code. They can include helpers, detection can
-miss entries, and a candidate is confirmed to produce geometry only when built.
-Names and source patterns do not establish that something is a physical part or
-an assembly.
+- **File → New Project** (`Cmd+N`) starts one.
+- **File → Open…** (`Cmd+O`) opens a folder, including an existing CadQuery repo.
+- **File → Save** (`Cmd+S`) writes back to that folder. **Save As…** (`Cmd+Shift+S`) copies it elsewhere.
 
-Selecting an entry opens a named model tab within the current project. Clicking
-an already-open entry focuses its tab. Each model tab retains its own build and
-selection; opening another project replaces the project and its tabs. Opening a
-model tab does not write generated view adapters into the project folder. Selecting a file
-uses its recognized factory when available, or builds its detected entries together.
-This preserves the source layout and skips guarded main export routines. Functions
-requiring arguments remain accessible through Files. Project-specific dependencies
-are not installed automatically.
+**Explorer** lists models it found in the source, grouped by folder. Click one to build it and open a tab. `Cmd+Shift+O` jumps to a model in the current project. **Files**, collapsed by default, shows the Python and a source preview.
 
-Cadpad uses these terms:
+Cadpad runs models with its own Python and CadQuery. It does not install the project's other dependencies. It indexes source without running it, so the list can include helpers and can miss real models. A build is what confirms that an entry produces geometry. Functions that need arguments are opened from **Files**.
 
-| Term | Meaning |
-| --- | --- |
-| Project | The folder containing source, reference files, and Cadpad settings. |
-| Source entry | A function or value identified in source; a geometry candidate may produce geometry when built. |
-| Build | Execute an entry to evaluate its geometry. |
-| Model | The geometry produced by a build and shown in the viewport. |
-| Object | One selectable output in the model; it can contain several solids. |
-| Mode | An interaction state, such as selection, movement, or simulation. |
+Limits: 4,096 Python files, 1 MiB each, 8 MiB total. Virtual environments and Python caches are skipped.
 
-Part and assembly describe design intent or explicitly provided structure; the
-source index does not prove either. The interface uses generic entry and object
-labels for inferred source and evaluated output respectively.
+### Assistant
 
-Projects support up to 4,096 Python files (1 MiB per file, 8 MiB total); virtual
-environments and Python caches are excluded. Models run with Cadpad's bundled
-Python dependencies, so additional project dependencies are not installed automatically.
+**Cadpad → Settings…** (`Cmd+,`). Use a local CLI (Claude Code, Codex, or Cursor) or an Anthropic API key. CLI keys stay with that tool; an API key is stored in the system keychain.
+
+Open the **Assistant** panel and describe the model or the change. The assistant edits the project and rebuilds.
+
+**External agents** in Settings shows the MCP config for connecting another agent. The desktop app has to be running for that bridge.
+
+You can also open and build projects with no assistant.
+
+### Viewport
+
+Click a face, edge, or object to inspect it. **Model → Select** switches what a click picks. **View → Show Dimensions** (`Cmd+Shift+M`) shows measurements.
+
+Camera: **Fit Model** (`Cmd+0`), isometric (`Cmd+1`), front (`Cmd+2`), top (`Cmd+3`), right (`Cmd+4`). **Model → Rebuild Model** (`Cmd+R`) runs the current model again.
+
+**Move** drives joints. **Physics** is an approximate preview of forces and contact; the assembly needs collision shapes first. **File → Export** writes STEP or STL.
 
 ## Development
 
-You'll need Rust, Node.js and npm, [uv](https://docs.astral.sh/uv/), and the Xcode Command Line Tools on macOS.
+You need Rust, Node.js and npm, [uv](https://docs.astral.sh/uv/), and the Xcode Command Line Tools.
 
 ```sh
 uv sync --locked --python 3.12
@@ -65,9 +50,18 @@ npm ci
 npm run desktop
 ```
 
-The first build can take a while.
+The first build compiles the Rust crates and the Tauri app. It takes a while.
 
-Run the relevant checks from the project directory:
+| Path | What it is |
+| --- | --- |
+| `apps/desktop` | Tauri shell and React UI |
+| `packages/viewer` | 3D viewer |
+| `crates/core` | Projects, builds, geometry, motion |
+| `crates/agent` | Built-in assistant |
+| `crates/mcp` | MCP server for external agents |
+| `python/cadpad_worker` | CadQuery worker |
+
+Checks, from the repo root:
 
 ```sh
 .venv/bin/python -m pytest -q
