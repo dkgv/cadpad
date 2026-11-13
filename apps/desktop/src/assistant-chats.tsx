@@ -12,6 +12,11 @@ export function chatTabIds(chats:ChatSummary[],activeId:string|null){
   return ids.length?ids:[activeId||'new'];
 }
 
+export function tabActivity(id:string,ids:string[],pending:string[],unseen:ReadonlySet<string>):'pending'|'unseen'|undefined{
+  if(pending.includes(id)||id==='new'&&pending.some(chat=>!ids.includes(chat)))return 'pending';
+  return unseen.has(id)?'unseen':undefined;
+}
+
 export function syncChatDock(tree:DockNode,ids:string[],activeId?:string|null):DockNode{
   const allowed=new Set(ids);
   let next=tree;
@@ -36,6 +41,9 @@ export function AssistantChatDock({
   chats,
   activeId,
   busy,
+  pendingChatIds=[],
+  landedChat=null,
+  panelOpen=true,
   hosts,
   renderChat,
   onVisibleChats,
@@ -48,6 +56,9 @@ export function AssistantChatDock({
   chats:ChatSummary[];
   activeId:string|null;
   busy:boolean;
+  pendingChatIds?:string[];
+  landedChat?:{id:string;seq:number}|null;
+  panelOpen?:boolean;
   hosts:Record<string,HTMLElement>;
   renderChat:(chatId:string)=>React.ReactNode;
   onVisibleChats:(ids:string[])=>void;
@@ -63,15 +74,40 @@ export function AssistantChatDock({
   const [tree,setTree]=useState<DockNode>(()=>group(ids,activeId&&ids.includes(activeId)?activeId:ids[0]??null));
   const [removed,setRemoved]=useState<string|null>(null);
   const [focusedGroup,setFocusedGroup]=useState<string|undefined>();
-  useEffect(()=>{setEmptyClosed(false);setTree(current=>syncChatDock(current,ids,activeId));setRemoved(null);setFocusedGroup(undefined);},[workspaceKey]);
+  const [unseen,setUnseen]=useState<Set<string>>(()=>new Set());
+  const seenRef=useRef<(id:string)=>boolean>(()=>false);
+  useEffect(()=>{setEmptyClosed(false);setTree(current=>syncChatDock(current,ids,activeId));setRemoved(null);setFocusedGroup(undefined);setUnseen(new Set());},[workspaceKey]);
   useEffect(()=>{setTree(current=>syncChatDock(current,ids,activeId));},[ids.join('\0'),activeId]);
   const visibleIds=groups(tree).flatMap(pane=>pane.active&&ids.includes(pane.active)?[pane.active]:[]);
   const visibleKey=JSON.stringify(visibleIds);
+  seenRef.current=id=>panelOpen&&visibleIds.includes(id);
+  const openIds=useRef(ids);
+  openIds.current=ids;
   useEffect(()=>{onVisibleChats(visibleIds);},[visibleKey,onVisibleChats]);
+  useEffect(()=>{
+    if(!landedChat?.id||seenRef.current(landedChat.id))return;
+    // The new-chat tab keeps the id "new" until the server id arrives.
+    if(!openIds.current.includes(landedChat.id)&&seenRef.current('new'))return;
+    setUnseen(current=>{if(current.has(landedChat.id))return current;const next=new Set(current);next.add(landedChat.id);return next;});
+  },[landedChat]);
+  useEffect(()=>{
+    if(!panelOpen)return;
+    setUnseen(current=>{
+      if(!current.size||!visibleIds.some(id=>current.has(id)))return current;
+      const next=new Set(current);
+      for(const id of visibleIds)next.delete(id);
+      return next;
+    });
+  },[panelOpen,visibleKey]);
+  const unseenKey=[...unseen].sort().join('\0');
   const tabs=useMemo(()=>{
     const titles=new Map(chats.map(chat=>[chat.id,chat.title]));
-    return Object.fromEntries(ids.map(id=>[id,{id,title:titles.get(id)||(id===activeId?'New chat':'Chat'),icon:'chat' as const} satisfies DockTab]));
-  },[ids,chats,activeId]);
+    const unread=new Set(unseenKey?unseenKey.split('\0'):[]);
+    return Object.fromEntries(ids.map(id=>{
+      const status=tabActivity(id,ids,pendingChatIds,unread);
+      return [id,{id,title:titles.get(id)||(id===activeId?'New chat':'Chat'),icon:'chat' as const,...(status?{status}:{})} satisfies DockTab];
+    }));
+  },[ids,chats,activeId,pendingChatIds.join('\0'),unseenKey]);
   function drop(tab:string,_source:string,target:string,edge:DockEdge,before?:string,payload?:DockDragPayload){
     if(busy)return;
     setTree(current=>{
@@ -84,22 +120,29 @@ export function AssistantChatDock({
   async function focus(groupId:string,tab:string){
     if(tab!==activeId&&tab!=='new'&&!await onSelect(tab))return false;
     setFocusedGroup(groupId);
+    setUnseen(current=>{if(!current.has(tab))return current;const next=new Set(current);next.delete(tab);return next;});
     setTree(current=>updateGroup(current,groupId,pane=>pane.active===tab?pane:{...pane,active:tab}));
     return true;
   }
-  async function close(tab:string){
-    if(busy||!ids.includes(tab))return;
-    const summary=chats.find(chat=>chat.id===tab);
-    if(summary&&summary.message_count>0){
-      if(await onClose(tab)){setRemoved(tab);if(ids.length===1)setEmptyClosed(true);}
-      return;
+  async function closeMany(targets:string[]){
+    if(busy)return;
+    const closing=[...new Set(targets.filter(id=>ids.includes(id)))];
+    if(!closing.length)return;
+    const coversAll=ids.every(id=>closing.includes(id));
+    let emptied=false;
+    for(const tab of closing){
+      const summary=chats.find(chat=>chat.id===tab);
+      if(summary&&summary.message_count>0){
+        if(!await onClose(tab))return;
+        setRemoved(tab);
+      }else emptied=true;
     }
-    setEmptyClosed(true);
+    if(coversAll||emptied)setEmptyClosed(true);
   }
   useEffect(()=>{
     const handler=(event:Event)=>{
       const id=(event as CustomEvent<{chatId:string}>).detail?.chatId;
-      if(dock.current?.contains(event.target as Node)&&id&&visibleIds.includes(id))void close(id);
+      if(dock.current?.contains(event.target as Node)&&id&&visibleIds.includes(id))void closeMany([id]);
     };
     document.addEventListener('cadpad-close-chat',handler);
     return()=>document.removeEventListener('cadpad-close-chat',handler);
@@ -115,7 +158,7 @@ export function AssistantChatDock({
         onFocus={(groupId,tab)=>{void focus(groupId,tab);}}
         onChange={setTree}
         onDrop={(tab,source,groupId,edge,before)=>drop(tab,source,groupId,edge,before)}
-        onClose={id=>{void close(id);}}
+        onClose={ids=>{void closeMany(ids);}}
         extra={()=><><button type="button" className="icon-button" disabled={busy} title="New chat" aria-label="New chat" onClick={()=>void onNew().then(created=>{if(created)setEmptyClosed(false);})}><Icon name="plus" size={14}/></button><ChatHistory key={workspaceKey} chats={chats} activeId={activeId} busy={busy} onSelect={async id=>{const owner=groups(tree).find(pane=>pane.tabs.includes(id));return owner?focus(owner.id,id):false;}}/></>}
       />
       <div className="chat-removal" hidden={!removed}>Chat removed. <button type="button" disabled={busy} onClick={async()=>{if(removed&&await onRestore(removed))setRemoved(null);}}>Undo</button></div>

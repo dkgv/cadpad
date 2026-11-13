@@ -128,6 +128,7 @@ export function Workbench(){
   const openingModels=useRef(new Map<string,ModelOpen>());
   const activeOpen=useRef<ModelOpen|null>(null);
   const [canvasOpening,setCanvasOpening]=useState(false);
+  const [openingModel,setOpeningModel]=useState<{entry:string;builder:string}|null>(null);
   const memoryPolicy=useRef(Promise.resolve());
   const menuBridge=useRef<Channel<string>|null>(null),viewBridge=useRef<Channel<any>|null>(null);
   const modelViews=useRef(new Map<string,{workspace:string;sourceRevision:string}>());
@@ -242,12 +243,14 @@ export function Workbench(){
       const flight=activeOpen.current;
       if(flight&&flight.docId!==existing.id&&!flight.done)cancelOpen(flight);
       setCanvasOpening(false);
+      setOpeningModel(null);
       focusDocument(existing.id);
       return;
     }
     const pending=openingModels.current.get(identity);
     if(pending&&!pending.cancelled&&!pending.done){
       setCanvasOpening(true);
+      setOpeningModel({entry,builder});
       if(pending.docId)focusDocument(pending.docId);
       return pending.promise;
     }
@@ -258,6 +261,7 @@ export function Workbench(){
     if(!sourceProject)return;
     if(replacing&&flight)cancelOpen(flight);
     setCanvasOpening(true);
+    setOpeningModel({entry,builder});
     const open:ModelOpen={identity,cancelled:false,done:false,dropped:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
     openingModels.current.set(identity,open);
     activeOpen.current=open;
@@ -295,7 +299,10 @@ export function Workbench(){
         if(!open.cancelled&&state.current?.projectWorkspace===project)setFailure(describeError(error));
         open.done=true;
         if(activeOpen.current===open){activeOpen.current=null;setCanvasOpening(false);}
-      }finally{if(openingModels.current.get(identity)===open)openingModels.current.delete(identity);}
+      }finally{
+        if(openingModels.current.get(identity)===open)openingModels.current.delete(identity);
+        setOpeningModel(current=>current?.entry===entry&&current.builder===builder?null:current);
+      }
     })();
     open.promise=task;
     return task;
@@ -321,8 +328,10 @@ export function Workbench(){
       if(state.current&&state.current.documents.length)update(current=>({...current,canvas:group([]),documents:[],focus:''}));
     }catch(error){setFailure(describeError(error));}
   }
-  function closeTab(area:Area,id:string){update(current=>{
-    const tree=removeTab(current[area],id);
+  function closeTabs(area:Area,ids:string[]){if(!ids.length)return;update(current=>{
+    const owner=groups(current.canvas).find(pane=>pane.tabs.includes(current.focus));
+    let tree=current[area];
+    for(const id of ids)tree=removeTab(tree,id);
     const next={...current,[area]:tree};
     const canvasTabs=groups(next.canvas).flatMap(pane=>pane.tabs);
     // Keep one session alive to host the project's remaining chat tabs.
@@ -331,7 +340,6 @@ export function Workbench(){
       const session=current.documents.find(doc=>doc.id===current.focus)??current.documents[0];
       if(session)documents.push(session);
     }
-    const owner=groups(current.canvas).find(pane=>pane.tabs.includes(id));
     const focus=documents.some(doc=>doc.id===current.focus)?current.focus:
       groups(next.canvas).find(pane=>pane.id===owner?.id)?.active??groups(next.canvas).map(pane=>pane.active).find(Boolean)??documents[0]?.id??'';
     return {...next,documents,focus};
@@ -347,7 +355,7 @@ export function Workbench(){
     }
     if(pane&&area==='canvas'){
       const tab=groups(current.canvas).find(group=>group.id===pane.dataset.dockGroup)?.active;
-      if(tab){closeTab('canvas',tab);return;}
+      if(tab){closeTabs('canvas',[tab]);return;}
     }else if(pane&&(area==='left'||area==='right')){
       // Activity-rail panels stay open; only their nested content tabs close.
       const chat=pane.querySelector<HTMLElement>('.dock-chats .dock-group.focused')??pane.querySelector<HTMLElement>('.dock-chats .dock-group');
@@ -356,7 +364,7 @@ export function Workbench(){
       return;
     }
     const canvas=groups(current.canvas).find(pane=>pane.tabs.includes(current.focus));
-    if(canvas?.active){closeTab('canvas',canvas.active);return;}
+    if(canvas?.active){closeTabs('canvas',[canvas.active]);return;}
     const chat=document.querySelector<HTMLElement>('.docked-sidebar .dock-chats .dock-group.focused')??document.querySelector<HTMLElement>('.docked-sidebar .dock-chats .dock-group');
     const tab=chat?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.dataset.tab;
     if(tab)chat?.dispatchEvent(new CustomEvent('cadpad-close-chat',{bubbles:true,detail:{chatId:tab}}));
@@ -539,10 +547,10 @@ export function Workbench(){
   const focusWorkspace=focusDoc?.workspace||projectWorkspace;
   chromeId.current=pickChrome(layout.documents,layout.projectWorkspace);
   const area=(name:Area)=>{
-    if(name==='canvas')return <DockArea area="canvas" tree={layout.canvas} tabs={docs} hosts={canvasHosts} focused={activeGroups.find(g=>g.tabs.includes(layout.focus))?.id} onFocus={(group,tab)=>focus('canvas',group,tab)} onChange={tree=>update(current=>({...current,canvas:tree}))} onDrop={(tab,source,group,edge,before)=>drop('canvas',tab,source,group,edge,before)} onClose={id=>closeTab('canvas',id)}/>;
+    if(name==='canvas')return <DockArea area="canvas" tree={layout.canvas} tabs={docs} hosts={canvasHosts} focused={activeGroups.find(g=>g.tabs.includes(layout.focus))?.id} onFocus={(group,tab)=>focus('canvas',group,tab)} onChange={tree=>update(current=>({...current,canvas:tree}))} onDrop={(tab,source,group,edge,before)=>drop('canvas',tab,source,group,edge,before)} onClose={ids=>closeTabs('canvas',ids)}/>;
     const tree=layout[name],panes=groups(tree).filter(g=>g.tabs.length);
     // Split sidebars use the same directional docking chrome as the canvas.
-    if(tree.kind==='split'||panes.length>1)return <DockArea area={name} tree={tree} tabs={toolTabs} hosts={toolHosts} onFocus={(groupId,tab)=>{focus(name,groupId,tab);update(current=>current.expanded.includes(tab as ToolTab)?current:{...current,expanded:[...current.expanded,tab as ToolTab]});}} onChange={next=>update(current=>({...current,[name]:next}))} onDrop={(tab,source,group,edge,before)=>drop(name,tab,source,group,edge,before)} onClose={id=>closeTab(name,id)}/>;
+    if(tree.kind==='split'||panes.length>1)return <DockArea area={name} tree={tree} tabs={toolTabs} hosts={toolHosts} onFocus={(groupId,tab)=>{focus(name,groupId,tab);update(current=>current.expanded.includes(tab as ToolTab)?current:{...current,expanded:[...current.expanded,tab as ToolTab]});}} onChange={next=>update(current=>({...current,[name]:next}))} onDrop={(tab,source,group,edge,before)=>drop(name,tab,source,group,edge,before)} onClose={ids=>closeTabs(name,ids)}/>;
     const pane=panes[0]??groups(tree)[0];
     return <SidebarSections area={name} group={pane} tabs={toolTabs} hosts={toolHosts} expanded={layout.expanded} weights={layout.sectionWeights} onToggle={id=>toggleSection(id as ToolTab)} onDrop={(tab,source,before)=>drop(name,tab,source,pane.id,'center',before)} onResize={next=>update(current=>({...current,sectionWeights:{...current.sectionWeights,...next}}))}/>;
   };
@@ -563,7 +571,7 @@ export function Workbench(){
       const sessionHost:SessionHost={
         workspaceId:doc.workspace,modelEntry:doc.modelEntry,onOpenModel:(entry,builder)=>openModel(doc.id,entry,builder),
         active:doc.id===layout.focus,chrome:doc.id===chromeId.current,visible:visible.has(doc.id),
-        projectWorkspace,focusWorkspace,focusModelEntry:focusDoc?.modelEntry,focusSelection:selections[focusWorkspace],
+        projectWorkspace,focusWorkspace,focusModelEntry:focusDoc?.modelEntry,openingModel:openingModel??undefined,focusSelection:selections[focusWorkspace],
         onSelection:context=>setSelections(current=>({...current,[context.workspace]:context})),initialProject:projects.current.get(doc.workspace),
         header,rail,notices,tools:toolHosts,visibleTools,showTool,onOpen:openProject,onOpenWorkspace:workspace=>void openWorkspace(workspace),
         onProject:project=>{noteModelProgress(project);projects.current.set(project.workspace_id,project);update(current=>{const prior=current.documents.find(item=>item.id===doc.id);const fallback=prior?.modelEntry?prior.name:project.name||'Untitled';const name=modelTabTitle(project,fallback,prior?.modelEntry);if(prior&&prior.name===name&&prior.dirty===hasUnsavedChanges(project))return current;return {...current,documents:current.documents.map(item=>item.workspace===project.workspace_id?{...item,name:modelTabTitle(project,item.modelEntry?item.name:project.name||'Untitled',item.modelEntry),dirty:hasUnsavedChanges(project)}:item)};});},

@@ -82,15 +82,57 @@ export function validateDock(value:unknown,allowed:Set<string>,depth=0,seen=new 
 }
 
 const dragType='application/x-cadpad-tab';
-export type DockTab={id:string;title:string;dirty?:boolean;icon?:'cube'|'folder'|'motion'|'physics'|'tests'|'sparkles'|'chat'};
+export type DockTab={id:string;title:string;dirty?:boolean;icon?:'cube'|'folder'|'motion'|'physics'|'tests'|'sparkles'|'chat';status?:'pending'|'unseen'};
+function TabContextMenu({x,y,others,onCloseTab,onCloseOthers,onCloseAll,onDismiss}:{x:number;y:number;others:boolean;onCloseTab:()=>void;onCloseOthers:()=>void;onCloseAll:()=>void;onDismiss:()=>void}){
+  const ref=useRef<HTMLDivElement>(null);
+  const mac=/Mac|iPhone|iPad/.test(navigator.platform);
+  useLayoutEffect(()=>{
+    const node=ref.current;if(!node)return;
+    const rect=node.getBoundingClientRect();
+    node.style.left=`${Math.max(8,Math.min(x,window.innerWidth-rect.width-8))}px`;
+    node.style.top=`${Math.max(8,Math.min(y,window.innerHeight-rect.height-8))}px`;
+    node.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
+  },[x,y]);
+  useEffect(()=>{
+    const down=(event:PointerEvent)=>{
+      if(ref.current?.contains(event.target as Node))return;
+      if(event.button===2&&(event.target as Element|null)?.closest?.('.dock-tab'))return;
+      onDismiss();
+    };
+    const key=(event:KeyboardEvent)=>{if(event.key==='Escape'){event.preventDefault();onDismiss();}};
+    document.addEventListener('pointerdown',down,true);
+    document.addEventListener('keydown',key);
+    window.addEventListener('resize',onDismiss);
+    return()=>{document.removeEventListener('pointerdown',down,true);document.removeEventListener('keydown',key);window.removeEventListener('resize',onDismiss);};
+  },[onDismiss]);
+  function keys(event:React.KeyboardEvent){
+    const items=[...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+    const index=items.indexOf(document.activeElement as HTMLButtonElement);
+    const move=event.key==='ArrowDown'?1:event.key==='ArrowUp'?-1:0;
+    if(move){event.preventDefault();items[(index+move+items.length)%items.length]?.focus();return;}
+    if(event.key==='Home'||event.key==='End'){event.preventDefault();items[event.key==='Home'?0:items.length-1]?.focus();}
+  }
+  return <div ref={ref} className="tab-menu" role="menu" aria-label="Tab" style={{left:x,top:y}} onKeyDown={keys} onContextMenu={event=>{event.preventDefault();event.stopPropagation();}}>
+    <button type="button" role="menuitem" aria-keyshortcuts={mac?'Meta+W':'Control+W'} onClick={onCloseTab}>Close<span className="tab-menu-shortcut">{mac?'⌘W':'Ctrl+W'}</span></button>
+    <button type="button" role="menuitem" disabled={!others} onClick={onCloseOthers}>Close others</button>
+    <button type="button" role="menuitem" onClick={onCloseAll}>Close all</button>
+  </div>;
+}
 function Mount({host,visible}:{host:HTMLElement;visible:boolean}){
   const ref=useRef<HTMLDivElement>(null);
   useLayoutEffect(()=>{ref.current?.appendChild(host);return()=>{host.remove();};},[host]);
   return <div ref={ref} className="dock-mount" hidden={!visible}/>;
 }
-export function DockArea({tree,tabs,hosts,area,focused,onFocus,onChange,onDrop,onClose,extra}:{tree:DockNode;tabs:Record<string,DockTab>;hosts:Record<string,HTMLElement>;area:string;focused?:string;onFocus:(group:string,tab:string)=>void;onChange:(tree:DockNode)=>void;onDrop:(tab:string,source:string,group:string,edge:DockEdge,before?:string)=>void;onClose:(tab:string)=>void;extra?:(group:DockGroup)=>ReactNode}){
+export function DockArea({tree,tabs,hosts,area,focused,onFocus,onChange,onDrop,onClose,extra}:{tree:DockNode;tabs:Record<string,DockTab>;hosts:Record<string,HTMLElement>;area:string;focused?:string;onFocus:(group:string,tab:string)=>void;onChange:(tree:DockNode)=>void;onDrop:(tab:string,source:string,group:string,edge:DockEdge,before?:string)=>void;onClose:(tabs:string[])=>void;extra?:(group:DockGroup)=>ReactNode}){
   const pointerDrag=useDockDrag();
   const [drop,setDrop]=React.useState<{group:string;edge:DockEdge}|null>(null);
+  const [menu,setMenu]=React.useState<{tab:string;x:number;y:number}|null>(null);
+  const dismissMenu=React.useCallback(()=>setMenu(null),[]);
+  function showMenu(group:string,tab:string,x:number,y:number){
+    onFocus(group,tab);
+    window.dispatchEvent(new Event('cadpad-dismiss-tab-menu'));
+    setMenu({tab,x,y});
+  }
   const start=useRef<{id:string;axis:string;bounds:DOMRect}|null>(null);
   const rootRef=useRef<HTMLDivElement>(null);
   function decode(event:React.DragEvent){try{return JSON.parse(event.dataTransfer.getData(dragType)) as {tab:string;area:string};}catch{return null;}}
@@ -101,8 +143,8 @@ export function DockArea({tree,tabs,hosts,area,focused,onFocus,onChange,onDrop,o
     const hover=pointerDrag?.drag?.target?.area===area&&pointerDrag.drag.target.group===node.id?pointerDrag.drag.target:!pointerDrag?.drag&&drop?.group===node.id?drop:null;
     return <section key={node.id} className={`dock-group ${focused===node.id?'focused':''}`} data-dock-group={node.id}>
       <header className="dock-tabs" onPointerDown={event=>{if((event.target as Element).closest('.dock-tab,.dock-tab-actions,button,summary'))return;pointerDrag?.begin(event,{kind:'group',tabs:node.tabs,active:node.active??node.tabs[0],area,group:node.id,label:node.tabs.length>1?`${tabs[node.active??'']?.title||'Pane'} + ${node.tabs.length-1} tab${node.tabs.length===2?'':'s'}`:tabs[node.active??'']?.title||'Pane'});}}><div role="tablist" aria-label={`${area} tabs`} className="dock-tab-list" onDragOver={event=>{if(event.dataTransfer.types.includes(dragType))event.preventDefault();}} onDrop={event=>{const data=decode(event);if(!data)return;event.preventDefault();onDrop(data.tab,data.area,node.id,'center');setDrop(null);}}>
-        {node.tabs.map(id=>tabs[id]&&<div className={`dock-tab ${node.active===id?'active':''} ${hover&&'before' in hover&&hover.before===id?'drop-before':''}`} key={id} onPointerDown={event=>{if(!(event.target as Element).closest('.tab-close'))pointerDrag?.begin(event,{kind:'tab',tabs:[id],active:id,area,group:node.id,label:tabs[id].title});}} draggable={!pointerDrag} onDragStart={event=>{if(pointerDrag){event.preventDefault();return;}event.dataTransfer.setData(dragType,JSON.stringify({tab:id,area}));event.dataTransfer.effectAllowed='move';}} onDragEnd={()=>setDrop(null)} onDragOver={event=>event.preventDefault()} onDrop={event=>{const data=decode(event);if(!data)return;event.preventDefault();event.stopPropagation();onDrop(data.tab,data.area,node.id,'center',id);setDrop(null);}}>
-          <button role="tab" aria-selected={node.active===id} tabIndex={node.active===id?0:-1} title={tabs[id].title} onClick={()=>onFocus(node.id,id)} onKeyDown={event=>{const offset=event.key==='ArrowRight'?1:event.key==='ArrowLeft'?-1:0;if(offset){event.preventDefault();const next=node.tabs[(node.tabs.indexOf(id)+offset+node.tabs.length)%node.tabs.length];onFocus(node.id,next);(event.currentTarget.parentElement?.parentElement?.querySelector(`[data-tab="${next}"]`) as HTMLElement|null)?.focus();}}} data-tab={id}>{tabs[id].icon&&<Icon name={tabs[id].icon!}/>}<span>{tabs[id].title}</span>{tabs[id].dirty&&<i className="tab-dirty" aria-label="Unsaved changes"/>}</button><button className="tab-close" aria-label={`Close ${tabs[id].title} tab`} title="Close tab" onClick={()=>onClose(id)}><Icon name="close" size={12}/></button>
+        {node.tabs.map(id=>tabs[id]&&<div className={`dock-tab ${node.active===id?'active':''} ${hover&&'before' in hover&&hover.before===id?'drop-before':''}`} key={id} onContextMenu={event=>{event.preventDefault();event.stopPropagation();showMenu(node.id,id,event.clientX,event.clientY);}} onPointerDown={event=>{if(!(event.target as Element).closest('.tab-close'))pointerDrag?.begin(event,{kind:'tab',tabs:[id],active:id,area,group:node.id,label:tabs[id].title});}} draggable={!pointerDrag} onDragStart={event=>{if(pointerDrag){event.preventDefault();return;}event.dataTransfer.setData(dragType,JSON.stringify({tab:id,area}));event.dataTransfer.effectAllowed='move';}} onDragEnd={()=>setDrop(null)} onDragOver={event=>event.preventDefault()} onDrop={event=>{const data=decode(event);if(!data)return;event.preventDefault();event.stopPropagation();onDrop(data.tab,data.area,node.id,'center',id);setDrop(null);}}>
+          <button role="tab" aria-selected={node.active===id} tabIndex={node.active===id?0:-1} title={tabs[id].status==='pending'?`${tabs[id].title} — assistant working`:tabs[id].status==='unseen'?`${tabs[id].title} — unread reply`:tabs[id].title} aria-label={tabs[id].status==='pending'?`${tabs[id].title}, assistant working`:tabs[id].status==='unseen'?`${tabs[id].title}, unread reply`:undefined} onClick={()=>onFocus(node.id,id)} onKeyDown={event=>{const offset=event.key==='ArrowRight'?1:event.key==='ArrowLeft'?-1:0;if(offset){event.preventDefault();const next=node.tabs[(node.tabs.indexOf(id)+offset+node.tabs.length)%node.tabs.length];onFocus(node.id,next);(event.currentTarget.parentElement?.parentElement?.querySelector(`[data-tab="${next}"]`) as HTMLElement|null)?.focus();}}} data-tab={id}>{tabs[id].status==='pending'?<svg className="tab-spinner" viewBox="0 0 24 24" role="img" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="2" opacity=".28"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeDasharray="13 38"/></svg>:tabs[id].status==='unseen'?<svg className="tab-unseen" viewBox="0 0 24 24" role="img" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="1.8"/></svg>:tabs[id].icon&&<Icon name={tabs[id].icon!}/>}<span>{tabs[id].title}</span>{tabs[id].dirty&&<i className="tab-dirty" aria-label="Unsaved changes"/>}</button><button className="tab-close" aria-label={`Close ${tabs[id].title} tab`} title="Close tab" onClick={()=>onClose([id])}><Icon name="close" size={12}/></button>
         </div>)}
       </div><div className="dock-tab-actions">{!node.tabs.length&&<button className="icon-button" aria-label={`Close empty ${area} pane`} title="Close empty pane" onClick={()=>onChange(closeEmptyGroup(tree,node.id)??group())}><Icon name="close" size={13}/></button>}{extra?.(node)}</div></header>
       <div className="dock-body" onDragOver={event=>{if(!event.dataTransfer.types.includes(dragType))return;event.preventDefault();const rect=event.currentTarget.getBoundingClientRect(),x=(event.clientX-rect.left)/rect.width,y=(event.clientY-rect.top)/rect.height;const edge:DockEdge=x<.22?'left':x>.78?'right':y<.22?'top':y>.78?'bottom':'center';setDrop({group:node.id,edge});}} onDragLeave={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node))setDrop(null);}} onDrop={event=>{const data=decode(event);if(!data)return;event.preventDefault();onDrop(data.tab,data.area,node.id,drop?.group===node.id?drop.edge:'center');setDrop(null);}}>
@@ -144,6 +186,15 @@ export function DockArea({tree,tabs,hosts,area,focused,onFocus,onChange,onDrop,o
     return()=>{root.removeEventListener('dragleave',leave,true);root.removeEventListener('pointerdown',focus,true);root.removeEventListener('focusin',focus,true);root.removeEventListener('dragover',drag,true);root.removeEventListener('drop',drag,true);};
   },[tree,onFocus,onDrop]);
   useEffect(()=>{const clear=()=>setDrop(null);window.addEventListener('dragend',clear);return()=>window.removeEventListener('dragend',clear);},[]);
-  return <div ref={rootRef} className={`dock-area dock-${area}`} data-dock-area={area}>{render(tree)}</div>;
+  useEffect(()=>{const clear=()=>setMenu(null);window.addEventListener('cadpad-dismiss-tab-menu',clear);return()=>window.removeEventListener('cadpad-dismiss-tab-menu',clear);},[]);
+  useEffect(()=>{if(menu&&!groups(tree).some(group=>group.tabs.includes(menu.tab)))setMenu(null);},[tree,menu]);
+  const menuTabs=menu?(groups(tree).find(group=>group.tabs.includes(menu.tab))?.tabs.filter(id=>tabs[id])??[]):[];
+  function closeTabs(ids:string[]){
+    const current=menu?.tab;
+    setMenu(null);
+    if(ids.length)onClose(ids);
+    if(current&&!ids.includes(current))requestAnimationFrame(()=>[...document.querySelectorAll<HTMLElement>('[data-tab]')].find(tab=>tab.dataset.tab===current)?.focus());
+  }
+  return <div ref={rootRef} className={`dock-area dock-${area}`} data-dock-area={area}>{render(tree)}{menu&&!!menuTabs.length&&createPortal(<TabContextMenu x={menu.x} y={menu.y} others={menuTabs.length>1} onCloseTab={()=>closeTabs([menu.tab])} onCloseOthers={()=>closeTabs(menuTabs.filter(id=>id!==menu.tab))} onCloseAll={()=>closeTabs(menuTabs)} onDismiss={dismissMenu}/>,document.body)}</div>;
 }
 export function DockContent({host,children}:{host:HTMLElement;children:ReactNode}){return createPortal(children,host);}

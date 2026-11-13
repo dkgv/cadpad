@@ -15,6 +15,8 @@ export type SessionHost={
   /** Workspace of the focused canvas tab (Explorer / agent edits follow this). */
   focusWorkspace:string;
   focusModelEntry?:{entry:string;builder:string};
+  /** Model chosen in Explorer that is still opening. */
+  openingModel?:{entry:string;builder:string};
   focusSelection?:SelectionContext;
   onSelection?:(context:SelectionContext)=>void;
   header:HTMLElement;rail:HTMLElement;notices:HTMLElement;tools:Record<ToolTab,HTMLElement>;

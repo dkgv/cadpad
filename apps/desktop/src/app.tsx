@@ -304,6 +304,35 @@ export function App({host}:{host?:SessionHost}={}) {
   const [agentBackend,setAgentBackend]=useState('claude_cli');
   const [modelId,setModelId]=useState(''),[apiKey,setApiKey]=useState(''),[savingProvider,setSavingProvider]=useState(false);
   const liveTurn=useRef<AgentTurn|null>(null);
+  const pendingTurnChat=useRef(new Map<string,string>());
+  const settledTurns=useRef(new Set<string>());
+  const [pendingChatIds,setPendingChatIds]=useState<string[]>([]);
+  const [landedChat,setLandedChat]=useState<{id:string;seq:number}|null>(null);
+  function publishPending(){
+    const ids=[...new Set(pendingTurnChat.current.values())];
+    setPendingChatIds(current=>current.length===ids.length&&current.every((id,index)=>id===ids[index])?current:ids);
+  }
+  function notePendingChat(chatId:string,turnId?:string){
+    if(!chatId||turnId&&settledTurns.current.has(turnId))return;
+    if(turnId){pendingTurnChat.current.delete(`local:${chatId}`);pendingTurnChat.current.set(turnId,chatId);}
+    else pendingTurnChat.current.set(`local:${chatId}`,chatId);
+    publishPending();
+  }
+  function noteSettledChat(chatId:string,turnId:string){
+    if(!chatId||!turnId||settledTurns.current.has(turnId))return;
+    settledTurns.current.add(turnId);
+    pendingTurnChat.current.delete(turnId);
+    pendingTurnChat.current.delete(`local:${chatId}`);
+    publishPending();
+    setLandedChat({id:chatId,seq:settledTurns.current.size});
+  }
+  function dropPendingStart(chatId:string){
+    if(!pendingTurnChat.current.delete(`local:${chatId}`))return;
+    publishPending();
+  }
+  function resetChatAttention(){
+    pendingTurnChat.current.clear();settledTurns.current.clear();setPendingChatIds([]);setLandedChat(null);
+  }
   function showTurn(turn:AgentTurn|null){
     const old=liveTurn.current;
     if(turn&&old?.id===turn.id){
@@ -317,6 +346,9 @@ export function App({host}:{host?:SessionHost}={}) {
     const id=result.active_chat_id??null,previous=selectedChat.current;
     if(!previous||previous.workspace!==workspace||previous.id!==id)updatePrompt(chatDrafts.current.get(`${workspace}:${id??'legacy'}`)||'');
     selectedChat.current={workspace,id};setActiveChatId(id);setChatList(result.chats??[]);setChat(result.messages);if(id)setChatMessages(current=>({...current,[id]:result.messages}));showTurn(result.turn);
+    const live=result.turn;
+    if(live?.chat_id&&['running','cancelling'].includes(live.state))notePendingChat(live.chat_id,live.id);
+    else if(live?.chat_id&&live.id&&['succeeded','failed','cancelled'].includes(live.state)&&(pendingTurnChat.current.has(live.id)||[...pendingTurnChat.current.values()].includes(live.chat_id)))noteSettledChat(live.chat_id,live.id);
   }
   async function refreshChat(workspace:string){
     if(chatChangePending.current===workspace)return;
@@ -383,7 +415,8 @@ export function App({host}:{host?:SessionHost}={}) {
     if(liveTurn.current?.workspace_id===workspace&&['running','cancelling'].includes(liveTurn.current.state))return;
     const previousId=liveTurn.current?.id;
     const pending:PendingAgentStart={workspace,cancelRequested:false};
-    pendingAgentStarts.current.set(workspace,pending);starting(workspace,'starting');chatEpoch.current++;setError('');setNotice('');
+    const pendingTab=targetChat&&targetChat!=='new'?targetChat:'new';
+    pendingAgentStarts.current.set(workspace,pending);starting(workspace,'starting');notePendingChat(pendingTab);chatEpoch.current++;setError('');setNotice('');
     // Show the outbound message immediately; refreshChat reconciles with the server.
     if(chatScope()===workspace){
       const optimistic={role:'user',text:submitted,image:attachedImage?.data};
@@ -399,10 +432,13 @@ export function App({host}:{host?:SessionHost}={}) {
       const turn=await invoke<AgentTurn>('agent_start',{workspace,...(current.workspace_id!==workspace?{modelWorkspace:current.workspace_id}:{}),prompt:submitted,references:attached,image,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
       if(turn.workspace_id!==workspace)throw new Error('Agent reply belongs to another workspace');
       pending.turn=turn;
+      dropPendingStart(pendingTab);
+      if(turn.chat_id){if(['succeeded','failed','cancelled'].includes(turn.state))noteSettledChat(turn.chat_id,turn.id);else notePendingChat(turn.chat_id,turn.id);}
       if(chatScope()===workspace&&(!liveTurn.current||liveTurn.current.id===turn.id||liveTurn.current.id===previousId))showTurn(turn);
       if(pending.cancelRequested)await cancelAcceptedStart(pending);
       if(chatScope()===workspace){if(!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}await refreshChat(workspace);}
     }catch(error){
+      dropPendingStart(pendingTab);
       if(pending.cancelRequested&&!pending.turn){if(chatScope()===workspace)void refreshChat(workspace).catch(()=>{});return;}
       if(chatScope()===workspace){const failure=error as {code?:string};if(failure.code==='LLM_NOT_CONFIGURED')setProviderOpen(true);setError(message(error));void refreshChat(workspace).catch(()=>{});}
     }
@@ -658,6 +694,7 @@ export function App({host}:{host?:SessionHost}={}) {
   useEffect(()=>{
     if(!chatWorkspace)return;
     pruneChatHosts(new Set());
+    resetChatAttention();
     setChat([]);setChatList([]);setActiveChatId(null);setChatMessages({});setAgentActivity('');setAttachedImage(null);setImageDropDepth(0);showTurn(null);
     refreshChat(chatWorkspace).catch(e=>setError(message(e)));
   },[chatWorkspace]);
@@ -704,6 +741,8 @@ export function App({host}:{host?:SessionHost}={}) {
       const workspace=activeWorkspace.current;if(!workspace)return;
       if(event.kind==='refresh'){refreshChat(workspace).catch(e=>setError(message(e)));return;}
       if(event.workspace_id!==workspace)return;
+      if(event.turn?.chat_id&&event.kind==='turn_started')notePendingChat(event.turn.chat_id,event.turn.id||event.turn_id);
+      if(event.turn?.chat_id&&event.kind==='turn_finished')noteSettledChat(event.turn.chat_id,event.turn.id||event.turn_id);
       if(event.turn?.chat_id&&selectedChat.current?.id&&event.turn.chat_id!==selectedChat.current.id){void refreshChat(workspace).catch(e=>setError(message(e)));return;}
       if(event.kind==='text_delta'||event.kind==='thinking_delta'){
         // Deltas extend the last step of their kind; a new step always arrives as a full turn.
@@ -735,6 +774,7 @@ export function App({host}:{host?:SessionHost}={}) {
         if(currentProject.current?.revision!==committed.revision||currentProject.current?.dirty!==committed.dirty)adopt(committed);
         // Streaming events own live text. Polling reconciles model and terminal state.
         if(['succeeded','failed','cancelled'].includes(latest.state)){
+          if(latest.chat_id)noteSettledChat(latest.chat_id,latest.id);
           showTurn(latest);await refreshChat(workspace);
         }
       }catch{/* Retry transient status failures without interrupting streamed text. */}
@@ -1121,7 +1161,7 @@ export function App({host}:{host?:SessionHost}={}) {
             {!host&&<PanelResizeHandle panel="model" value={panelSizes.model} onChange={value=>resizePanel('model',value)}/>}
             {!host&&<header className="dock-heading"><strong>Explorer</strong><button className="icon-button" aria-label="Close Explorer" onClick={()=>{setModelOpen(false);requestAnimationFrame(()=>document.getElementById('tab-model')?.focus());}}><Icon name="close" size={16}/></button></header>}
             <div className="model-browser-content">
-          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">Measured on the current model.</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} projectName={explorer.name||undefined} onBrowseLibrary={()=>setLibraryOpen(true)} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={host?busy||agentSending||agentWorking:working} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} assets={explorer.assets||{}} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its source and geometry.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
+          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">Measured on the current model.</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} projectName={explorer.name||undefined} onBrowseLibrary={()=>setLibraryOpen(true)} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={host?busy||agentSending||agentWorking:working} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} assets={explorer.assets||{}} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its source and geometry.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
 
         </div>
           </aside>);
@@ -1186,6 +1226,9 @@ export function App({host}:{host?:SessionHost}={}) {
           chats={chatList}
           activeId={activeChatId}
           busy={!project||chatBusy||agentSending}
+          pendingChatIds={pendingChatIds}
+          landedChat={landedChat}
+          panelOpen={assistantOpen}
           hosts={chatHostMap}
           onVisibleChats={setVisibleChatIds}
           onNew={()=>changeChat('new')}

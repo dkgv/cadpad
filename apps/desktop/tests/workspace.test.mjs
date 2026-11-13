@@ -1742,6 +1742,51 @@ test('canvas tabs retain independent sessions and focus routes save to the selec
   assert.equal(harness.calls.findLast(([name])=>name==='save_project')[1].workspace,'workspace-2');
 });
 
+test('right-clicking a tab can close it, the other tabs in its strip, or the whole strip',async()=>{
+  const original=harness.invoke.bind(harness);
+  const models=['Clamp','Bracket'].map((name,index)=>{const model=fixture();model.workspace_id=`workspace-${index+2}`;model.name=name;model.motion={...model.motion,workspace_id:model.workspace_id};return model;});
+  let created=0;
+  harness.invoke=async(command,args)=>{
+    if(command==='new_scratchpad')return structuredClone(models[Math.min(created++,models.length-1)]);
+    if(command==='project'){const model=models.find(item=>item.workspace_id===args.workspace);if(model)return structuredClone(model);}
+    return original(command,args);
+  };
+  await mountWorkbench();
+  const openMenu=async tab=>{
+    await act(async()=>tab.closest('.dock-tab').dispatchEvent(new dom.window.MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:28,clientY:16})));
+    await flush();
+  };
+  await openMenu(canvasTabs()[0]);
+  const menuLabel=item=>item.childNodes[0].textContent;
+  assert.deepEqual([...document.querySelectorAll('.tab-menu [role="menuitem"]')].map(menuLabel),['Close','Close others','Close all']);
+  assert.equal(document.querySelector('.tab-menu-shortcut')?.textContent,/Mac|iPhone|iPad/.test(navigator.platform)?'⌘W':'Ctrl+W');
+  assert.equal(document.querySelector('.tab-menu button:disabled').textContent,'Close others');
+  await act(async()=>document.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape',bubbles:true})));
+  await flush();
+  assert.equal(document.querySelector('.tab-menu'),null);
+  await act(async()=>harness.menu.onmessage('new-model'));await flush(30);
+  await act(async()=>harness.menu.onmessage('new-model'));await flush(30);
+  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Clamp','Bracket']);
+  await openMenu(canvasTabs().find(tab=>tab.textContent==='Clamp'));
+  await click([...document.querySelectorAll('.tab-menu button')].find(item=>item.childNodes[0].textContent==='Close'));
+  await flush();
+  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Bracket']);
+  assert.equal(document.querySelector('.tab-menu'),null);
+  await openMenu(canvasTabs().find(tab=>tab.textContent==='Rail assembly'));
+  await click([...document.querySelectorAll('.tab-menu button')].find(item=>item.textContent==='Close others'));
+  await flush();
+  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly']);
+  await act(async()=>harness.menu.onmessage('new-model'));await flush(30);
+  await act(async()=>harness.menu.onmessage('split-right'));await flush(20);
+  assert.equal(document.querySelectorAll('.dock-canvas .dock-group').length,2);
+  await openMenu(canvasTabs().find(tab=>tab.textContent==='Rail assembly'));
+  await click([...document.querySelectorAll('.tab-menu button')].find(item=>item.textContent==='Close all'));
+  await flush();
+  assert.equal(document.querySelectorAll('.dock-canvas .dock-group').length,1);
+  assert.equal(canvasTabs().length,1);
+  assert.equal(canvasTabs()[0].textContent,'Bracket');
+});
+
 test('New Project replaces open model tabs while New Model adds another tab',async()=>{
   const original=harness.invoke.bind(harness);let opens=0;
   const second=fixture();second.workspace_id='workspace-2';second.name='Clamp';second.motion={...second.motion,workspace_id:'workspace-2'};

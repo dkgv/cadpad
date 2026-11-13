@@ -33,8 +33,16 @@
 .dock-tab.active button{color:var(--text)}
 .dock-tab button[role=tab]{min-width:0}.dock-tab button[role=tab]:hover:not(:disabled){background:transparent}.dock-tab button[role=tab]>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
 .dock-tab button[role=tab]>svg{width:14px;height:14px;flex:none}
+.dock-tab .tab-spinner,.dock-tab .tab-unseen{color:var(--blue)}
+.dock-tab .tab-spinner{transform-box:fill-box;transform-origin:center;animation:tab-spin .75s linear infinite}
+@keyframes tab-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.dock-tab .tab-spinner{animation:none}}
 .dock-tab .tab-close{align-self:center;width:20px;min-width:20px;height:20px;min-height:20px;margin:0 5px 0 0;padding:4px;border-radius:4px;opacity:0}
 .dock-tab:hover .tab-close,.dock-tab:focus-within .tab-close,.dock-tab.active .tab-close{opacity:1}
+.tab-menu{position:fixed;z-index:80;min-width:168px;display:flex;flex-direction:column;gap:1px;padding:4px;border:1px solid var(--border);border-radius:8px;background:var(--surface);box-shadow:0 8px 24px #17243b2e}
+.tab-menu button{justify-content:space-between;gap:16px;border:0;background:transparent;border-radius:5px;min-height:28px;padding:5px 10px;font-size:12px;font-weight:500;color:var(--text)}
+.tab-menu-shortcut{color:var(--muted);font-size:11px;font-weight:450}
+.tab-menu button:hover:not(:disabled),.tab-menu button:focus-visible{background:var(--hover)}
 .tab-dirty{width:6px;height:6px;border-radius:50%;background:#647083;flex:none}
 .dock-tab-actions{display:flex;align-items:center;padding:0 3px;gap:1px;flex:none}
 .dock-tab-actions .icon-button{height:27px;width:25px;min-width:25px;min-height:27px;padding:4px;border:0;border-radius:4px;background:transparent}
