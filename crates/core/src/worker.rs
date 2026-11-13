@@ -111,6 +111,27 @@ async fn read_response(output: &mut BufReader<ChildStdout>) -> Result<String> {
     }
 }
 
+fn drain_stderr(mut pipe: tokio::process::ChildStderr) -> tokio::task::JoinHandle<Vec<u8>> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut kept = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match pipe.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    kept.extend_from_slice(&buf[..count]);
+                    if kept.len() > 4096 {
+                        let extra = kept.len() - 4096;
+                        kept.drain(..extra);
+                    }
+                }
+            }
+        }
+        kept
+    })
+}
+
 pub struct Worker {
     child: Child,
     input: ChildStdin,
@@ -127,6 +148,7 @@ pub struct Worker {
     /// reap the native group when both guardian and anchor are already gone.
     #[cfg(unix)]
     interpreter_pid: Option<i32>,
+    stderr: Option<tokio::task::JoinHandle<Vec<u8>>>,
 }
 impl crate::Core {
     pub(crate) async fn spawn_managed_worker(
@@ -201,7 +223,7 @@ impl Worker {
             .env("PYTHONSAFEPATH", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(!cfg!(unix));
         if let Some(path) = &config.module_path {
             command.env("PYTHONPATH", path);
@@ -239,7 +261,7 @@ impl Worker {
             guarded
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .kill_on_drop(true);
             command = guarded;
         }
@@ -307,6 +329,7 @@ impl Worker {
         })?;
         let input = child.stdin.take().unwrap();
         let output = BufReader::new(child.stdout.take().unwrap());
+        let stderr = child.stderr.take().map(drain_stderr);
         #[cfg(unix)]
         let interpreter_pid = {
             use std::io::Read;
@@ -355,6 +378,7 @@ impl Worker {
             liveness: Some(liveness),
             #[cfg(unix)]
             interpreter_pid,
+            stderr,
         })
     }
     #[cfg(unix)]
@@ -405,7 +429,7 @@ impl Worker {
                 if let Some(report) = self.stop_report().await? {
                     return Err(resource_error(report));
                 }
-                return Err(error);
+                return Err(self.explain_exit(error).await);
             }
             Some(Ok(line)) => line,
         };
@@ -450,6 +474,32 @@ impl Worker {
             result["geometry_cache"] = response["geometry_cache"].clone();
         }
         Ok(result)
+    }
+    async fn explain_exit(&mut self, error: Error) -> Error {
+        let Some(handle) = self.stderr.take() else {
+            return error;
+        };
+        let Ok(bytes) = handle.await else {
+            return error;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let text = text.trim();
+        if text.is_empty() {
+            return error;
+        }
+        let text: String = text.chars().take(500).collect();
+        match error {
+            Error::Domain {
+                code,
+                message,
+                details,
+            } => Error::Domain {
+                code,
+                message: format!("{message}: {text}"),
+                details,
+            },
+            other => other,
+        }
     }
     pub async fn stop(&mut self) -> Result<()> {
         self.stop_report().await?;

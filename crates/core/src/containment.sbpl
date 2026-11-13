@@ -8,8 +8,12 @@
 (allow mach-lookup
   (global-name "com.apple.system.opendirectoryd.libinfo")
   (global-name "com.apple.system.notification_center"))
+; Apple Silicon maps the dynamic linker cache from the OS cryptex. The data
+; volume under /System/Volumes/Data stays unreachable.
 (allow file-read* file-map-executable
-  (subpath "/System/Library") (subpath "/usr/lib"))
+  (subpath "/System/Library")
+  (subpath "/System/Volumes/Preboot/Cryptexes")
+  (subpath "/usr/lib"))
 (allow file-read*
   (subpath "/usr/share") (subpath "/Library/Fonts")
   (literal "/") (literal "/private/etc/passwd")
