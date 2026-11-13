@@ -45,7 +45,11 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked --python 3.12
+      # macos-15 has 7 GB. Parallel CadQuery processes get reclaimed by the
+      # kernel while each one is still under its own 4 GB limit.
       - run: cargo test --locked -p cadpad-core -p cadpad-agent -p cadpad-mcp
+        env:
+          RUST_TEST_THREADS: "1"
 
   python:
     name: Python tests
