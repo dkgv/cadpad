@@ -330,6 +330,21 @@
             ],
             "type": "object"
           },
+          "ModelEntry": {
+            "properties": {
+              "builder": {
+                "type": "string"
+              },
+              "entry": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry",
+              "builder"
+            ],
+            "type": "object"
+          },
           "MotorImpulse": {
             "properties": {
               "coordinate_unit": {
@@ -488,6 +503,16 @@
               "model": {
                 "$ref": "#/$defs/Source_Model"
               },
+              "model_entry": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelEntry"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "motion": {
                 "$ref": "#/$defs/Snapshot"
               },
@@ -525,6 +550,9 @@
                 "minimum": 0,
                 "type": "integer"
               },
+              "unsaved_changes": {
+                "type": "boolean"
+              },
               "workspace_id": {
                 "type": "string"
               }
@@ -537,6 +565,7 @@
               "files",
               "parameters",
               "entry_point",
+              "model_entry",
               "model",
               "activity",
               "total_jobs",
@@ -550,6 +579,7 @@
               "recordings",
               "name",
               "saved_revision",
+              "unsaved_changes",
               "dirty"
             ],
             "type": "object"

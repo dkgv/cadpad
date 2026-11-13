@@ -198,6 +198,11 @@ pub struct Activity {
     pub created_at: u64,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ModelEntry {
+    pub entry: String,
+    pub builder: String,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Project {
     pub workspace_id: String,
     pub revision: String,
@@ -206,6 +211,7 @@ pub struct Project {
     pub files: Vec<String>,
     pub parameters: Source<BTreeMap<String, ParameterValue>>,
     pub entry_point: String,
+    pub model_entry: Option<ModelEntry>,
     pub model: Source<Model>,
     #[schemars(length(max = 20))]
     pub activity: Vec<Activity>,
@@ -220,6 +226,7 @@ pub struct Project {
     pub recordings: Vec<playback::Metadata>,
     pub name: Option<String>,
     pub saved_revision: Option<String>,
+    pub unsaved_changes: bool,
     pub dirty: bool,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
