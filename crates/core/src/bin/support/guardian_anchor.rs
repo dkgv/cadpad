@@ -89,6 +89,22 @@ pub fn prepare(command: &mut Command, owner: i32) -> io::Result<Lease> {
                 }
                 return Err(io::Error::from_raw_os_error(libc::ETIMEDOUT));
             }
+            // The CAD image must not inherit the app or CI runner's sockets.
+            // python.org's bin/python posix_spawns Python.app and preserves
+            // descriptor numbers, so a runner socket stays visible at fd 131.
+            // CLOEXEC closes them on exec without touching the spawn error pipe,
+            // which is created after this snapshot.
+            for fd in &descriptors {
+                if *fd <= 2 {
+                    continue;
+                }
+                if libc::fcntl(*fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::EBADF) {
+                        return Err(error);
+                    }
+                }
+            }
             Ok(())
         });
     }
