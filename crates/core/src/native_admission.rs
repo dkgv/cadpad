@@ -53,18 +53,24 @@ fn try_lease(root: &Path) -> Result<Option<Lease>> {
             let name = std::ffi::CString::new(format!("{index}.lease")).unwrap();
             // SAFETY: open relative to the pinned application directory. The
             // name is generated here; no symlinks or special files are followed.
-            let fd = unsafe {
+            let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+            // Darwin can report spurious ENOENT when openat(O_CREAT) races
+            // another creator. Exclusive creation followed by an existing-file
+            // open avoids that kernel path without weakening scoped access.
+            let mut fd = unsafe {
                 libc::openat(
                     directory.as_raw_fd(),
                     name.as_ptr(),
-                    libc::O_RDWR
-                        | libc::O_CREAT
-                        | libc::O_NOFOLLOW
-                        | libc::O_NONBLOCK
-                        | libc::O_CLOEXEC,
+                    flags | libc::O_CREAT | libc::O_EXCL,
                     0o600,
                 )
             };
+            if fd < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists
+            {
+                // SAFETY: the same pinned directory and NUL-terminated name
+                // remain live. O_NOFOLLOW still rejects a replaced symlink.
+                fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+            }
             if fd < 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
@@ -470,5 +476,35 @@ mod tests {
         symlink(&marker, root.join("native-capacity/0.lease")).unwrap();
         assert!(try_slot(&root).is_err());
         assert_eq!(fs::read(marker).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn concurrent_first_admissions_keep_distinct_capacity_leases() {
+        for _ in 0..32 {
+            let root = tempfile::tempdir().unwrap();
+            let start = std::sync::Barrier::new(MAX_WORKERS);
+            let acquired = std::sync::Barrier::new(MAX_WORKERS);
+            let leases = std::thread::scope(|scope| {
+                let handles = (0..MAX_WORKERS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            let lease = try_lease(root.path());
+                            // Keep every successful lease locked until all
+                            // callers have finished trying to acquire theirs.
+                            acquired.wait();
+                            lease
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().unwrap())
+                    .collect::<crate::Result<Vec<_>>>()
+            })
+            .unwrap();
+            assert!(leases.iter().all(Option::is_some));
+            assert!(try_lease(root.path()).unwrap().is_none());
+        }
     }
 }
