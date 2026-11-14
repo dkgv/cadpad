@@ -191,7 +191,7 @@ async fn concurrent_drafts_conflict_and_do_not_retarget_workspaces() {
         "{ja:?} {jb:?}"
     );
     let loser = if ja.state == JobState::Failed { ja } else { jb };
-    assert_eq!(loser.diagnostics["code"], "REVISION_CONFLICT");
+    assert_eq!(loser.diagnostics["code"], "REVISION_CONFLICT", "{loser:?}");
     assert_eq!(
         core.focused_workspace().await.as_deref(),
         Some(other.as_str())
