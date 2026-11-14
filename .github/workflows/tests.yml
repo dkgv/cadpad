@@ -15,6 +15,7 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/tests.yml'
+      - '.config/nextest.toml'
   pull_request:
     branches: [main]
     paths:
@@ -29,6 +30,7 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/tests.yml'
+      - '.config/nextest.toml'
 
 permissions:
   contents: read
@@ -37,19 +39,31 @@ jobs:
   rust:
     name: Rust tests
     runs-on: macos-15
+    env:
+      # Keep line numbers in backtraces without generating full debug symbols.
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest@0.9.151
       - uses: Swatinem/rust-cache@v2
+        with:
+          # A late test failure should not discard the dependency build.
+          cache-on-failure: true
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-      - run: uv sync --locked --python 3.12
-      # macos-15 has 7 GB. Parallel CadQuery processes get reclaimed by the
-      # kernel while each one is still under its own 4 GB limit.
-      - run: cargo test --locked -p cadpad-core -p cadpad-agent -p cadpad-mcp
-        env:
-          RUST_TEST_THREADS: "1"
+      # Workers read bytecode but deliberately never write it. Compile once here
+      # so every fresh interpreter does not reparse the installed dependencies.
+      - run: uv sync --locked --python 3.12 --compile-bytecode
+      # Two test slots across binaries; heavy suites reserve both (nextest.toml).
+      - run: cargo nextest run --locked --profile ci -p cadpad-core -p cadpad-agent -p cadpad-mcp
+      # Nextest does not run doctests. Keep Cargo's example compilation checks too.
+      - run: |
+          cargo test --locked -p cadpad-core -p cadpad-agent -p cadpad-mcp --doc
+          cargo test --locked -p cadpad-core -p cadpad-agent -p cadpad-mcp --examples --no-run
 
   python:
     name: Python tests

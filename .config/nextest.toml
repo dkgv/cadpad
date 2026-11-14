@@ -1,0 +1,12 @@
+[profile.ci]
+# The standard macOS runner has 7 GB. Ordinary geometry tests fit two at a
+# time; do not scale this automatically with a developer machine's CPU count.
+test-threads = 2
+fail-fast = false
+
+[[profile.ci.overrides]]
+# Cache/construction tests pin several CAD interpreters. Lifecycle/quota tests deliberately
+# stop or busy-loop native processes and assert tight shutdown deadlines.
+# Reserve the entire budget so these cannot overlap even with ordinary tests.
+filter = 'binary(construction) | binary(worker_cache) | binary(worker_lifecycle) | binary(worker_limits)'
+threads-required = "num-test-threads"
