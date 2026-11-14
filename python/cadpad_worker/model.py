@@ -18,12 +18,7 @@ from types import SimpleNamespace
 
 import cadquery as cq
 
-
-class DomainError(Exception):
-    def __init__(self, code, message, details=None):
-        self.code = code
-        self.details = details or {}
-        super().__init__(message)
+from .errors import DomainError
 
 
 def finite(value):

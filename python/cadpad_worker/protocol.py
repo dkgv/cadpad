@@ -10,7 +10,7 @@ import sys
 import traceback
 
 from . import PROTOCOL_VERSION
-from .model import DomainError, Model
+from .errors import DomainError
 
 
 class BoundedLog(io.TextIOBase):
@@ -37,7 +37,9 @@ def main():
     # writing fd 1 cannot corrupt newline framing on the private pipe.
     protocol_out = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
-    model = Model(options.cache)
+    # Source analysis is AST-only. Loading the native CAD stack for these
+    # short-lived workers costs seconds and hundreds of MB per request.
+    model = None
     for line in sys.stdin:
         request = {}
         log = BoundedLog()
@@ -57,7 +59,7 @@ def main():
             revision = request["revision"]
             method = request["method"]
             args = request.get("params", {})
-            if method not in ("build", "analyze_entry", "index_sources") and revision != model.revision:
+            if method not in ("build", "analyze_entry", "index_sources") and (model is None or revision != model.revision):
                 raise DomainError("STALE_ENTITY", "Worker retains a different revision")
             with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
                 if method == "index_sources":
@@ -67,6 +69,9 @@ def main():
                     from .entrypoint import analyze
                     result = analyze(args)
                 elif method == "build":
+                    if model is None:
+                        from .model import Model
+                        model = Model(options.cache)
                     result = model.build(args, revision)
                 elif method == "inspect":
                     result = model.inspect(args)
