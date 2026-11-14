@@ -33,6 +33,9 @@ fn reaped(cache: &Path) {
         .unwrap()
         .parse()
         .unwrap();
+    reaped_pid(pid);
+}
+fn reaped_pid(pid: i32) {
     // If the anchor terminates the supervisor, the OS may briefly retain the
     // orphaned interpreter as a zombie before reaping it.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -232,7 +235,10 @@ async fn terminal(core: &Core, ws: &str, job: Job) -> Job {
 async fn timed_out_candidate_preserves_the_committed_model_and_diagnostic_contract() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config();
-    config.limits.operation_timeout_ms = 5000;
+    // This budget includes a cold CAD import on the CI runner. The bad source
+    // below sleeps for 60 seconds, so timeout enforcement remains observable.
+    const OPERATION_TIMEOUT_MS: u64 = 15_000;
+    config.limits.operation_timeout_ms = OPERATION_TIMEOUT_MS;
     let core = Core::open(temp.path().into(), config).await.unwrap();
     let ws = core.create_workspace("user").await.unwrap();
     let base = core.get_project(&ws).await.unwrap()["revision"]
@@ -278,6 +284,11 @@ async fn timed_out_candidate_preserves_the_committed_model_and_diagnostic_contra
     .await;
     assert_eq!(failed.state, JobState::Failed);
     assert_eq!(failed.diagnostics["code"], "RESOURCE_LIMIT");
+    assert_eq!(
+        failed.diagnostics["details"]["resource"],
+        "operation_time_ms"
+    );
+    assert_eq!(failed.diagnostics["details"]["limit"], OPERATION_TIMEOUT_MS);
     let project = core
         .dispatch(
             &ToolContext {
@@ -316,14 +327,35 @@ async fn timed_out_candidate_preserves_the_committed_model_and_diagnostic_contra
 async fn quota_failed_exact_workers_are_reaped_and_recovered_without_retargeting_the_revision() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = config();
-    config.limits.operation_timeout_ms = 5000;
+    // Recovery must allow a cold native import. Trigger the intended quota via
+    // touched memory instead of making healthy builds race a short wall timer.
+    const MEMORY_LIMIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    config.limits.operation_timeout_ms = 30_000;
+    config.limits.memory_bytes = MEMORY_LIMIT_BYTES;
     let core = Core::open(temp.path().into(), config).await.unwrap();
     let ws = core.create_workspace("user").await.unwrap();
     let base = core.get_project(&ws).await.unwrap()["revision"]
         .as_str()
         .unwrap()
         .to_owned();
-    let source = "import os\nfrom pathlib import Path\nimport cadquery as cq\nfrom cadpad_worker.model import Model\np=Path(os.environ['TMPDIR'])/'native-pids'\nwith p.open('a') as f: f.write(str(os.getpid())+'\\n')\ndef stuck(self,args):\n while True: pass\nModel.inspect=stuck\nshow(cq.Workplane().box(10,20,30),name='box')\n";
+    let source = r#"
+import os, time
+from pathlib import Path
+import cadquery as cq
+from cadpad_worker.model import Model
+p = Path(os.environ['TMPDIR']) / 'native-pids'
+with p.open('a') as f:
+    f.write(str(os.getpid()) + '\n')
+def exhaust_memory(self, args):
+    blocks = []
+    for _ in range(256):
+        blocks.append(bytearray(b'x' * (8 * 1024 * 1024)))
+        time.sleep(0.01)
+    while True:
+        time.sleep(1)
+Model.inspect = exhaust_memory
+show(cq.Workplane().box(10,20,30), name='box')
+"#;
     let draft = core
         .update_source(
             &ws,
@@ -348,6 +380,9 @@ async fn quota_failed_exact_workers_are_reaped_and_recovered_without_retargeting
             .await
             .unwrap_err();
         assert_eq!(error.code(), "RESOURCE_LIMIT");
+        let details = cadpad_core::error_value(&error)["details"].clone();
+        assert_eq!(details["resource"], "memory_bytes");
+        assert_eq!(details["limit"], MEMORY_LIMIT_BYTES);
         assert_eq!(core.get_project(&ws).await.unwrap()["revision"], revision);
     }
     let pids = std::fs::read_to_string(
@@ -366,7 +401,7 @@ async fn quota_failed_exact_workers_are_reaped_and_recovered_without_retargeting
     );
     assert_ne!(pids[0], pids[1]);
     for pid in pids {
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        reaped_pid(pid);
     }
     eprintln!(
         "RESOURCE_PROBE {}",
