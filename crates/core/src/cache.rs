@@ -39,10 +39,12 @@ pub struct RamUsage {
     pub within_quota: bool,
 }
 fn directory_bytes(path: &Path) -> Result<u64> {
-    if !path.exists() {
-        return Ok(0);
-    }
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
         return Err(Error::domain(
             "INVALID_REQUEST",
             "Managed cache path cannot be a symlink",
@@ -51,9 +53,25 @@ fn directory_bytes(path: &Path) -> Result<u64> {
     let mut total = 0u64;
     let mut stack = vec![path.to_path_buf()];
     while let Some(current) = stack.pop() {
-        for entry in fs::read_dir(&current)? {
-            let entry = entry?;
-            let meta = entry.metadata()?;
+        // Collection and native artifact publication can remove/rename entries
+        // during this scan. Vanished data no longer consumes the disk budget;
+        // other I/O failures and symlinks must still fail closed.
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let meta = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
             let file_type = meta.file_type();
             if file_type.is_symlink() {
                 return Err(Error::domain(
@@ -1376,5 +1394,43 @@ mod tests {
         drop(held);
         assert!(Lease::shared(&root.join(&retired)).is_ok());
         drop(reader);
+    }
+
+    #[test]
+    fn disk_usage_tolerates_concurrent_removal_of_derived_files() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicBool, Ordering},
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir(root.join("blobs")).unwrap();
+        fs::create_dir(root.join("artifacts")).unwrap();
+        fs::write(root.join("blobs/retained"), [0u8; 64]).unwrap();
+        let stop = AtomicBool::new(false);
+        let ready = Barrier::new(2);
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let transient = root.join("artifacts/transient");
+                fs::create_dir(&transient).unwrap();
+                ready.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    for index in 0..8 {
+                        fs::write(transient.join(index.to_string()), [0u8; 128]).unwrap();
+                    }
+                    fs::remove_dir_all(&transient).unwrap();
+                    fs::create_dir(&transient).unwrap();
+                }
+            });
+            ready.wait();
+            let result = (0..512)
+                .map(|_| super::managed_disk_usage(root, 1024 * 1024))
+                .collect::<crate::Result<Vec<_>>>();
+            stop.store(true, Ordering::Relaxed);
+            writer.join().unwrap();
+            for usage in result.unwrap() {
+                assert_eq!(usage.blobs_bytes, 64);
+            }
+        });
     }
 }
