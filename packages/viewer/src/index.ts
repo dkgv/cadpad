@@ -16,6 +16,7 @@ export type {MotionSnapshot,JointState} from './motion';
 export {recordedFrameAt,partMotion} from './motion';
 export {selectedAnchor,selectedCircle} from './references';
 export type {Inspection} from './references';
+import {framedZoom,projectedHalfExtent} from './fit-zoom';
 
 export type Vec3 = [number, number, number];
 export interface Entity { revision: string; instance_id: string; entity_id: string }
@@ -716,7 +717,31 @@ export class CadViewport {
     this.display.showTools(shown);this.display.showToolsPanel(shown);this.display.showInfo(false);
     this.resizeViewport();
   }
-  resetView(){this.pointerLeave();if(this.presented)this.viewer.reset();}
+  resetView(){
+    this.pointerLeave();
+    if(!this.presented)return;
+    this.viewer.reset();
+    this.frameVisible();
+  }
+  /** Aim the home view at the visible parts and zoom until they fill the canvas. */
+  private frameVisible(){
+    const box=new THREE.Box3();
+    this.viewer.nestedGroup.rootGroup?.updateMatrixWorld(true);
+    for(const [path,part] of this.paths){
+      if(!this.visible.has(part.instance_id))continue;
+      const group=this.viewer.nestedGroup.groups[path];
+      if(group)box.expandByObject(group);
+    }
+    if(box.isEmpty())return;
+    const center=box.getCenter(new THREE.Vector3());
+    const location=this.viewer.getCameraLocationSettings();
+    const position=new THREE.Vector3(...location.position).add(center).sub(new THREE.Vector3(...location.target));
+    const camera=this.viewer.camera.getCamera();
+    camera.position.copy(position);
+    camera.lookAt(center);
+    const zoom=framedZoom(location.zoom,projectedHalfExtent(camera,box));
+    this.viewer.setCameraLocationSettings(position.toArray(),null,center.toArray(),zoom);
+  }
   view(direction: 'iso' | 'front' | 'rear' | 'top' | 'bottom' | 'left' | 'right' | Vec3) {
     this.pointerLeave();if(!this.presented)return;
     if(typeof direction==='string'){
