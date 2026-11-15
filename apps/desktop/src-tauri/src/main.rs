@@ -64,8 +64,16 @@ async fn read_source(
         .map_err(error)
 }
 #[tauri::command]
-async fn add_joint(core: State<'_, Core>, workspace: String, revision: String, joint: cadpad_core::kinematics::Joint) -> Result<Value, Value> {
-    core.add_joint(&workspace, &revision, joint, "local-user").await.map(|job| json!(job)).map_err(error)
+async fn add_joint(
+    core: State<'_, Core>,
+    workspace: String,
+    revision: String,
+    joint: cadpad_core::kinematics::Joint,
+) -> Result<Value, Value> {
+    core.add_joint(&workspace, &revision, joint, "local-user")
+        .await
+        .map(|job| json!(job))
+        .map_err(error)
 }
 #[tauri::command]
 async fn example(
@@ -138,8 +146,16 @@ async fn model_history(core: State<'_, Core>, workspace: String) -> Result<Value
     core.model_history(&workspace).await.map_err(error)
 }
 #[tauri::command]
-async fn restore_checkpoint(core: State<'_, Core>, workspace: String, revision: String, target: String) -> Result<Value, Value> {
-    core.restore_checkpoint(&workspace, &revision, &target).await.map(|job| json!(job)).map_err(error)
+async fn restore_checkpoint(
+    core: State<'_, Core>,
+    workspace: String,
+    revision: String,
+    target: String,
+) -> Result<Value, Value> {
+    core.restore_checkpoint(&workspace, &revision, &target)
+        .await
+        .map(|job| json!(job))
+        .map_err(error)
 }
 #[tauri::command]
 async fn undo(core: State<'_, Core>, workspace: String, revision: String) -> Result<Value, Value> {

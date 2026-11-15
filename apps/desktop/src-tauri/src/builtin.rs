@@ -14,7 +14,10 @@ pub async fn agent_models(
     agent: State<'_, AgentService>,
     backend: Option<String>,
 ) -> Result<Value, Value> {
-    agent.models(backend.unwrap_or_default()).await.map_err(error)
+    agent
+        .models(backend.unwrap_or_default())
+        .await
+        .map_err(error)
 }
 #[tauri::command]
 pub async fn configure_agent(

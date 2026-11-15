@@ -83,16 +83,27 @@ pub async fn open_project(
     let config = portable::metadata_directory(&directory).map_err(error_value_owned)?;
     let legacy = config == directory && portable::read_manifest(&directory).is_ok();
     if config == directory && !legacy {
-        if portable::python_entry_points(&directory).map_err(error_value_owned)?.is_empty() {
+        if portable::python_entry_points(&directory)
+            .map_err(error_value_owned)?
+            .is_empty()
+        {
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
-                .open(directory.join("model.py")).map_err(dialog_error)?;
-            file.write_all(b"# Describe a part to get started.\n").map_err(dialog_error)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join("model.py"))
+                .map_err(dialog_error)?;
+            file.write_all(b"# Describe a part to get started.\n")
+                .map_err(dialog_error)?;
             portable::initialize_folder(&directory, "model.py").map_err(error_value_owned)?;
         } else {
             let root = directory.clone();
-            tauri::async_runtime::spawn_blocking(move || portable::initialize_project_browser(&root))
-                .await.map_err(dialog_error)?.map_err(error_value_owned)?;
+            tauri::async_runtime::spawn_blocking(move || {
+                portable::initialize_project_browser(&root)
+            })
+            .await
+            .map_err(dialog_error)?
+            .map_err(error_value_owned)?;
             return open_directory_mode(&core, directory, false).await;
         }
     }
@@ -215,14 +226,32 @@ pub async fn configure_project_entry(
     prepare_entry_selection(&pending, directory).await
 }
 #[tauri::command]
-pub async fn open_project_model(core: State<'_, Core>, workspace: String, revision: String, entry: String, builder: String) -> Result<Value, Value> {
-    let (workspace, job) = core.open_project_model(&workspace, &revision, &entry, &builder, "local-user").await.map_err(error_value_owned)?;
+pub async fn open_project_model(
+    core: State<'_, Core>,
+    workspace: String,
+    revision: String,
+    entry: String,
+    builder: String,
+) -> Result<Value, Value> {
+    let (workspace, job) = core
+        .open_project_model(&workspace, &revision, &entry, &builder, "local-user")
+        .await
+        .map_err(error_value_owned)?;
     let project = project_with_imports(&core, &workspace).await?;
     Ok(json!({"project":project,"job":job}))
 }
 #[tauri::command]
-pub async fn work_on_project_builder(core: State<'_, Core>, workspace: String, revision: String, entry: String, builder: String) -> Result<Value, Value> {
-    core.work_on_project_builder(&workspace, &revision, &entry, &builder, "local-user").await.map(|job| json!(job)).map_err(error_value_owned)
+pub async fn work_on_project_builder(
+    core: State<'_, Core>,
+    workspace: String,
+    revision: String,
+    entry: String,
+    builder: String,
+) -> Result<Value, Value> {
+    core.work_on_project_builder(&workspace, &revision, &entry, &builder, "local-user")
+        .await
+        .map(|job| json!(job))
+        .map_err(error_value_owned)
 }
 #[tauri::command]
 pub async fn project_source_index(
@@ -233,20 +262,35 @@ pub async fn project_source_index(
     revision: Option<String>,
 ) -> Result<Value, Value> {
     if let Some(id) = request_id {
-        let directory = pending.0.lock().unwrap().as_ref()
+        let directory = pending
+            .0
+            .lock()
+            .unwrap()
+            .as_ref()
             .filter(|selection| selection.id == id)
             .map(|selection| selection.directory.clone())
             .ok_or_else(|| dialog_error("Folder selection has expired"))?;
-        return core.index_project_folder(directory).await.map_err(error_value_owned);
+        return core
+            .index_project_folder(directory)
+            .await
+            .map_err(error_value_owned);
     }
     core.index_project_sources(
-        workspace.as_deref().ok_or_else(|| dialog_error("Workspace is required"))?,
-        revision.as_deref().ok_or_else(|| dialog_error("Revision is required"))?,
-    ).await.map_err(error_value_owned)
+        workspace
+            .as_deref()
+            .ok_or_else(|| dialog_error("Workspace is required"))?,
+        revision
+            .as_deref()
+            .ok_or_else(|| dialog_error("Revision is required"))?,
+    )
+    .await
+    .map_err(error_value_owned)
 }
 #[tauri::command]
 pub async fn project_meshes(core: State<'_, Core>, workspace: String) -> Result<Value, Value> {
-    core.project_meshes(&workspace).await.map_err(error_value_owned)
+    core.project_meshes(&workspace)
+        .await
+        .map_err(error_value_owned)
 }
 #[tauri::command]
 pub async fn inspect_project_mesh(
@@ -293,10 +337,13 @@ async fn open_directory(core: &Core, directory: PathBuf) -> Result<Value, Value>
     open_directory_mode(core, directory, true).await
 }
 async fn open_directory_mode(core: &Core, directory: PathBuf, build: bool) -> Result<Value, Value> {
-    let candidates = std::fs::read_dir(&directory).map_err(dialog_error)?
-        .filter_map(Result::ok).map(|entry| entry.path())
+    let candidates = std::fs::read_dir(&directory)
+        .map_err(dialog_error)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
         .filter(|path| path.is_file() && import_kind(&path.to_string_lossy()).is_ok())
-        .map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>();
+        .map(|path| path.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
     let opened = core
         .open_project(directory, "local-user")
         .await
@@ -304,17 +351,28 @@ async fn open_directory_mode(core: &Core, directory: PathBuf, build: bool) -> Re
     core.focus_workspace(&opened.workspace_id)
         .await
         .map_err(error_value_owned)?;
-    let job = if build { Some(core
-        .build(
-            &opened.workspace_id,
-            &opened.base_revision,
-            &opened.draft.id,
-            "local-user",
+    let job = if build {
+        Some(
+            core.build(
+                &opened.workspace_id,
+                &opened.base_revision,
+                &opened.draft.id,
+                "local-user",
+            )
+            .await
+            .map_err(error_value_owned)?,
         )
+    } else {
+        None
+    };
+    let mut project = core
+        .get_project(&opened.workspace_id)
         .await
-        .map_err(error_value_owned)?) } else { None };
-    let mut project = core.get_project(&opened.workspace_id).await.map_err(error_value_owned)?;
-    if project["model"]["parts"].as_array().is_some_and(|parts| parts.is_empty()) {
+        .map_err(error_value_owned)?;
+    if project["model"]["parts"]
+        .as_array()
+        .is_some_and(|parts| parts.is_empty())
+    {
         project["import_candidates"] = json!(candidates);
     }
     Ok(json!({"project":project,"job":job}))
@@ -387,7 +445,11 @@ async fn stage_imported_asset(
     extensions: &[&str],
     selected_path: Option<PathBuf>,
 ) -> Result<Option<(cadpad_core::Draft, String)>, Value> {
-    let Some(path) = (if selected_path.is_some() { selected_path } else { file_path(app, title, extensions, false, "").await? }) else {
+    let Some(path) = (if selected_path.is_some() {
+        selected_path
+    } else {
+        file_path(app, title, extensions, false, "").await?
+    }) else {
         return Ok(None);
     };
     let name = path
@@ -483,8 +545,15 @@ pub async fn import_model(
     selected_path: Option<PathBuf>,
 ) -> Result<Value, Value> {
     if let Some(path) = &selected_path {
-        let directory = core.project_directory(&workspace).await.map_err(error_value_owned)?;
-        if !path.canonicalize().map_err(dialog_error)?.starts_with(directory.canonicalize().map_err(dialog_error)?) {
+        let directory = core
+            .project_directory(&workspace)
+            .await
+            .map_err(error_value_owned)?;
+        if !path
+            .canonicalize()
+            .map_err(dialog_error)?
+            .starts_with(directory.canonicalize().map_err(dialog_error)?)
+        {
             return Err(dialog_error("Choose a file inside this project"));
         }
     }
@@ -617,7 +686,9 @@ pub async fn workspaces(core: State<'_, Core>) -> Result<Value, Value> {
     if let Some(items) = items.as_array_mut() {
         for item in items {
             if let Some(workspace) = item["workspace_id"].as_str() {
-                if let Some(parent) = core.model_parent(workspace).await {item["model_parent"] = json!(parent);}
+                if let Some(parent) = core.model_parent(workspace).await {
+                    item["model_parent"] = json!(parent);
+                }
             }
         }
     }
@@ -657,15 +728,27 @@ mod import_tests {
     }
 }
 
- pub async fn project_with_imports(core: &Core, workspace: &str) -> Result<Value, Value> {
-    let mut project = core.get_project(workspace).await.map_err(error_value_owned)?;
-    if let Some(parent) = core.model_parent(workspace).await {project["model_parent"] = json!(parent);project["model_source_dirty"] = json!(core.model_source_dirty(workspace).await);}
-    if project["model"]["parts"].as_array().is_some_and(|parts| parts.is_empty()) {
+pub async fn project_with_imports(core: &Core, workspace: &str) -> Result<Value, Value> {
+    let mut project = core
+        .get_project(workspace)
+        .await
+        .map_err(error_value_owned)?;
+    if let Some(parent) = core.model_parent(workspace).await {
+        project["model_parent"] = json!(parent);
+        project["model_source_dirty"] = json!(core.model_source_dirty(workspace).await);
+    }
+    if project["model"]["parts"]
+        .as_array()
+        .is_some_and(|parts| parts.is_empty())
+    {
         if let Ok(directory) = core.project_directory(workspace).await {
             if let Ok(entries) = std::fs::read_dir(directory) {
-                let mut paths = entries.filter_map(Result::ok).map(|entry| entry.path())
+                let mut paths = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
                     .filter(|path| path.is_file() && import_kind(&path.to_string_lossy()).is_ok())
-                    .map(|path| path.to_string_lossy().to_string()).collect::<Vec<_>>();
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect::<Vec<_>>();
                 paths.sort();
                 project["import_candidates"] = json!(paths);
             }
