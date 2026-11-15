@@ -118,6 +118,17 @@ impl Core {
         Ok(plan)
     }
     pub async fn index_project_sources(&self, workspace: &str, revision: &str) -> Result<Value> {
+        // Explorer reads this on a timer. Pick up a directory move before
+        // serving the tree, instead of waiting for the next app launch.
+        let tracked = self
+            .workspaces
+            .lock()
+            .await
+            .get(workspace)
+            .is_some_and(|ws| ws.stored.model_parent.is_none() && ws.stored.project.is_some());
+        if tracked {
+            let _ = self.scan_external_changes(workspace).await;
+        }
         let sources = {
             let all = self.workspaces.lock().await;
             let ws = all
