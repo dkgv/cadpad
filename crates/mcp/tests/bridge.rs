@@ -726,13 +726,16 @@ async fn stdio_job_capacity_errors_are_structured_retryable_and_do_not_disable_c
             .await
             .unwrap();
         } else {
-            assert_eq!(
+            // A job is marked running before it waits for construction
+            // capacity, so either unfinished state is valid here. What full
+            // capacity guarantees is that its sources are never materialized.
+            assert!(matches!(
                 core.get_job(&ws, job["id"].as_str().unwrap())
                     .await
                     .unwrap()
                     .state,
-                cadpad_core::JobState::Queued
-            );
+                cadpad_core::JobState::Queued | cadpad_core::JobState::Running
+            ));
             assert!(
                 !root
                     .path()
