@@ -1049,7 +1049,9 @@ export function App({host}:{host?:SessionHost}={}) {
       }catch(e){if(active)setError(message(e));}finally{pending=false;}
     };
     void check();const timer=setInterval(check,2500);
-    return()=>{active=false;clearInterval(timer);};
+    const onFocus=()=>{void check();};
+    window.addEventListener('focus',onFocus);
+    return()=>{active=false;clearInterval(timer);window.removeEventListener('focus',onFocus);};
   },[project?.workspace_id,project?.revision,project?.saved_revision,project?.external_tracking]);
   function prepareMotionTest(intent:string,id?:string){
     const request=(id?`Edit the saved CAD requirement with ID ${id}. List saved requirements and inspect its existing definition first.\n`:'Create a saved CAD requirement from this free-text requirement:\n')+intent+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';

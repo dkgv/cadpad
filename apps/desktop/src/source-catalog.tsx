@@ -84,6 +84,7 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const [sourcePath,setSourcePath]=useState<string|null>(null);
   const catalog=useRef<HTMLDivElement>(null);
   const [files,setFiles]=useState<SourceFile[]>([]),[loading,setLoading]=useState(true),[error,setError]=useState('');
+  const hasFiles=useRef(false);
   const loadingCallback=useRef(onLoadingChange);loadingCallback.current=onLoadingChange;
   useEffect(()=>{loadingCallback.current?.(loading);},[loading]);
   const [query,setQuery]=useState(''),[limit,setLimit]=useState(60),[attempt,setAttempt]=useState(0),[view,setView]=useState<'parts'|'files'>('parts');
@@ -95,9 +96,11 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const location=useSyncExternalStore(subscribe,()=>locations.get(key)||'');
   const go=(path:string)=>{locations.set(key,path);setQuery('');for(const listener of listeners)listener();onNavigate?.();};
   useEffect(()=>{setQuery('');setLimit(60);},[location]);
+  useEffect(()=>{hasFiles.current=false;},[requestId,workspace,revision]);
   useEffect(()=>{
-    let active=true;setLoading(true);setError('');setSourcePath(null);
-    loadSourceIndex(requestId,workspace,revision).then(result=>{if(active)setFiles(result.files);})
+    let active=true;
+    if(!hasFiles.current){setLoading(true);setError('');setSourcePath(null);}
+    loadSourceIndex(requestId,workspace,revision).then(result=>{if(!active)return;hasFiles.current=true;setFiles(result.files);setError('');})
       .catch(error=>{if(active)setError(errorSummary(JSON.stringify(error)));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};
   },[requestId,workspace,revision,attempt,catalogEpoch]);
