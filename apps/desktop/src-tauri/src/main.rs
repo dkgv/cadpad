@@ -9,6 +9,7 @@ use builtin::{
     agent_turn, configure_agent, connect_agent, forget_agent_key,
 };
 mod files;
+mod git_status;
 mod subscriptions;
 use agents::{
     clean_cache, complete_view, connect_activity, connect_motion, connect_view,
@@ -296,6 +297,7 @@ fn main() {
             files::configure_project_entry,
             files::project_entry_plan,
             files::project_source_index,
+            files::project_git_status,
             files::project_meshes,
             files::inspect_project_mesh,
             files::work_on_project_builder,

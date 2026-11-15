@@ -287,6 +287,17 @@ pub async fn project_source_index(
     .map_err(error_value_owned)
 }
 #[tauri::command]
+pub async fn project_git_status(core: State<'_, Core>, workspace: String) -> Result<Value, Value> {
+    let directory = match core.project_directory(&workspace).await {
+        Ok(directory) => directory,
+        Err(error) if error.code() == "INVALID_REQUEST" => return Ok(crate::git_status::empty()),
+        Err(error) => return Err(error_value_owned(error)),
+    };
+    tokio::task::spawn_blocking(move || crate::git_status::project_status(&directory))
+        .await
+        .map_err(dialog_error)
+}
+#[tauri::command]
 pub async fn project_meshes(core: State<'_, Core>, workspace: String) -> Result<Value, Value> {
     core.project_meshes(&workspace)
         .await

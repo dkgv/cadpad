@@ -1,4 +1,4 @@
-import React,{useEffect,useRef,useState,useSyncExternalStore} from 'react';
+import React,{useEffect,useMemo,useRef,useState,useSyncExternalStore} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {Icon,errorSummary} from './ui';
 import {SourcePreview} from './source-preview';
@@ -36,6 +36,50 @@ export function indexedModels(files:SourceFile[]):IndexedModel[]{
 }
 const title=(name:string)=>name.replace(/\.py$/,'').replace(/_/g,' ').replace(/^./,letter=>letter.toUpperCase());
 const byName=(a:string,b:string)=>a.localeCompare(b,undefined,{sensitivity:'base'});
+const GIT_CHANGES=['modified','added','untracked','deleted','conflict'] as const;
+export type GitChange=(typeof GIT_CHANGES)[number];
+export type GitEntry={path:string;change:GitChange;directory:boolean};
+const GIT_RANK:Record<GitChange,number>={untracked:1,added:2,modified:3,deleted:4,conflict:5};
+const GIT_LABEL:Record<GitChange,string>={untracked:'New',added:'New',modified:'Changed',deleted:'Deleted',conflict:'Conflict'};
+function isGitChange(value:string):value is GitChange{return (GIT_CHANGES as readonly string[]).includes(value);}
+export function readGitStatus(value:unknown):{repo:boolean;entries:GitEntry[]}|null{
+  if(!value||typeof value!=='object')return null;
+  const record=value as {repo?:unknown;entries?:unknown};
+  if(typeof record.repo!=='boolean'||!Array.isArray(record.entries))return null;
+  const entries:GitEntry[]=[];
+  for(const item of record.entries){
+    if(!item||typeof item!=='object')continue;
+    const entry=item as {path?:unknown;change?:unknown;directory?:unknown};
+    if(typeof entry.path!=='string'||typeof entry.change!=='string'||!isGitChange(entry.change))continue;
+    const directory=entry.directory===true||entry.path.endsWith('/');
+    const path=entry.path.replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'');
+    if(!path||path.split('/').some(part=>!part||part==='.'||part==='..'))continue;
+    entries.push({path,change:entry.change,directory});
+  }
+  return {repo:record.repo,entries};
+}
+function sameEntries(left:GitEntry[],right:GitEntry[]){
+  return left.length===right.length&&left.every((entry,index)=>entry.path===right[index].path&&entry.change===right[index].change&&entry.directory===right[index].directory);
+}
+export function indexGit(entries:GitEntry[]){
+  const files=new Map<string,GitChange>(),folders=new Map<string,GitChange>(),dirs:GitEntry[]=[];
+  const bump=(map:Map<string,GitChange>,path:string,change:GitChange)=>{const current=map.get(path);if(!current||GIT_RANK[change]>GIT_RANK[current])map.set(path,change);};
+  for(const entry of entries){
+    if(entry.directory)dirs.push(entry);else bump(files,entry.path,entry.change);
+    const parts=entry.path.split('/');if(!entry.directory)parts.pop();
+    let prefix='';
+    for(const part of parts){prefix=prefix?`${prefix}/${part}`:part;bump(folders,prefix,entry.change);}
+  }
+  return {files,folders,dirs};
+}
+export function fileGit(path:string,git:ReturnType<typeof indexGit>){
+  const direct=git.files.get(path);if(direct)return direct;
+  let best:GitChange|undefined;
+  for(const dir of git.dirs)if(path===dir.path||path.startsWith(`${dir.path}/`)){if(!best||GIT_RANK[dir.change]>GIT_RANK[best])best=dir.change;}
+  return best;
+}
+export function folderGit(path:string,git:ReturnType<typeof indexGit>){return git.folders.get(path);}
+function gitMark(change?:GitChange){if(!change)return '';return change==='added'||change==='untracked'?'git-new':`git-${change}`;}
 export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,compact=false,onNavigate,filterQuery,compactView='models',onLoadingChange,activeModel,openingModel,visible=true}:{requestId?:string;workspace?:string;revision?:string;disabled?:boolean;onChoose:(path:string,builder:string)=>void;compact?:boolean;onNavigate?:()=>void;filterQuery?:string;compactView?:'models'|'files';onLoadingChange?:(loading:boolean)=>void;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};visible?:boolean}){
   const [sourcePath,setSourcePath]=useState<string|null>(null);
   const catalog=useRef<HTMLDivElement>(null);
@@ -43,6 +87,9 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const loadingCallback=useRef(onLoadingChange);loadingCallback.current=onLoadingChange;
   useEffect(()=>{loadingCallback.current?.(loading);},[loading]);
   const [query,setQuery]=useState(''),[limit,setLimit]=useState(60),[attempt,setAttempt]=useState(0),[view,setView]=useState<'parts'|'files'>('parts');
+  const [gitEntries,setGitEntries]=useState<GitEntry[]>([]);
+  const gitProject=useRef(''),git=useMemo(()=>indexGit(gitEntries),[gitEntries]);
+  const showGit=compact?compactView==='files':view==='files';
   const key=requestId||workspace||'';
   const catalogEpoch=useSourceCatalogEpoch();
   const location=useSyncExternalStore(subscribe,()=>locations.get(key)||'');
@@ -54,6 +101,25 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
       .catch(error=>{if(active)setError(errorSummary(JSON.stringify(error)));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};
   },[requestId,workspace,revision,attempt,catalogEpoch]);
+  useEffect(()=>{
+    if(!workspace||!showGit){gitProject.current='';setGitEntries(current=>current.length?[]:current);return;}
+    if(gitProject.current!==workspace){gitProject.current=workspace;setGitEntries(current=>current.length?[]:current);}
+    if(compact&&!visible)return;
+    let active=true,pending=false;
+    const load=()=>{
+      if(pending)return;pending=true;
+      invoke<unknown>('project_git_status',{workspace}).then(value=>{
+        if(!active)return;
+        const status=readGitStatus(value);if(!status)return;
+        const next=status.repo?status.entries:[];
+        setGitEntries(current=>sameEntries(current,next)?current:next);
+      }).catch(()=>undefined).finally(()=>{pending=false;});
+    };
+    load();
+    const timer=window.setInterval(load,4000);
+    window.addEventListener('focus',load);
+    return()=>{active=false;window.clearInterval(timer);window.removeEventListener('focus',load);};
+  },[workspace,revision,showGit,compact,visible]);
   const highlighted=openingModel??activeModel;
   useEffect(()=>{
     if(!compact||!highlighted)return;
@@ -94,7 +160,13 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const sortedFolders=(node:Tree)=>[...node.folders].sort(([a],[b])=>byName(a,b));
   const sortedFiles=(node:Tree)=>[...node.files].sort((a,b)=>byName(a.path,b.path));
   const sortedModels=(node:Tree)=>sortedFiles(node).flatMap(file=>file.builders.map(builder=>({file,builder}))).sort((a,b)=>byName(caption(a.builder),caption(b.builder))||byName(a.file.path,b.file.path)||byName(a.builder.id,b.builder.id));
-  const fileTree=(node:Tree,prefix=''):React.ReactNode=><ul>{sortedFolders(node).map(([name,child])=><li key={name}><details open={!!search||activeFolder===prefix+name||activeFolder.startsWith(prefix+name+'/')||folder===prefix+name||folder.startsWith(prefix+name+'/')}><summary><Icon name="folder" size={14}/>{name}</summary>{fileTree(child,prefix+name+'/')}</details></li>)}{compact&&compactView==='models'?sortedModels(node).map(({file,builder})=><li key={`${file.path}:${builder.id}`}><button type="button" className="library-part-link" aria-busy={openingModel?.entry===file.path&&openingModel.builder===builder.id||undefined} title={`${file.path}:${builder.line} · ${builder.label}`} aria-current={highlighted?.entry===file.path&&highlighted.builder===builder.id?'true':undefined} disabled={disabled} onClick={()=>openEntry(file,builder)}><Icon name="cube" size={13}/><span>{caption(builder)}</span>{openingModel?.entry===file.path&&openingModel.builder===builder.id&&<small className="library-opening-status" role="status" aria-label={`Opening ${caption(builder)}`}>Opening…</small>}{node.files.some(other=>other.path!==file.path&&other.builders.some(candidate=>caption(candidate)===caption(builder)))&&<small>{file.path.split('/').at(-1)}</small>}</button></li>):sortedFiles(node).map(file=><li key={file.path}>{compact?<button type="button" className="library-file-link" aria-current={activeModel?.entry===file.path?'true':undefined} title={file.path} onClick={()=>setSourcePath(file.path)}><Icon name="file" size={14}/>{file.path.split('/').at(-1)}</button>:<details open={!!search}><summary title={file.description}>{file.path.split('/').at(-1)}</summary>{file.diagnostic&&<p role="status">{file.diagnostic}</p>}<ul>{[...file.builders].sort((a,b)=>byName(a.label,b.label)||byName(a.id,b.id)).map(builder=><li key={builder.id}><button type="button" disabled={disabled||!builder.available} title={builder.reason||`Line ${builder.line}`} onClick={()=>onChoose(file.path,builder.id)}>{builder.label}</button></li>)}</ul></details>}</li>)}</ul>;
+  const fileTree=(node:Tree,prefix=''):React.ReactNode=><ul>{sortedFolders(node).map(([name,child])=>{
+    const path=prefix+name,change=showGit?folderGit(path,git):undefined,mark=gitMark(change);
+    return <li key={name}><details open={!!search||activeFolder===path||activeFolder.startsWith(path+'/')||folder===path||folder.startsWith(path+'/')}><summary className={mark||undefined} title={change?GIT_LABEL[change]:undefined} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}><Icon name="folder" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</summary>{fileTree(child,path+'/')}</details></li>;
+  })}{compact&&compactView==='models'?sortedModels(node).map(({file,builder})=><li key={`${file.path}:${builder.id}`}><button type="button" className="library-part-link" aria-busy={openingModel?.entry===file.path&&openingModel.builder===builder.id||undefined} title={`${file.path}:${builder.line} · ${builder.label}`} aria-current={highlighted?.entry===file.path&&highlighted.builder===builder.id?'true':undefined} disabled={disabled} onClick={()=>openEntry(file,builder)}><Icon name="cube" size={13}/><span>{caption(builder)}</span>{openingModel?.entry===file.path&&openingModel.builder===builder.id&&<small className="library-opening-status" role="status" aria-label={`Opening ${caption(builder)}`}>Opening…</small>}{node.files.some(other=>other.path!==file.path&&other.builders.some(candidate=>caption(candidate)===caption(builder)))&&<small>{file.path.split('/').at(-1)}</small>}</button></li>):sortedFiles(node).map(file=>{
+    const name=file.path.split('/').at(-1)!,change=showGit?fileGit(file.path,git):undefined,mark=gitMark(change);
+    return <li key={file.path}>{compact?<button type="button" className={`library-file-link${mark?` ${mark}`:''}`} aria-current={activeModel?.entry===file.path?'true':undefined} title={file.path} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined} onClick={()=>setSourcePath(file.path)}><Icon name="file" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</button>:<details open={!!search}><summary className={mark||undefined} title={change?`${file.description} · ${GIT_LABEL[change]}`:file.description} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</summary>{file.diagnostic&&<p role="status">{file.diagnostic}</p>}<ul>{[...file.builders].sort((a,b)=>byName(a.label,b.label)||byName(a.id,b.id)).map(builder=><li key={builder.id}><button type="button" disabled={disabled||!builder.available} title={builder.reason||`Line ${builder.line}`} onClick={()=>onChoose(file.path,builder.id)}>{builder.label}</button></li>)}</ul></details>}</li>;
+  })}</ul>;
   if(compact)return <div ref={catalog} className="source-catalog catalog-compact" aria-busy={loading}>{error?<p role="alert">{error}</p>:<nav aria-label={compactView==='models'?'Indexed models':'Project source files'}>{fileTree(tree)}{!!search&&!(compactView==='models'?groups.length:matching.length)&&<p className="muted" role="status">{compactView==='models'?'No matching models.':'No matching files.'}</p>}</nav>}{sourcePath&&workspace&&revision&&<SourcePreview workspace={workspace} revision={revision} path={sourcePath} onClose={()=>setSourcePath(null)}/>}</div>;
   return <div className="source-catalog">
     <div className="library-toolbar"><div className="catalog-view" role="group" aria-label="Project library view"><button type="button" aria-pressed={view==='parts'} onClick={()=>{setView('parts');setLimit(60);}}>Geometry candidates</button><button type="button" aria-pressed={view==='files'} onClick={()=>setView('files')}>Files</button></div>

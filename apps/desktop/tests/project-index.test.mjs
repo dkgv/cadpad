@@ -9,7 +9,7 @@ import React,{act} from 'react';
 
 test('source candidates use generic labels and shared Explorer sections',async()=>{
  const directory=await mkdtemp(path.join(process.cwd(),'target/index-ui-'));
- const result=await build({stdin:{contents:"export {SourceCatalog} from './source-catalog';export {ProjectExplorer} from './explorer';export {SidebarSections} from './sidebar-sections';export {QuickModelSelector} from './quick-model';",resolveDir:new URL('../src/',import.meta.url).pathname,loader:'tsx'},bundle:true,format:'esm',platform:'node',write:false,external:['react','react-dom'],plugins:[{name:'native-fixture',setup(builder){builder.onResolve({filter:/^@tauri-apps\/api\/core$/},()=>({path:'native',namespace:'fixture'}));builder.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export const invoke=(...args)=>globalThis.__indexInvoke(...args);',loader:'js'}));}}]});
+ const result=await build({stdin:{contents:"export {SourceCatalog,indexGit,fileGit,folderGit} from './source-catalog';export {ProjectExplorer} from './explorer';export {SidebarSections} from './sidebar-sections';export {QuickModelSelector} from './quick-model';",resolveDir:new URL('../src/',import.meta.url).pathname,loader:'tsx'},bundle:true,format:'esm',platform:'node',write:false,external:['react','react-dom'],plugins:[{name:'native-fixture',setup(builder){builder.onResolve({filter:/^@tauri-apps\/api\/core$/},()=>({path:'native',namespace:'fixture'}));builder.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export const invoke=(...args)=>globalThis.__indexInvoke(...args);',loader:'js'}));}}]});
  const file=path.join(directory,'catalog.mjs');await writeFile(file,result.outputFiles[0].text);
  const dom=new JSDOM('<div id="root"></div>',{url:'https://cadpad.test'});
  for(const key of ['window','document','navigator','HTMLElement','Node','Event','MouseEvent','KeyboardEvent'])Object.defineProperty(globalThis,key,{value:dom.window[key],configurable:true});
@@ -17,8 +17,15 @@ test('source candidates use generic labels and shared Explorer sections',async()
  dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
  globalThis.IS_REACT_ACT_ENVIRONMENT=true;
  const calls=[],chosen=[];
- globalThis.__indexInvoke=async(...args)=>{calls.push(args);if(args[0]==='read_source')return {source:'# Python source preview\n'};return {files:[{path:'zoo/nested/yoke.py',description:'Yoke',diagnostic:null,builders:[{id:'yoke',kind:'geometry_candidate',label:'yoke()',available:true,reason:'',line:2}]},{path:'cad/brake.py',description:'Brake mechanism',diagnostic:null,builders:[{id:'pin',kind:'geometry_candidate',label:'pin()',available:true,reason:'',line:6},{id:'brake_body',kind:'geometry_candidate',label:'brake_body()',available:true,reason:'',line:4},{id:'shoe',kind:'geometry_candidate',label:'shoe(size)',available:false,reason:'Requires arguments: size',line:8}]},{path:'cad/axle.py',description:'Axle',diagnostic:null,builders:[{id:'axle',kind:'geometry_candidate',label:'axle()',available:true,reason:'',line:3}]}]};};
- const {createRoot}=await import('react-dom/client');const {SourceCatalog,ProjectExplorer,SidebarSections,QuickModelSelector}=await import(pathToFileURL(file));const root=createRoot(document.getElementById('root'));
+ globalThis.__indexInvoke=async(...args)=>{calls.push(args);if(args[0]==='read_source')return {source:'# Python source preview\n'};if(args[0]==='project_git_status')return {repo:true,entries:[{path:'cad/brake.py',change:'modified'},{path:'zoo/nested/yoke.py',change:'untracked'},{path:'cad/fresh',change:'untracked',directory:true}]};if(args[0]==='project_meshes')return {files:[]};return {files:[{path:'zoo/nested/yoke.py',description:'Yoke',diagnostic:null,builders:[{id:'yoke',kind:'geometry_candidate',label:'yoke()',available:true,reason:'',line:2}]},{path:'cad/brake.py',description:'Brake mechanism',diagnostic:null,builders:[{id:'pin',kind:'geometry_candidate',label:'pin()',available:true,reason:'',line:6},{id:'brake_body',kind:'geometry_candidate',label:'brake_body()',available:true,reason:'',line:4},{id:'shoe',kind:'geometry_candidate',label:'shoe(size)',available:false,reason:'Requires arguments: size',line:8}]},{path:'cad/axle.py',description:'Axle',diagnostic:null,builders:[{id:'axle',kind:'geometry_candidate',label:'axle()',available:true,reason:'',line:3}]}]};};
+ const {createRoot}=await import('react-dom/client');const {SourceCatalog,ProjectExplorer,SidebarSections,QuickModelSelector,indexGit,fileGit,folderGit}=await import(pathToFileURL(file));const root=createRoot(document.getElementById('root'));
+ const inherited=indexGit([{path:'cad',change:'untracked',directory:true},{path:'cad/brake.py',change:'modified',directory:false},{path:'zoo/nested/yoke.py',change:'untracked',directory:false}]);
+ assert.equal(fileGit('cad/brake.py',inherited),'modified');
+ assert.equal(fileGit('cad/axle.py',inherited),'untracked');
+ assert.equal(folderGit('cad',inherited),'modified');
+ assert.equal(folderGit('zoo',inherited),'untracked');
+ assert.equal(folderGit('zoo/nested',inherited),'untracked');
+ assert.equal(fileGit('other.py',inherited),undefined);
  try{
   await act(async()=>root.render(React.createElement(SourceCatalog,{workspace:'ws',revision:'r1',onChoose:(...args)=>chosen.push(args)})));
   assert.equal(calls.length,1);assert.equal(calls[0][0],'project_source_index');
@@ -40,13 +47,25 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.deepEqual(cadFiles.map(node=>node.querySelector(':scope > summary').textContent),['axle.py','brake.py'],'file tree files sort alphabetically');
   assert.deepEqual([...cadFiles.find(node=>node.querySelector(':scope > summary').textContent==='brake.py').querySelectorAll('button')].map(button=>button.textContent),['brake_body()','pin()','shoe(size)'],'builders sort alphabetically');
   assert.ok([...tree.querySelectorAll('button')].find(button=>button.textContent==='shoe(size)').disabled);
+  await act(async()=>undefined);
+  const summary=name=>[...tree.querySelectorAll('summary')].find(node=>node.textContent===name);
+  assert.ok(summary('cad').classList.contains('git-modified'),'a folder containing an edit is marked changed');
+  assert.equal(summary('cad').getAttribute('title'),'Changed');
+  assert.ok(summary('cad').querySelector('.git-dot'));
+  assert.ok(summary('zoo').classList.contains('git-new'));
+  assert.ok(summary('nested').classList.contains('git-new'));
+  assert.ok(summary('brake.py').classList.contains('git-modified'));
+  assert.equal(summary('brake.py').getAttribute('aria-label'),'brake.py, Changed');
+  assert.ok(summary('yoke.py').classList.contains('git-new'));
+  assert.equal(summary('axle.py').classList.contains('git-modified'),false);
+  assert.equal(summary('axle.py').querySelector('.git-dot'),null);
   await act(async()=>root.render(React.createElement(SourceCatalog,{workspace:'ws',revision:'r1',compact:true,onChoose:(...args)=>chosen.push(args)})));
   const pin=[...document.querySelectorAll('.catalog-compact .library-part-link')].find(button=>button.textContent==='Pin');
   assert.ok(pin);
   await act(async()=>pin.click());
   assert.deepEqual(chosen.at(-1),['cad/brake.py','pin']);
   assert.equal(document.querySelector('.library-component'),null,'indexed entries do not require expanding a Python file');
-  assert.equal(calls.length,1,'the shared source index is reused');
+  assert.equal(calls.filter(call=>call[0]==='project_source_index').length,1,'the shared source index is reused');
   const explorer={workspace:'ws',revision:'r1',parts:[],assets:{},hidden:new Set(),onChooseBuilder:()=>{},onSelect:()=>{},onToggleVisibility:()=>{},onShowAll:()=>{}};
   await act(async()=>root.render(React.createElement(ProjectExplorer,explorer)));
   assert.equal(document.querySelector('.explorer-parts'),null,'an unloaded project does not present an empty parts count');
@@ -104,7 +123,7 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.match(document.body.textContent,/No matching models/);
   await act(async()=>document.querySelector('[aria-label="Clear Explorer search"]').click());
   assert.deepEqual([...document.querySelectorAll('[aria-label="Indexed models"] .library-part-link')].map(button=>[...button.querySelectorAll('span,small')].map(node=>node.textContent).join('')),['Axle','Brake body','Pin','Yoke'],'Explorer models sort alphabetically');
-  assert.equal(calls.length,1,'typing filters the existing index without another worker request');
+  assert.equal(calls.filter(call=>call[0]==='project_source_index').length,1,'typing filters the existing index without another worker request');
   const filesSection=[...document.querySelectorAll('.sidebar-content-sections>.sidebar-section')].find(section=>section.querySelector('.sidebar-section-heading button').textContent==='Files');
   assert.equal(filesSection.querySelector(':scope > div[id]').hidden,true,'source files are secondary to models');
   assert.ok(document.querySelector('[aria-label="Indexed models"] .library-part-link'));
@@ -112,9 +131,27 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.equal(document.querySelector('[aria-label="Project source files"] .library-part-link'),null);
   await act(async()=>filesSection.querySelector('.sidebar-section-heading button').click());
   assert.deepEqual([...document.querySelectorAll('[aria-label="Project source files"] .library-file-link')].map(button=>button.textContent),['axle.py','brake.py','yoke.py'],'Explorer files sort alphabetically');
+  await act(async()=>undefined);
+  const sourceFiles=document.querySelector('[aria-label="Project source files"]');
+  const link=name=>[...sourceFiles.querySelectorAll('.library-file-link')].find(node=>node.textContent===name);
+  const folder=name=>[...sourceFiles.querySelectorAll('summary')].find(node=>node.textContent===name);
+  assert.ok(link('brake.py').classList.contains('git-modified'));
+  assert.equal(link('brake.py').getAttribute('aria-label'),'brake.py, Changed');
+  assert.equal(link('brake.py').getAttribute('title'),'cad/brake.py');
+  assert.ok(link('brake.py').querySelector('.git-dot'));
+  assert.ok(link('yoke.py').classList.contains('git-new'));
+  assert.equal(link('yoke.py').getAttribute('aria-label'),'yoke.py, New');
+  assert.equal(link('axle.py').classList.contains('git-new'),false);
+  assert.equal(link('axle.py').querySelector('.git-dot'),null);
+  assert.ok(folder('cad').classList.contains('git-modified'));
+  assert.ok(folder('cad').querySelector('.git-dot'));
+  assert.equal(folder('cad').getAttribute('title'),'Changed');
+  assert.ok(folder('zoo').classList.contains('git-new'));
+  assert.ok(folder('nested').classList.contains('git-new'));
+  assert.equal(document.querySelector('[aria-label="Indexed models"] .git-dot'),null,'model names stay separate from git status');
   await act(async()=>[...document.querySelectorAll('.library-file-link')].find(button=>button.textContent==='brake.py').click());
   assert.match(document.querySelector('[aria-label="Source code"]').textContent,/Python source preview/);
-  assert.deepEqual(calls.at(-1),['read_source',{workspace:'ws',version:'r1',path:'cad/brake.py'}]);
+  assert.deepEqual(calls.findLast(call=>call[0]==='read_source'),['read_source',{workspace:'ws',version:'r1',path:'cad/brake.py'}]);
   await act(async()=>document.querySelector('[aria-label="Close source preview"]').click());
 
 
