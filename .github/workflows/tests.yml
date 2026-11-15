@@ -35,10 +35,24 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: tests-${{ github.ref }}
+  # A newer push to a pull request supersedes its older run. Runs on main
+  # always finish so every commit keeps its own result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   rust:
-    name: Rust tests
+    name: Rust tests (${{ matrix.shard }}/4)
     runs-on: macos-15
+    strategy:
+      # One flaky shard should not hide the results of the others.
+      fail-fast: false
+      matrix:
+        # Almost all test time is spent inside CAD interpreters, and the 7 GB
+        # runner only fits two at once, so the suite is split across runners.
+        # Keep the count in sync with the name above and --partition below.
+        shard: [1, 2, 3, 4]
     env:
       # Keep line numbers in backtraces without generating full debug symbols.
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -50,6 +64,10 @@ jobs:
           tool: nextest@0.9.151
       - uses: Swatinem/rust-cache@v2
         with:
+          # Every shard builds the same artifacts: share one cache and let a
+          # single shard write it.
+          shared-key: rust-tests-opt-deps
+          save-if: ${{ matrix.shard == 1 }}
           # A late test failure should not discard the dependency build.
           cache-on-failure: true
       - uses: astral-sh/setup-uv@v5
@@ -59,11 +77,18 @@ jobs:
       # so every fresh interpreter does not reparse the installed dependencies.
       - run: uv sync --locked --python 3.12 --compile-bytecode
       # Two test slots across binaries; heavy suites reserve both (nextest.toml).
-      - run: cargo nextest run --locked --profile ci -p cadpad-core -p cadpad-agent -p cadpad-mcp
+      # Dependencies are optimized (and cached): the physics reference tests
+      # run about three times faster than with an unoptimized solver.
+      - run: >-
+          cargo nextest run --locked --profile ci
+          --config 'profile.test.package."*".opt-level=3'
+          -p cadpad-core -p cadpad-agent -p cadpad-mcp
+          --partition slice:${{ matrix.shard }}/4
       # Nextest does not run doctests. Keep Cargo's example compilation checks too.
-      - run: |
-          cargo test --locked -p cadpad-core -p cadpad-agent -p cadpad-mcp --doc
-          cargo test --locked -p cadpad-core -p cadpad-agent -p cadpad-mcp --examples --no-run
+      - if: matrix.shard == 1
+        run: |
+          cargo test --locked --config 'profile.test.package."*".opt-level=3' -p cadpad-core -p cadpad-agent -p cadpad-mcp --doc
+          cargo test --locked --config 'profile.test.package."*".opt-level=3' -p cadpad-core -p cadpad-agent -p cadpad-mcp --examples --no-run
 
   python:
     name: Python tests
