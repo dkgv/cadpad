@@ -1,3 +1,6 @@
+#[path = "support/published_fixture.rs"]
+mod published_fixture;
+
 use cadpad_core::{Core, Job, JobState, portable, worker::WorkerConfig};
 use serde_json::json;
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
@@ -49,6 +52,10 @@ async fn initial(core: &Core) -> (String, String) {
     .await;
     assert_eq!(job.state, JobState::Succeeded, "{:?}", job.diagnostics);
     (ws, job.resulting_revision.unwrap())
+}
+
+async fn prepared_initial(root: PathBuf) -> (Core, String, String) {
+    published_fixture::open(root, config(), SOURCE, serde_json::Value::Null).await
 }
 
 #[tokio::test]
@@ -176,8 +183,7 @@ async fn portable_save_open_assets_history_and_undo_use_source_authority() {
 #[tokio::test]
 async fn filesystem_edits_are_inert_until_reviewed_snapshot_builds() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
-    let (ws, base) = initial(&core).await;
+    let (core, ws, base) = prepared_initial(temp.path().join("app")).await;
     let directory = temp.path().join("project");
     core.save_project(&ws, &base, Some(directory.clone()))
         .await
@@ -254,8 +260,7 @@ async fn filesystem_edits_are_inert_until_reviewed_snapshot_builds() {
 #[tokio::test]
 async fn portable_paths_reject_symlinks_escapes_and_modified_snapshots() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
-    let (ws, base) = initial(&core).await;
+    let (core, ws, base) = prepared_initial(temp.path().join("app")).await;
     let directory = temp.path().join("project");
     core.save_project(&ws, &base, Some(directory.clone()))
         .await
@@ -317,8 +322,7 @@ async fn portable_paths_reject_symlinks_escapes_and_modified_snapshots() {
 #[tokio::test]
 async fn undo_and_save_retain_inactive_files_without_resurrecting_them() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
-    let (ws, base) = initial(&core).await;
+    let (core, ws, base) = prepared_initial(temp.path().join("app")).await;
     let directory = temp.path().join("project");
     core.save_project(&ws, &base, Some(directory.clone()))
         .await
@@ -437,8 +441,7 @@ async fn plain_multifile_python_and_dependency_mismatches_are_explicit() {
 #[tokio::test]
 async fn repeated_undo_moves_back_through_designs_and_survives_portable_reopen() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
-    let (ws, mut revision) = initial(&core).await;
+    let (core, ws, mut revision) = prepared_initial(temp.path().join("app")).await;
     for width in [20.0, 30.0] {
         let built = done(
             &core,
@@ -519,8 +522,7 @@ async fn repeated_undo_moves_back_through_designs_and_survives_portable_reopen()
 #[tokio::test]
 async fn reopening_reconstructs_saved_source_and_keeps_newer_external_edits_inert() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
-    let (ws, base) = initial(&core).await;
+    let (core, ws, base) = prepared_initial(temp.path().join("app")).await;
     let directory = temp.path().join("project");
     core.save_project(&ws, &base, Some(directory.clone()))
         .await
@@ -572,8 +574,7 @@ async fn reopening_reconstructs_saved_source_and_keeps_newer_external_edits_iner
 #[tokio::test]
 async fn invalid_editable_metadata_does_not_block_saved_checkpoint_recovery() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
-    let (ws, base) = initial(&core).await;
+    let (core, ws, base) = prepared_initial(temp.path().join("app")).await;
     let directory = temp.path().join("project");
     core.save_project(&ws, &base, Some(directory.clone()))
         .await
@@ -803,8 +804,7 @@ async fn existing_cadquery_result_variable_can_publish_without_cadpad_helpers() 
 #[tokio::test]
 async fn desktop_save_creates_an_ordinary_folder_without_project_history() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
-    let (ws, revision) = initial(&core).await;
+    let (core, ws, revision) = prepared_initial(temp.path().join("app")).await;
     let folder = temp.path().join("my-design");
     core.save_project_folder(&ws, &revision, Some(folder.clone()))
         .await

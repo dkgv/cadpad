@@ -1422,3 +1422,7 @@ mod process_lock_tests {
         drop(reopened);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/mod.rs"]
+mod contract_tests;

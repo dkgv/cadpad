@@ -1,52 +1,9 @@
-use cadpad_core::{
-    Core,
+use crate::{
     tools::{Entity, ToolContext},
     views::{Capture, ViewReply},
-    worker::WorkerConfig,
 };
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
-fn config() -> WorkerConfig {
-    WorkerConfig::development(
-        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .unwrap(),
-    )
-    .uncontained_for_trusted_tests()
-}
-async fn model(core: &Core) -> (String, String) {
-    let ws = core.create_workspace("user").await.unwrap();
-    let base = core.get_project(&ws).await.unwrap()["revision"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let draft = core
-        .update_source(
-            &ws,
-            &base,
-            None,
-            BTreeMap::from([(
-                "model.py".into(),
-                "import cadquery as cq\nshow(cq.Workplane().box(50,20,6),name='plate')".into(),
-            )]),
-            "user",
-        )
-        .await
-        .unwrap();
-    let job = core.build(&ws, &base, &draft.id, "user").await.unwrap();
-    tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            let job = core.get_job(&ws, &job.id).await.unwrap();
-            if let Some(revision) = job.resulting_revision {
-                return (ws, revision);
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap()
-}
+
 fn capture(ws: &str, revision: &str) -> Capture {
     serde_json::from_value(json!({"workspace_id":ws,"revision":revision})).unwrap()
 }
@@ -56,8 +13,7 @@ pub fn image(revision: &str) -> Value {
 #[tokio::test]
 async fn selection_capture_and_dimension_requests_keep_explicit_revision_scope() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().into(), config()).await.unwrap();
-    let (ws, revision) = model(&core).await;
+    let (core, ws, revision) = super::plate(temp.path()).await;
     core.set_selection(
         &ws,
         &revision,
@@ -104,7 +60,7 @@ async fn selection_capture_and_dimension_requests_keep_explicit_revision_scope()
     assert_eq!(snapshot["numeric_context"][0]["volume"], 6000.0);
     assert_eq!(snapshot["width"], 1);
     assert_eq!(snapshot["image"]["mime_type"], "image/png");
-    let definition = cadpad_core::tools::definition("capture_view").unwrap();
+    let definition = crate::tools::definition("capture_view").unwrap();
     let native_schema =
         jsonschema::validator_for(definition.output_schema.as_ref().unwrap()).unwrap();
     let mcp_schema =
@@ -202,8 +158,7 @@ async fn selection_capture_and_dimension_requests_keep_explicit_revision_scope()
 #[tokio::test]
 async fn stale_images_window_replacement_and_actor_cancellation_are_rejected() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().into(), config()).await.unwrap();
-    let (ws, revision) = model(&core).await;
+    let (core, ws, revision) = super::plate(temp.path()).await;
     let (token, mut requests) = core.attach_view();
     let task_core = core.clone();
     let ws_copy = ws.clone();

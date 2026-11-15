@@ -1,3 +1,6 @@
+#[path = "support/published_fixture.rs"]
+mod published_fixture;
+
 use cadpad_core::{Core, Job, JobState, kinematics, tools::ToolContext, worker::WorkerConfig};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
@@ -113,6 +116,19 @@ async fn drive(
 }
 fn start() -> Value {
     json!({"action":"start","definition":{"gravity_m_s2":[0,0,-9.81],"bodies":{"rail":{"type":"fixed","friction":0.5,"restitution":0},"carriage":{"type":"dynamic","mass":{"type":"kilograms","mass_kg":0.1},"friction":0.5,"restitution":0}}}})
+}
+
+async fn prepared_model(root: PathBuf) -> (Core, String, String) {
+    published_fixture::open(
+        root,
+        config(),
+        include_str!("../../../fixtures/rail_carriage.py"),
+        serde_json::from_str(include_str!(
+            "../../../fixtures/rail_carriage.mechanism.json"
+        ))
+        .unwrap(),
+    )
+    .await
 }
 
 #[tokio::test]
@@ -449,10 +465,7 @@ fn replace_archive(folder: &std::path::Path, mut manifest: Value, data: &Value) 
 async fn portable_recordings_reject_corrupt_missing_duplicate_oversized_and_escaped_archives_without_execution()
  {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app-a"), config())
-        .await
-        .unwrap();
-    let (ws, rev) = model(&core).await;
+    let (core, ws, rev) = prepared_model(temp.path().join("app-a")).await;
     playback(
         &core,
         &ws,
@@ -547,10 +560,7 @@ async fn portable_recordings_reject_corrupt_missing_duplicate_oversized_and_esca
 #[tokio::test]
 async fn portable_recordings_do_not_rebind_to_changed_source_or_mismatched_geometry() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app-a"), config())
-        .await
-        .unwrap();
-    let (ws, rev) = model(&core).await;
+    let (core, ws, rev) = prepared_model(temp.path().join("app-a")).await;
     playback(
         &core,
         &ws,
@@ -722,8 +732,7 @@ async fn manipulation_recordings_keep_design_geometry_and_reject_cross_workspace
  {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("app");
-    let core = Core::open(root.clone(), config()).await.unwrap();
-    let (ws, rev) = model(&core).await;
+    let (core, ws, rev) = prepared_model(root.clone()).await;
     playback(
         &core,
         &ws,
@@ -853,10 +862,7 @@ async fn manipulation_recordings_keep_design_geometry_and_reject_cross_workspace
 #[tokio::test]
 async fn active_recording_blocks_mode_switch_and_cancel_discards_without_saving() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().to_path_buf(), config())
-        .await
-        .unwrap();
-    let (ws, rev) = model(&core).await;
+    let (core, ws, rev) = prepared_model(temp.path().to_path_buf()).await;
     playback(
         &core,
         &ws,
@@ -906,10 +912,7 @@ async fn active_recording_blocks_mode_switch_and_cancel_discards_without_saving(
 #[tokio::test]
 async fn folder_recordings_reopen_without_a_project_revision_directory() {
     let temp = tempfile::tempdir().unwrap();
-    let core = Core::open(temp.path().join("app-folder-a"), config())
-        .await
-        .unwrap();
-    let (ws, rev) = model(&core).await;
+    let (core, ws, rev) = prepared_model(temp.path().join("app-folder-a")).await;
     playback(
         &core,
         &ws,
