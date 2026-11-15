@@ -21,6 +21,25 @@ async fn blocking<T: Send + 'static>(
         .await
         .map_err(|error| Error::domain("IO_ERROR", error.to_string()))?
 }
+fn file_bodies(files: &BTreeMap<String, String>) -> Vec<&str> {
+    let mut bodies: Vec<&str> = files.values().map(String::as_str).collect();
+    bodies.sort_unstable();
+    bodies
+}
+fn same_saved_metadata(left: &Inputs, right: &Inputs) -> bool {
+    left.parameters == right.parameters
+        && left.annotations == right.annotations
+        && left.mechanism == right.mechanism
+        && left.assets == right.assets
+        && left.dependencies == right.dependencies
+}
+/// Same source bytes at different relative paths. Parameter, mechanism and
+/// asset edits are not a directory move.
+fn is_directory_rehome(current: &Inputs, disk: &Inputs) -> bool {
+    same_saved_metadata(current, disk)
+        && file_bodies(&current.files) == file_bodies(&disk.files)
+        && current.files != disk.files
+}
 impl Core {
     async fn load_portable(&self, directory: PathBuf) -> Result<portable::Loaded> {
         let mut loaded = blocking(move || portable::read_project(&directory)).await?;
@@ -324,7 +343,21 @@ impl Core {
         };
         let directory = binding.directory.clone();
         let loaded = blocking(move || portable::read_project(&directory)).await?;
-        let changed = loaded.fingerprint != binding.fingerprint;
+        // A clean project otherwise keeps the directory tree from the first open.
+        // Moving files without editing them is still the reviewed source, so the
+        // open tree can follow the folder without building or discarding edits.
+        let layout_refreshed = self.adopt_reorganized_layout(workspace_id, &loaded).await?;
+        let inputs = if layout_refreshed {
+            loaded.inputs.clone()
+        } else {
+            inputs
+        };
+        let observed = if layout_refreshed {
+            loaded.fingerprint.clone()
+        } else {
+            binding.fingerprint.clone()
+        };
+        let changed = loaded.fingerprint != observed;
         let mut changes = BTreeMap::new();
         for path in inputs.files.keys().chain(loaded.inputs.files.keys()) {
             if inputs.files.get(path) != loaded.inputs.files.get(path) {
@@ -370,8 +403,73 @@ impl Core {
             changes.insert("project.json".into(), "modified");
         }
         Ok(
-            json!({"workspace_id":workspace_id,"revision":revision,"changed":changed,"fingerprint":loaded.fingerprint,"changes":changes}),
+            json!({"workspace_id":workspace_id,"revision":revision,"changed":changed,"layout_refreshed":layout_refreshed,"fingerprint":loaded.fingerprint,"changes":changes}),
         )
+    }
+    /// Point a clean saved project at the folder's current paths when every
+    /// source body is unchanged. Unsaved work and real edits stay put.
+    async fn adopt_reorganized_layout(
+        &self,
+        workspace_id: &str,
+        loaded: &portable::Loaded,
+    ) -> Result<bool> {
+        let mut workspaces = self.workspaces.lock().await;
+        let eligible = {
+            let Some(ws) = workspaces.get(workspace_id) else {
+                return Ok(false);
+            };
+            if ws.stored.model_parent.is_some() || ws.stored.python_origin.is_some() {
+                return Ok(false);
+            }
+            if ws.stored.jobs.values().any(|job| {
+                matches!(
+                    job.state,
+                    crate::JobState::Queued | crate::JobState::Running
+                )
+            }) {
+                return Ok(false);
+            }
+            let Some(binding) = ws.stored.project.as_ref() else {
+                return Ok(false);
+            };
+            if binding.saved_revision != ws.stored.current {
+                return Ok(false);
+            }
+            let current = &ws.stored.revisions[&ws.stored.current].inputs;
+            if !is_directory_rehome(current, &loaded.inputs) {
+                return Ok(false);
+            }
+            let bodies = file_bodies(&current.files);
+            !ws.stored.drafts.values().any(|draft| {
+                !same_saved_metadata(&draft.inputs, &loaded.inputs)
+                    || file_bodies(&draft.inputs.files) != bodies
+            })
+        };
+        if !eligible {
+            return Ok(false);
+        }
+        let ws = workspaces.get_mut(workspace_id).unwrap();
+        let mut next = ws.stored.clone();
+        next.revisions.get_mut(&next.current).unwrap().inputs = loaded.inputs.clone();
+        let fingerprint = loaded.fingerprint.clone();
+        for draft in next.drafts.values_mut() {
+            draft.inputs = loaded.inputs.clone();
+            draft.source_hashes = loaded
+                .inputs
+                .files
+                .iter()
+                .map(|(path, source)| (path.clone(), hash(source)))
+                .collect();
+            if draft.external_fingerprint.is_some() {
+                draft.external_fingerprint = Some(fingerprint.clone());
+            }
+        }
+        if let Some(binding) = &mut next.project {
+            binding.fingerprint = fingerprint;
+        }
+        self.persist(&next).await?;
+        ws.stored = next;
+        Ok(true)
     }
     pub async fn stage_external_changes(
         &self,

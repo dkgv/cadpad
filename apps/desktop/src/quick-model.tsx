@@ -1,7 +1,7 @@
 import React,{useEffect,useId,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
 import {Icon,errorSummary} from './ui';
-import {indexedModels,loadSourceIndex,modelCaption,type IndexedModel} from './source-catalog';
+import {indexedModels,loadSourceIndex,modelCaption,useSourceCatalogEpoch,type IndexedModel} from './source-catalog';
 
 export function QuickModelSelector({open,workspace,revision,activeEntry,activeBuilder,busy,onClose,onChoose}:{
   open:boolean;workspace:string;revision:string;activeEntry?:string;activeBuilder?:string;busy?:boolean;onClose:()=>void;onChoose:(path:string,builder:string)=>void;
@@ -12,6 +12,7 @@ export function QuickModelSelector({open,workspace,revision,activeEntry,activeBu
   const close=useRef(onClose);close.current=onClose;
   const choose=useRef(onChoose);choose.current=onChoose;
   const id=useId();
+  const catalogEpoch=useSourceCatalogEpoch();
   const search=query.trim().toLowerCase();
   const matches=models.filter(({file,builder})=>`${modelCaption(builder)} ${builder.label} ${file.path} ${file.description}`.toLowerCase().includes(search));
   useEffect(()=>{
@@ -20,7 +21,7 @@ export function QuickModelSelector({open,workspace,revision,activeEntry,activeBu
     loadSourceIndex(undefined,workspace,revision).then(result=>{if(active)setModels(indexedModels(result.files));})
       .catch(value=>{if(active)setError(errorSummary(JSON.stringify(value)));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};
-  },[open,workspace,revision]);
+  },[open,workspace,revision,catalogEpoch]);
   useEffect(()=>{if(open)setHighlight(0);},[query,open]);
   useEffect(()=>{
     if(!open)return;

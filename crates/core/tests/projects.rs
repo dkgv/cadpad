@@ -873,3 +873,109 @@ async fn opening_a_folder_keeps_disk_sources_as_the_current_revision() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn reopening_a_project_follows_a_reorganized_directory_layout() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("library");
+    std::fs::create_dir_all(directory.join("parts")).unwrap();
+    let entry = "from parts.bracket import bracket\nshow_object(bracket(), name='bracket')\n";
+    let part = "import cadquery as cq\ndef bracket():\n    return cq.Workplane().box(10, 8, 4)\n";
+    std::fs::write(directory.join("main.py"), entry).unwrap();
+    std::fs::write(directory.join("parts/bracket.py"), part).unwrap();
+    portable::initialize_folder(&directory, "main.py").unwrap();
+    let app = temp.path().join("app");
+    let core = Core::open(app.clone(), config()).await.unwrap();
+    let opened = core.open_project(directory.clone(), "user").await.unwrap();
+    let ws = opened.workspace_id.clone();
+    let revision = opened.base_revision.clone();
+    let files = core.get_project(&ws).await.unwrap()["files"].clone();
+    assert!(
+        files
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file == "parts/bracket.py")
+    );
+    std::fs::create_dir_all(directory.join("components")).unwrap();
+    std::fs::rename(
+        directory.join("parts/bracket.py"),
+        directory.join("components/bracket.py"),
+    )
+    .unwrap();
+    std::fs::remove_dir(directory.join("parts")).unwrap();
+    drop(core);
+    let core = Core::open(app, config()).await.unwrap();
+    let project = core.get_project(&ws).await.unwrap();
+    assert_eq!(project["revision"], revision);
+    let files = project["files"].as_array().unwrap();
+    assert!(files.iter().any(|file| file == "components/bracket.py"));
+    assert!(!files.iter().any(|file| file == "parts/bracket.py"));
+    assert_eq!(
+        core.read_source(&ws, &revision, "components/bracket.py")
+            .await
+            .unwrap()["source"],
+        part
+    );
+    let scan = core.scan_external_changes(&ws).await.unwrap();
+    assert_eq!(scan["changed"], false);
+    assert_eq!(scan["layout_refreshed"], false);
+    std::fs::write(
+        directory.join("components/bracket.py"),
+        format!("{part}\n# edited\n"),
+    )
+    .unwrap();
+    let scan = core.scan_external_changes(&ws).await.unwrap();
+    assert_eq!(scan["changed"], true);
+    assert_eq!(scan["layout_refreshed"], false);
+    assert_eq!(scan["changes"]["components/bracket.py"], "modified");
+    assert_eq!(
+        core.read_source(&ws, &revision, "components/bracket.py")
+            .await
+            .unwrap()["source"],
+        part
+    );
+}
+
+#[tokio::test]
+async fn unsaved_source_edits_are_not_replaced_when_directories_move() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("library");
+    std::fs::create_dir_all(directory.join("parts")).unwrap();
+    let entry = "from parts.bracket import bracket\n";
+    let part = "VALUE = 1\n";
+    std::fs::write(directory.join("main.py"), entry).unwrap();
+    std::fs::write(directory.join("parts/bracket.py"), part).unwrap();
+    portable::initialize_folder(&directory, "main.py").unwrap();
+    let app = temp.path().join("app");
+    let core = Core::open(app.clone(), config()).await.unwrap();
+    let opened = core.open_project(directory.clone(), "user").await.unwrap();
+    let edited = format!("{entry}# local edit\n");
+    core.update_source(
+        &opened.workspace_id,
+        &opened.base_revision,
+        None,
+        BTreeMap::from([("main.py".into(), edited.clone())]),
+        "user",
+    )
+    .await
+    .unwrap();
+    std::fs::create_dir_all(directory.join("components")).unwrap();
+    std::fs::rename(
+        directory.join("parts/bracket.py"),
+        directory.join("components/bracket.py"),
+    )
+    .unwrap();
+    drop(core);
+    let core = Core::open(app, config()).await.unwrap();
+    let project = core.get_project(&opened.workspace_id).await.unwrap();
+    let files = project["files"].as_array().unwrap();
+    assert!(files.iter().any(|file| file == "parts/bracket.py"));
+    assert!(!files.iter().any(|file| file == "components/bracket.py"));
+    assert_eq!(
+        core.read_source(&opened.workspace_id, &opened.base_revision, "main.py",)
+            .await
+            .unwrap()["source"],
+        entry
+    );
+}

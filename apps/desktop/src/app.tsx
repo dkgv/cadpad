@@ -20,7 +20,7 @@ import {ModelHistory} from './model-history';
 import {ExternalChangesDialog} from './external-changes';
 import {AppAlert} from './app-alert';
 import {ProjectExplorer} from './explorer';
-import {SourceCatalog} from './source-catalog';
+import {resetSourceCatalogCache,SourceCatalog} from './source-catalog';
 import {QuickModelSelector} from './quick-model';
 import {LiveReply,FinishedReply,Markdown,type AgentStep} from './agent-steps';
 import {useDockDrag} from './dock-drag';
@@ -1044,8 +1044,8 @@ export function App({host}:{host?:SessionHost}={}) {
       if(pending)return;
       pending=true;
       try {
-        const next=await invoke<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}>('check_external',{workspace});
-        if(active && activeWorkspace.current===workspace){if(reviewFingerprint.current!==next.fingerprint){reviewFingerprint.current=next.fingerprint;setExternalResolutions({});}setExternal(next);}
+        const next=await invoke<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string;layout_refreshed?:boolean}>('check_external',{workspace});
+        if(active && activeWorkspace.current===workspace){if(reviewFingerprint.current!==next.fingerprint){reviewFingerprint.current=next.fingerprint;setExternalResolutions({});}setExternal(next);if(next.layout_refreshed){resetSourceCatalogCache();const refreshed=await invoke<Project>('project',{workspace});if(active&&activeWorkspace.current===workspace)adopt(refreshed);}}
       }catch(e){if(active)setError(message(e));}finally{pending=false;}
     };
     void check();const timer=setInterval(check,2500);

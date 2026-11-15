@@ -9,7 +9,10 @@ export type IndexedModel={file:SourceFile;builder:Builder};
 const indexes=new Map<string,Promise<{files:SourceFile[]}>>();
 const locations=new Map<string,string>();
 const listeners=new Set<()=>void>();
-export function resetSourceCatalogCache(){indexes.clear();locations.clear();for(const listener of listeners)listener();}
+let epoch=0;
+function subscribe(listener:()=>void){listeners.add(listener);return()=>{listeners.delete(listener);};}
+export function useSourceCatalogEpoch(){return useSyncExternalStore(subscribe,()=>epoch);}
+export function resetSourceCatalogCache(){indexes.clear();locations.clear();epoch+=1;for(const listener of listeners)listener();}
 export function loadSourceIndex(requestId?:string,workspace?:string,revision?:string){
   const key=JSON.stringify([requestId,workspace,revision]);
   let request=indexes.get(key);
@@ -41,7 +44,8 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   useEffect(()=>{loadingCallback.current?.(loading);},[loading]);
   const [query,setQuery]=useState(''),[limit,setLimit]=useState(60),[attempt,setAttempt]=useState(0),[view,setView]=useState<'parts'|'files'>('parts');
   const key=requestId||workspace||'';
-  const location=useSyncExternalStore(listener=>{listeners.add(listener);return()=>{listeners.delete(listener);};},()=>locations.get(key)||'');
+  const catalogEpoch=useSourceCatalogEpoch();
+  const location=useSyncExternalStore(subscribe,()=>locations.get(key)||'');
   const go=(path:string)=>{locations.set(key,path);setQuery('');for(const listener of listeners)listener();onNavigate?.();};
   useEffect(()=>{setQuery('');setLimit(60);},[location]);
   useEffect(()=>{
@@ -49,7 +53,7 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
     loadSourceIndex(requestId,workspace,revision).then(result=>{if(active)setFiles(result.files);})
       .catch(error=>{if(active)setError(errorSummary(JSON.stringify(error)));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};
-  },[requestId,workspace,revision,attempt]);
+  },[requestId,workspace,revision,attempt,catalogEpoch]);
   const highlighted=openingModel??activeModel;
   useEffect(()=>{
     if(!compact||!highlighted)return;
