@@ -196,10 +196,12 @@ show(cq.Workplane().box(width,20,6).faces('>Z').workplane().hole(4),name='plate'
             );
             if let Ok(entries) = std::fs::read_dir(root.join("artifacts").join(&ws)) {
                 for entry in entries.flatten() {
+                    // The marker exists, empty, before the pid is written.
                     if let Ok(pid) =
                         std::fs::read_to_string(entry.path().join(".sandbox-tmp/entered"))
+                        && let Ok(pid) = pid.parse::<i32>()
                     {
-                        break 'found pid.parse::<i32>().unwrap();
+                        break 'found pid;
                     }
                 }
             }
