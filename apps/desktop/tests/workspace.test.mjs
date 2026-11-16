@@ -2252,37 +2252,60 @@ test('Explorer has independent CAD sections in the actual docked view',async()=>
   assert.equal(document.getElementById(model.getAttribute('aria-controls')).hidden,true);
 });
 
-test('external file changes use a compact trigger and review modal with conflict resolution',async()=>{
+test('external file changes open a workspace tab with filters and conflict resolution',async()=>{
   const original=harness.invoke.bind(harness),path='alpha/playground/mechanism/model.py';
   harness.project.external_tracking=true;
   harness.invoke=async(command,args)=>{
-    if(command==='check_external')return {changed:true,fingerprint:'disk-change-1',changes:{[path]:'modified'},conflicts:[path]};
+    if(command==='check_external')return {changed:true,fingerprint:'disk-change-1',changes:{[path]:'modified','parts/new.py':'added','parts/old.py':'deleted'},conflicts:[path]};
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
   const trigger=document.querySelector('[aria-label="Review files changed outside Cadpad"]');
   assert.ok(trigger);
   assert.equal(document.querySelector('.workspace-notices .external-changes'),null);
-  assert.equal(document.querySelector('.external-review-dialog'),null,'polling does not interrupt work with an automatic modal');
+  assert.equal(document.querySelector('.external-changes-panel'),null,'disk checks do not open the changes tab automatically');
   await click(trigger);
-  let dialog=document.querySelector('.external-review-dialog');
-  assert.ok(dialog.open);
-  assert.match(dialog.textContent,/Files changed outside Cadpad/);
-  assert.match(dialog.querySelector('[aria-label="Changed files"]').textContent,/alpha\/playground\/mechanism\/model.py/);
-  assert.ok(button('Reload and build').disabled);
+  let dialog=document.querySelector('.external-changes-panel');
+  assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Files changed');
+  assert.equal(document.querySelector('dialog.external-changes-panel'),null);
+  await click(trigger);
+  assert.equal(canvasTabs().filter(tab=>tab.textContent==='Files changed').length,1,'reopening focuses the existing overview tab');
+  await click(canvasTabs().find(tab=>tab.textContent!=='Files changed'));
+  assert.equal(active(dialog),false,'the overview leaves the model usable');
+  await click(canvasTabs().find(tab=>tab.textContent==='Files changed'));
+  assert.equal(active(dialog),true);
+
+  assert.match(dialog.textContent,/Files changed/);
+  assert.equal(dialog.querySelector('.external-review-path').getAttribute('aria-label'),path);
+  assert.equal(dialog.querySelector('.external-review-stat.external-status-conflict strong').textContent,'1');
+  assert.equal(dialog.querySelector('.external-review-badge').textContent,'Needs review');
+  await click([...dialog.querySelectorAll('.external-review-stat')].find(node=>node.textContent.includes('Added')));
+  assert.equal(dialog.querySelectorAll('[aria-label="Changed files"] li').length,1);
+  assert.equal(dialog.querySelector('.external-review-path').getAttribute('aria-label'),'parts/new.py');
+  assert.ok(button('Apply choices and rebuild').disabled,'filtering does not bypass hidden conflicts');
+  await setValue(dialog.querySelector('[aria-label="Filter changed files"]'),'NO-MATCH');
+  assert.match(dialog.textContent,/No files match your filters/);
+  await click(button('Clear filters'));
+  await setValue(dialog.querySelector('[aria-label="Filter changed files"]'),'PARTS/');
+  assert.equal(dialog.querySelectorAll('[aria-label="Changed files"] li').length,2);
+  await click(button('Clear filters'));
+
+  assert.ok(button('Apply choices and rebuild').disabled);
+  await flush(450);
+  assert.equal(harness.calls.some(([name])=>name==='reload_project'),false,'conflicts require explicit choices');
   await setValue(dialog.querySelector('select'),'use_external','change');
-  assert.equal(button('Reload and build').disabled,false);
-  await click(button('Keep working'));
-  assert.equal(document.querySelector('.external-review-dialog'),null);
+  assert.equal(button('Apply choices and rebuild').disabled,false);
+  await click(document.querySelector('[aria-label="Close file change review"]'));
+  assert.equal(document.querySelector('.external-changes-panel'),null);
   assert.equal(harness.calls.some(([name])=>name==='reload_project'),false);
   await click(document.querySelector('[aria-label="Review files changed outside Cadpad"]'));
-  dialog=document.querySelector('.external-review-dialog');
-  assert.equal(dialog.querySelector('select').value,'use_external','dismissal preserves reviewed choices');
-  await click(button('Reload and build'));
+  dialog=document.querySelector('.external-changes-panel');
+  assert.equal(dialog.querySelector('select').value,'use_external','closing the tab preserves reviewed choices');
+  await click(button('Apply choices and rebuild'));
   const reload=harness.calls.findLast(([name])=>name==='reload_project');
   assert.equal(reload[1].fingerprint,'disk-change-1');
   assert.deepEqual(reload[1].resolutions,{[path]:'use_external'});
-  assert.equal(document.querySelector('.external-review-dialog'),null);
+  assert.ok(document.querySelector('.external-changes-panel'),'applying choices keeps the overview in its workspace tab');
 });
 
 test('action alerts stay unobtrusive until reviewed and can be minimized or dismissed',async()=>{
@@ -2482,8 +2505,10 @@ test('boot keeps a generated project adapter out of the canvas and Explorer sele
 
 test('sidebar models open independent project tabs and clicking again focuses the existing tab',async()=>{
   const original=harness.invoke.bind(harness),views=new Map();
+  harness.project.external_tracking=true;
   const files=[{path:'cad/widgets.py',description:'Widgets',diagnostic:null,builders:['wheel','pin','stringer'].map(id=>({id,label:id+'()',kind:'geometry_candidate',available:true,reason:'',line:1}))}];
   harness.invoke=async(command,args)=>{
+    if(command==='check_external')return {changed:true,fingerprint:'model-tab-change',changes:{'cad/widgets.py':'modified'},conflicts:['cad/widgets.py']};
     if(command==='project_source_index')return {files};
     if(command==='workspaces')return [{workspace_id:'workspace-1',name:'Rail assembly',running:0},...[...views.values()].map(project=>({workspace_id:project.workspace_id,name:project.name,running:0,model_parent:'workspace-1'}))];
     if(command==='open_project_model'){
@@ -2506,6 +2531,20 @@ test('sidebar models open independent project tabs and clicking again focuses th
   await choose('Wheel');
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Wheel']);
   assert.match(document.querySelector('#panel-model .explorer-parts').textContent,/wheel/);
+  await click(document.querySelector('[aria-label="Review files changed outside Cadpad"]'));
+  const review=document.querySelector('.external-changes-panel');
+  assert.ok(review,'the shared header opens file review while a model canvas owns focus');
+  assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Files changed');
+  assert.equal(review.querySelector('.external-review-path').getAttribute('aria-label'),'cad/widgets.py');
+  assert.equal(review.querySelector('.external-review-badge').textContent,'Needs review');
+  assert.equal(document.querySelectorAll('.external-changes-panel').length,1);
+  await click(document.querySelector('[aria-label="Close file change review"]'));
+  assert.equal(document.querySelector('.external-changes-panel'),null);
+  await click(document.querySelector('[aria-label="Review files changed outside Cadpad"]'));
+  await setValue(document.querySelector('.external-changes-panel select'),'use_external','change');
+  await click(button('Apply choices and rebuild'));
+  assert.equal(harness.calls.findLast(([name])=>name==='reload_project')[1].workspace,'workspace-1','review reloads the project owning the header, not the focused child model');
+  await click(document.querySelector('[aria-label="Close file change review"]'));
   const wheelView=harness.viewports.at(-1);
   await choose('Pin');
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Wheel','Pin']);
@@ -2725,4 +2764,44 @@ test('filesystem notifications refresh Explorer meshes and external review throu
   assert.ok([...document.querySelectorAll('.library-file-link')].some(row=>row.title==='new/added.py'));
   const text=document.getElementById('panel-model').textContent;
   assert.match(text,/new.stl/);assert.doesNotMatch(text,/old.stl/);
+});
+
+
+test('disk changes reload automatically once and clear the stale change indicator',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.project.external_tracking=true;
+  let changed=true;
+  harness.invoke=async(command,args)=>{
+    if(command==='check_external')return {changed,fingerprint:'auto-disk',changes:changed?{'model.py':'modified'}:{},conflicts:[]};
+    if(command==='reload_project'){
+      harness.calls.push([command,args]);changed=false;
+      harness.project.revision='r2';harness.project.saved_revision='r2';harness.project.dirty=false;
+      return {id:'auto-reload',state:'succeeded',diagnostics:{}};
+    }
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(450);
+  const calls=harness.calls.filter(([name])=>name==='reload_project');
+  assert.equal(calls.length,1);
+  assert.deepEqual(calls[0][1],{workspace:'workspace-1',revision:'r1',fingerprint:'auto-disk',resolutions:{}});
+  assert.equal(document.querySelector('[aria-label="Review files changed outside Cadpad"]'),null);
+  await flush(450);
+  assert.equal(harness.calls.filter(([name])=>name==='reload_project').length,1);
+});
+
+test('failed automatic reload offers an explicit retry without a build loop',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.project.external_tracking=true;
+  harness.invoke=async(command,args)=>{
+    if(command==='check_external')return {changed:true,fingerprint:'failed-disk',changes:{'model.py':'modified'},conflicts:[]};
+    if(command==='reload_project'){harness.calls.push([command,args]);throw new Error('Disk source is invalid');}
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(450);
+  await click(document.querySelector('[aria-label="Review files changed outside Cadpad"]'));
+  assert.ok(button('Retry reload'));
+  await flush(450);
+  assert.equal(harness.calls.filter(([name])=>name==='reload_project').length,1);
+  await click(button('Retry reload'));
+  assert.equal(harness.calls.filter(([name])=>name==='reload_project').length,2);
 });

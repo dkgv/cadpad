@@ -19,6 +19,7 @@ export type SessionHost={
   openingModel?:{entry:string;builder:string};
   focusSelection?:SelectionContext;
   onSelection?:(context:SelectionContext)=>void;
+  changes:HTMLElement;openChanges:()=>void;closeChanges:()=>void;
   header:HTMLElement;rail:HTMLElement;notices:HTMLElement;tools:Record<ToolTab,HTMLElement>;
   visibleTools:ToolTab[];
   onProject:(project:Project)=>void;onOpen:(project:Project,options?:{replace?:boolean})=>void;onOpenWorkspace:(workspace:string)=>void;

@@ -18,7 +18,7 @@ import {MotionParts} from './motion-parts';
 import {BuildDiagnostics} from './build-diagnostics';
 import {ProjectEntry,type EntrySelection} from './project-entry';
 import {ModelHistory} from './model-history';
-import {ExternalChangesDialog} from './external-changes';
+import {ExternalChangesPanel} from './external-changes';
 import {AppAlert} from './app-alert';
 import {ProjectExplorer} from './explorer';
 import {resetSourceCatalogCache,SourceCatalog} from './source-catalog';
@@ -228,8 +228,10 @@ export function App({host}:{host?:SessionHost}={}) {
   const [workspaces,setWorkspaces]=useState<{workspace_id:string;name:string;running:number;model_parent?:string}[]>([]);
   const [external,setExternal] = useState<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}|null>(null);
   const [externalReviewOpen,setExternalReviewOpen]=useState(false);
+  const [externalReloadFailed,setExternalReloadFailed]=useState(false);
+  const externalReloadAttempt=useRef('');
   useEffect(()=>setExternalReviewOpen(false),[project?.workspace_id]);
-  useEffect(()=>{if(!external?.changed)setExternalReviewOpen(false);},[external?.changed]);
+
   const [externalResolutions,setExternalResolutions]=useState<Record<string,'keep_cadpad'|'use_external'>>({});
   const reviewFingerprint=useRef('');
   const activeWorkspace = useRef<string|null>(null);
@@ -1022,7 +1024,7 @@ export function App({host}:{host?:SessionHost}={}) {
   const autoSaving=useRef(false),autoSaveTimer=useRef<number|null>(null);
   async function autoSaveBound(){
     const current=currentProject.current;
-    if(!current||!hasUnsavedChanges(current)||current.saved_revision==null||autoSaving.current)return;
+    if(!current||!hasUnsavedChanges(current)||current.saved_revision==null||autoSaving.current||mutationBusy.current||externalNow.current?.changed)return;
     if(liveJob.current&&['queued','running'].includes(liveJob.current.state))return;
     autoSaving.current=true;
     const workspace=current.workspace_id;
@@ -1050,7 +1052,7 @@ export function App({host}:{host?:SessionHost}={}) {
         again=false;
         try {
           const next=await invoke<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}>('check_external',{workspace});
-          if(active && activeWorkspace.current===workspace){if(reviewFingerprint.current!==next.fingerprint){reviewFingerprint.current=next.fingerprint;setExternalResolutions({});}setExternal(next);}
+          if(active && activeWorkspace.current===workspace){if(reviewFingerprint.current!==next.fingerprint){reviewFingerprint.current=next.fingerprint;setExternalResolutions({});setExternalReloadFailed(false);}setExternal(next);}
         }catch(e){if(active)setError(message(e));}
       }while(active&&again);
       pending=false;
@@ -1059,6 +1061,35 @@ export function App({host}:{host?:SessionHost}={}) {
     void check();
     return()=>{active=false;close();};
   },[project?.workspace_id,project?.revision,project?.saved_revision,project?.external_tracking]);
+  async function reloadExternal(automatic=false){
+    const current=currentProject.current,observed=externalNow.current;
+    if(!current||!observed?.changed||mutationBusy.current)return;
+    if(liveJob.current&&['queued','running'].includes(liveJob.current.state))return;
+    if(automatic&&observed.conflicts?.length)return;
+    const workspace=current.workspace_id;
+    externalReloadAttempt.current=JSON.stringify([workspace,current.revision,observed.fingerprint]);
+    mutationBusy.current=true;setBusy(true);setExternalReloadFailed(false);
+    try{
+      // The shared header belongs to this project, even when a child model has focus.
+      const next=await invoke<Job>('reload_project',{workspace,revision:current.revision,fingerprint:observed.fingerprint,resolutions:automatic?{}:externalResolutions});
+      if(activeWorkspace.current!==workspace)return;
+      liveJob.current=next;setJob(next);
+      if(next.state==='succeeded'){
+        const refreshed=await invoke<Project>('project',{workspace});
+        if(activeWorkspace.current===workspace)adopt(refreshed);
+      }else if(next.state==='failed')setExternalReloadFailed(true);
+    }catch(error){if(activeWorkspace.current===workspace){setExternalReloadFailed(true);setError(message(error));}}
+    finally{mutationBusy.current=false;if(activeWorkspace.current===workspace)setBusy(false);}
+  }
+  useEffect(()=>{
+    if(!project||!external?.changed||external.conflicts?.length||working)return;
+    const key=JSON.stringify([project.workspace_id,project.revision,external.fingerprint]);
+    if(externalReloadAttempt.current===key)return;
+    // Coalesce editor saves and wait until any Cadpad mutation has finished.
+    const timer=window.setTimeout(()=>void reloadExternal(true),350);
+    return()=>window.clearTimeout(timer);
+  },[project?.workspace_id,project?.revision,external,working]);
+  useEffect(()=>{if(job?.state==='failed'&&external?.changed)setExternalReloadFailed(true);},[job?.state,external?.changed]);
   function prepareMotionTest(intent:string,id?:string){
     const request=(id?`Edit the saved CAD requirement with ID ${id}. List saved requirements and inspect its existing definition first.\n`:'Create a saved CAD requirement from this free-text requirement:\n')+intent+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';
     setPanel('assistant');setPrompt(request);void sendPrompt(request);
@@ -1148,7 +1179,7 @@ export function App({host}:{host?:SessionHost}={}) {
       </div>
       <span className="header-spacer" data-tauri-drag-region/>
       <ModelHistory entries={modelHistory} disabled={working} onUndo={()=>void run('undo')} onRestore={target=>void run('restore_checkpoint',{target})}/>
-      {external?.changed&&<button type="button" className="external-changes-trigger" aria-haspopup="dialog" aria-label="Review files changed outside Cadpad" onClick={()=>setExternalReviewOpen(true)}><Icon name="file" size={14}/>Files changed <span>{Object.keys(external.changes).length}</span></button>}
+      {external?.changed&&<button type="button" className="external-changes-trigger" aria-label="Review files changed outside Cadpad" onClick={()=>{if(host)host.openChanges();else setExternalReviewOpen(true);}}><Icon name="file" size={14}/>Files changed <span>{Object.keys(external.changes).length}</span></button>}
 
 
       <button id="tab-assistant" className="titlebar-assistant"  aria-label="Toggle Assistant panel" title="Toggle Assistant" aria-controls="panel-assistant-dock" aria-expanded={host?host.visibleTools.includes('assistant'):assistantOpen} onClick={()=>{if(host)host.showTool('assistant',true);else setAssistantOpen(!assistantOpen);setFocusedTool('assistant');}}><Icon name="chat" size={16}/><span>Assistant</span></button>
@@ -1272,7 +1303,8 @@ export function App({host}:{host?:SessionHost}={}) {
         />
         {!!imageDropDepth&&<div className="assistant-image-drop" aria-hidden="true">Drop image to attach</div>}
       </aside>);
-  const dialogs=(<>{error&&<AppAlert message={error} active={!host||host.active} onDismiss={()=>setError('')}/>}{externalReviewOpen&&external?.changed&&<ExternalChangesDialog changes={external.changes} conflicts={external.conflicts} resolutions={externalResolutions} busy={working} onResolve={(path,value)=>setExternalResolutions(values=>({...values,[path]:value}))} onClose={()=>setExternalReviewOpen(false)} onReload={()=>{setExternalReviewOpen(false);void run('reload_project',{fingerprint:external.fingerprint,resolutions:externalResolutions});}}/>}{project&&<QuickModelSelector open={quickModelOpen} workspace={project.workspace_id} revision={project.revision} activeEntry={host?.modelEntry?.entry} activeBuilder={host?.modelEntry?.builder} busy={host?busy||agentSending||agentWorking:working} onClose={()=>setQuickModelOpen(false)} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/>}    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}</>);
+  const externalReview=(<>{(host?.chrome||externalReviewOpen)&&<ExternalChangesPanel changes={external?.changed?external.changes:{}} conflicts={external?.changed?external.conflicts:[]} resolutions={externalResolutions} reloadFailed={externalReloadFailed} busy={working} onResolve={(path,value)=>setExternalResolutions(values=>({...values,[path]:value}))} onClose={()=>{if(host)host.closeChanges();else setExternalReviewOpen(false);}} onReload={()=>{void reloadExternal();}}/>}</>);
+  const dialogs=(<>{error&&<AppAlert message={error} active={!host||host.active} onDismiss={()=>setError('')}/>}{project&&<QuickModelSelector open={quickModelOpen} workspace={project.workspace_id} revision={project.revision} activeEntry={host?.modelEntry?.entry} activeBuilder={host?.modelEntry?.builder} busy={host?busy||agentSending||agentWorking:working} onClose={()=>setQuickModelOpen(false)} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/>}    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}</>);
   const providerDialog=(<SettingsDialog
       open={providerOpen}
       dialogRef={settingsDialog}
@@ -1305,7 +1337,7 @@ export function App({host}:{host?:SessionHost}={}) {
     {host.active&&createPortal(motionPanel('simulate'),host.tools.simulate,'simulate')}
     {host.active&&createPortal(motionPanel('test'),host.tools.test,'test')}
     {host.chrome&&createPortal(assistantPanel,host.tools.assistant)}
-    {canvasPanel}{host.active&&dialogs}{(host.active||host.chrome)&&providerDialog}
+    {canvasPanel}{host.chrome&&createPortal(externalReview,host.changes)}{host.active&&dialogs}{(host.active||host.chrome)&&providerDialog}
   </>;
   return <div className={`app ${/Mac/.test(navigator.platform)?'macos':''}`} style={{'--model-width':`${panelSizes.model}px`,'--assistant-width':`${panelSizes.assistant}px`,'--motion-width':`${panelSizes.motion}px`} as React.CSSProperties}>
     {headerBar}
@@ -1324,6 +1356,6 @@ export function App({host}:{host?:SessionHost}={}) {
       </div>
       {assistantPanel}
     </main>
-    {dialogs}{providerDialog}
+    {externalReview}{dialogs}{providerDialog}
   </div>;
 }

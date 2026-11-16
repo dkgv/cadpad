@@ -82,7 +82,7 @@ export function validateDock(value:unknown,allowed:Set<string>,depth=0,seen=new 
 }
 
 const dragType='application/x-cadpad-tab';
-export type DockTab={id:string;title:string;dirty?:boolean;icon?:'cube'|'folder'|'motion'|'physics'|'tests'|'sparkles'|'chat';status?:'pending'|'unseen'};
+export type DockTab={id:string;title:string;dirty?:boolean;icon?:'file'|'cube'|'folder'|'motion'|'physics'|'tests'|'sparkles'|'chat';status?:'pending'|'unseen'};
 function TabContextMenu({x,y,others,onCloseTab,onCloseOthers,onCloseAll,onDismiss}:{x:number;y:number;others:boolean;onCloseTab:()=>void;onCloseOthers:()=>void;onCloseAll:()=>void;onDismiss:()=>void}){
   const ref=useRef<HTMLDivElement>(null);
   const mac=/Mac|iPhone|iPad/.test(navigator.platform);
