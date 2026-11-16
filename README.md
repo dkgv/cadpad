@@ -1,48 +1,12 @@
 # Cadpad
 
-Desktop app for building and inspecting 3D models with AI. You describe a part or a change, Cadpad builds it as a [CadQuery](https://cadquery.readthedocs.io/) script, and you look at the result, adjust it, and export STEP or STL.
+A macOS app for building 3D models with AI. Describe a part, inspect it, ask for changes, and export STEP or STL. Models are [CadQuery](https://cadquery.readthedocs.io/) Python files you can edit yourself.
 
-CadQuery is the modeling API. Its geometry kernel is [OpenCASCADE](https://dev.opencascade.org/).
+Still a work in progress.
 
-Work in progress. Developed for macOS.
+## Run it
 
-## Use it
-
-### Projects
-
-A project is a folder of Python source, reference files, and Cadpad settings.
-
-- **File → New Project** (`Cmd+N`) starts one.
-- **File → Open…** (`Cmd+O`) opens a folder, including an existing CadQuery repo.
-- **File → Save** (`Cmd+S`) writes back to that folder. **Save As…** (`Cmd+Shift+S`) copies it elsewhere.
-
-**Explorer** lists models it found in the source, grouped by folder. Click one to build it and open a tab. `Cmd+Shift+O` jumps to a model in the current project. **Files**, collapsed by default, shows the Python and a source preview.
-
-Cadpad runs models with its own Python and CadQuery. It does not install the project's other dependencies. It indexes source without running it, so the list can include helpers and can miss real models. A build is what confirms that an entry produces geometry. Functions that need arguments are opened from **Files**.
-
-Limits: 4,096 Python files, 1 MiB each, 8 MiB total. Virtual environments and Python caches are skipped.
-
-### Assistant
-
-**Cadpad → Settings…** (`Cmd+,`). Use a local CLI (Claude Code, Codex, or Cursor) or an Anthropic API key. CLI keys stay with that tool; an API key is stored in the system keychain.
-
-Open the **Assistant** panel and describe the model or the change. The assistant edits the project and rebuilds.
-
-**External agents** in Settings shows the MCP config for connecting another agent. The desktop app has to be running for that bridge.
-
-You can also open and build projects with no assistant.
-
-### Viewport
-
-Click a face, edge, or object to inspect it. **Model → Select** switches what a click picks. **View → Show Dimensions** (`Cmd+Shift+M`) shows measurements.
-
-Camera: **Fit Model** (`Cmd+0`), isometric (`Cmd+1`), front (`Cmd+2`), top (`Cmd+3`), right (`Cmd+4`). **Model → Rebuild Model** (`Cmd+R`) runs the current model again.
-
-**Move** drives joints. **Physics** is an approximate preview of forces and contact; the assembly needs collision shapes first. **File → Export** writes STEP or STL.
-
-## Development
-
-You need Rust, Node.js and npm, [uv](https://docs.astral.sh/uv/), and the Xcode Command Line Tools.
+You'll need Rust, Node.js and npm, [uv](https://docs.astral.sh/uv/), and the Xcode Command Line Tools.
 
 ```sh
 uv sync --locked --python 3.12
@@ -50,18 +14,48 @@ npm ci
 npm run desktop
 ```
 
-The first build compiles the Rust crates and the Tauri app. It takes a while.
+The first build takes a while.
 
-| Path | What it is |
-| --- | --- |
-| `apps/desktop` | Tauri shell and React UI |
-| `packages/viewer` | 3D viewer |
-| `crates/core` | Projects, builds, geometry, motion |
-| `crates/agent` | Built-in assistant |
-| `crates/mcp` | MCP server for external agents |
-| `python/cadpad_worker` | CadQuery worker |
+## Use it
 
-Checks, from the repo root:
+Create a project (`Cmd+N`) or open an existing CadQuery folder (`Cmd+O`). Choose an LLM backend in **Settings** (`Cmd+,`), then open the **Assistant** and describe what you want to make.
+
+Click a model in the **Explorer** to build it. Click faces and edges to inspect them, use `Cmd+0` to fit the view, and `Cmd+R` to rebuild. Save with `Cmd+S` and export through **File → Export**.
+
+You can work without an assistant, too. To connect an external agent, copy the MCP config from **Settings → External agents** and keep Cadpad running.
+
+Cadpad uses its own Python environment and doesn't install your project's extra dependencies. Model discovery can miss entries or include helpers; building one confirms whether it produces geometry.
+
+## LLM support
+
+The built-in Assistant supports these backends:
+
+| Backend | Authentication | Model selection |
+| --- | --- | --- |
+| Claude Code CLI (`claude`) | Sign in with `claude auth login` | Aliases discovered from CLI help, with fallback aliases; custom IDs supported |
+| Codex CLI (`codex`) | Sign in with `codex login` | Catalog from `codex debug models`; custom IDs supported |
+| Cursor CLI (`cursor-agent` or `agent`) | Sign in with `agent login` | Catalog from `--list-models`; custom IDs supported |
+| OpenCode CLI (`opencode`, version 2+) | Existing OpenCode provider configuration and accounts; use `opencode auth login` to connect a provider | Catalog from `opencode models`; custom `provider/model#variant` IDs supported |
+| Anthropic API | API key saved in the system keychain | Catalog from the Anthropic Models API; an explicit model ID is required |
+
+Install and authenticate a CLI before selecting it in Settings. Cadpad must be able to find its executable on `PATH`. CLI backends use the CLI's existing account and configuration; Cadpad supplies its modeling tools through MCP. OpenCode uses global configuration and runs a private server for each turn. Providers and local models configured in OpenCode are usable when OpenCode exposes them; the selected model must support the tool calls needed for modeling. Direct API integration is currently limited to Anthropic.
+
+For CLIs, **Provider default** leaves model choice to the harness. A selected model is passed to new turns with `--model`. **Custom model ID** remains available when catalog discovery fails or misses a model. Discovery does not guarantee that your account can use every listed model, and Claude's aliases are not an account-specific catalog. Settings currently saves one backend/model pair, rather than remembering a separate choice for each harness.
+
+All backends can read project source, stage edits, build geometry, inspect results, and export through Cadpad's tools. The Assistant displays text, reasoning, and tool activity when the backend reports them, and supports stopping a turn. OpenCode reports tool activity after each tool finishes. CLI turns start fresh harness sessions with recent conversation text supplied as context. Selection references are passed as text; automatic reference screenshot attachments currently go to the Anthropic API backend only. CLI agents can request viewport captures through MCP, subject to the harness and model's image support.
+
+Other agents can connect through **Settings → External agents** using the supplied MCP configuration. This exposes Cadpad's tools to an MCP-compatible client without adding that client's harness to the built-in Assistant.
+
+## Development
+
+The app is Tauri + React, with a Rust core and a Python CadQuery worker.
+
+- `apps/desktop` — desktop app
+- `packages/viewer` — 3D viewer
+- `crates/core`, `crates/agent`, `crates/mcp` — core, assistant, and MCP server
+- `python/cadpad_worker` — modeling worker
+
+Checks from the repo root:
 
 ```sh
 .venv/bin/python -m pytest -q
