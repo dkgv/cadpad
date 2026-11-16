@@ -31,7 +31,8 @@ def main():
         for request_id, method, params in [(1, "build", dict(source_root=str(source), annotations=annotations, collision=json.loads((repository / "fixtures/rail_carriage.mechanism.json").read_text())["collision"])),
                                           (2, "export", dict(format="STEP")),
                                           (3, "inspect", dict(entities=[dict(revision="bundle-r1", instance_id="rail", entity_id="part:0")])),
-                                          (4, "inspect", dict(query="interference",pairs=[["rail","carriage"]]))]:
+                                          (4, "inspect", dict(query="interference",pairs=[["rail","carriage"]])),
+                                          (5, "export", dict(format="STL"))]:
             requests.append(dict(jsonrpc="2.0", id=request_id, protocol_version=1,
                                  worker_generation="bundle-test", revision="bundle-r1", method=method, params=params))
         result = subprocess.run([str(executable), "--cache", str(directory / "cache"), "--generation", "bundle-test"],
@@ -41,7 +42,7 @@ def main():
         if result.returncode:
             raise RuntimeError(result.stderr[-16384:])
         responses = [json.loads(line) for line in result.stdout.splitlines()]
-        assert len(responses) == 4, result.stdout
+        assert len(responses) == 5, result.stdout
         assert all("result" in response for response in responses), responses
         assert len(responses[0]["result"]["parts"]) == 2
         saved = {item["saved_id"]: item for item in responses[0]["result"]["annotations"] if "saved_id" in item}
@@ -57,6 +58,10 @@ def main():
         assert responses[3]["result"]["pairs"][0]["distance_mm"] > 0.019
         exported = directory / "cache" / responses[1]["result"]["handle"]
         assert exported.read_bytes().startswith(b"ISO-10303-21;")
+        stl_bytes = (directory / "cache" / responses[4]["result"]["handle"]).read_bytes()
+        triangle_count, = struct.unpack_from("<I", stl_bytes, 80)
+        assert triangle_count > 0 and len(stl_bytes) == 84 + 50 * triangle_count
+
         assert responses[0]["result"]["parts"][0]["bounds"] == responses[2]["result"]["entities"][0]["bounds"], "BRep dimensions changed after display tessellation"
         assert all(part["geometry_fingerprint"]["format"] == "occt-brep-v3-no-display-v1"
                    for part in responses[0]["result"]["parts"])

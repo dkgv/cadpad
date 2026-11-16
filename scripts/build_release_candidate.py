@@ -209,6 +209,9 @@ def main():
     if Path(sys.prefix).resolve() != (REPOSITORY / ".venv").resolve():
         raise RuntimeError("Use the pinned project .venv/bin/python")
     source_fingerprints = {name: sha256(REPOSITORY / name) for name in SOURCE_INPUTS}
+    source_fingerprints.update({str(path.relative_to(REPOSITORY)): sha256(path)
+                                for path in (REPOSITORY / "vendor/cadquery").rglob("*")
+                                if path.is_file() and "__pycache__" not in path.parts})
     stage = Path(tempfile.mkdtemp(prefix="release-staging-", dir=REPOSITORY / "target"))
     print(f"Staging files and logs: {stage}", flush=True)
     env = clean_build_environment()
@@ -394,7 +397,7 @@ def main():
                                log=str(geometry_log), log_sha256=sha256(geometry_log), empty_path=True,
                                required_containment=True, desktop_execution=False)
     run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], stage, "Verify exercised candidate", env)
-    if source_fingerprints != {name: sha256(REPOSITORY / name) for name in SOURCE_INPUTS}:
+    if source_fingerprints != {name: sha256(REPOSITORY / name) for name in source_fingerprints}:
         raise RuntimeError("Candidate source inputs changed during build or probes")
     report = dict(status="passed", checked_at=datetime.now(timezone.utc).isoformat(), platform=platform.platform(), architecture=platform.machine(),
                   app=str(app), app_executable_sha256=sha256(main_executable), stage=str(stage), declared_minimum_macos=minimum,

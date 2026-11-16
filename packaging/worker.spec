@@ -8,17 +8,28 @@ from PyInstaller.config import CONF
 
 repository = Path(SPECPATH).parent
 all_data, all_binaries, hidden = [], [], []
-for package in ("cadquery", "OCP", "ocp_tessellate", "vtkmodules"):
-    data, binaries, imports = collect_all(package)
+# The headless CadQuery/OCP runtime does not include VTK.
+for package in ("cadquery", "OCP", "ocp_tessellate"):
+    data, binaries, imports = collect_all(
+        package,
+        # Bytecode is already included in PYZ; don't duplicate package sources.
+        include_py_files=False,
+        # Cadpad has its own viewer. Don't force in CadQuery's optional browser
+        # figure server (Trame) or its Sphinx documentation extension.
+        filter_submodules=lambda name: name not in {"cadquery.fig", "cadquery.vis", "cadquery.cq_directive"},
+    )
     all_data.extend(data)
     all_binaries.extend(binaries)
     hidden.extend(imports)
 a = Analysis([str(repository / "scripts/worker_entry.py")],
              pathex=[str(repository / "python")], binaries=all_binaries,
              datas=all_data, hiddenimports=hidden, hookspath=[],
-             excludes=["pytest", "tkinter", "IPython", "jupyter", "matplotlib"])
+             excludes=["pytest", "tkinter", "IPython", "jupyter", "matplotlib", "vtk", "vtkmodules", "trame", "trame_vtk"])
+# Fail closed if an upstream packaging change reintroduces VTK binaries.
+if any("vtk" in Path(destination).name.lower() for destination, *_ in a.binaries):
+    raise RuntimeError("VTK binary unexpectedly included in the headless worker")
 # collect_all(import_name) misses notices installed outside that import root
-# (notably cadquery_ocp/LICENSE). Resolve ownership from final Analysis inputs.
+# (notably cadquery_ocp_novtk/LICENSE). Resolve ownership from final Analysis inputs.
 notice_spec = importlib.util.spec_from_file_location("worker_notices", repository / "scripts/worker_notices.py")
 notice_module = importlib.util.module_from_spec(notice_spec)
 notice_spec.loader.exec_module(notice_module)

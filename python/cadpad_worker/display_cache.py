@@ -52,7 +52,7 @@ def policy(model, fingerprint_function, fingerprint_format):
                 return None
         value = dict(version=1, python=sys.version, geometry_format=fingerprint_format,
                      dependencies={name: importlib.metadata.version(name) for name in
-                                   ("cadquery", "cadquery-ocp", "ocp-tessellate")}, producers=codes)
+                                   ("cadquery", "cadquery-ocp-novtk", "ocp-tessellate")}, producers=codes)
         return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
     except (AttributeError, TypeError, ValueError):
         # Unknown/custom producers still render; they simply cannot reuse data.

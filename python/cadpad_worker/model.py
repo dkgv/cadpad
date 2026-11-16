@@ -161,9 +161,17 @@ class Model:
         entry_path = (source_root / entry).resolve(strict=True)
         if not entry_path.is_relative_to(source_root):
             raise DomainError("BUILD_FAILED", "Entry point leaves workspace")
-        dependencies = {name: importlib.metadata.version(name) for name in ("cadquery", "cadquery-ocp", "ocp-tessellate")}
+        dependencies = {name: importlib.metadata.version(name) for name in ("cadquery", "cadquery-ocp-novtk", "ocp-tessellate")}
         expected = args.get("expected_dependencies", {})
-        if expected and expected != dependencies:
+        # The headless package changes distribution names, not this pinned
+        # modeling API. Accept only the exact pre-VTK-removal runtime; retain
+        # actual installed identities in responses and cache policies.
+        legacy_runtime = {"cadquery": "2.6.1", "cadquery-ocp": "7.8.1.1.post1",
+                          "ocp-tessellate": "3.0.17"}
+        headless_runtime = {"cadquery": "2.6.1+cadpad.1", "cadquery-ocp-novtk": "7.8.1.1.post1",
+                            "ocp-tessellate": "3.0.17"}
+        compatible_legacy = expected == legacy_runtime and dependencies == headless_runtime
+        if expected and expected != dependencies and not compatible_legacy:
             raise DomainError("UNSUPPORTED_OPERATION", f"Project dependencies differ from worker: expected {expected}, installed {dependencies}")
         values = args.get("parameters", {})
         from .geometry_cache import Cache

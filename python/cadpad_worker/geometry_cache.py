@@ -42,7 +42,7 @@ def policy(fingerprint):
                      cq.Shape.importBrep.__func__, cq.Shape.cast.__func__]
         value = dict(format=FORMAT, geometry_format=FINGERPRINT_FORMAT, python=sys.version,
                      dependencies={name: importlib.metadata.version(name) for name in
-                                   ("cadquery", "cadquery-ocp", "ocp-tessellate")},
+                                   ("cadquery", "cadquery-ocp-novtk", "ocp-tessellate")},
                      producers=[_constant(producer.__code__) for producer in producers])
         return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
     except (AttributeError, TypeError, ValueError):

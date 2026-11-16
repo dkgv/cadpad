@@ -2,7 +2,7 @@
 name = "cadpad-worker"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
-dependencies = ["cadquery==2.6.1", "ocp-tessellate==3.0.17"]
+dependencies = ["cadquery==2.6.1+cadpad.1", "ocp-tessellate==3.0.17"]
 
 [dependency-groups]
 dev = ["pytest==8.4.2", "pyinstaller==6.16.0"]
@@ -17,3 +17,6 @@ packages = ["python/cadpad_worker"]
 [tool.pytest.ini_options]
 pythonpath = ["python"]
 testpaths = ["python/tests"]
+
+[tool.uv.sources]
+cadquery = { path = "vendor/cadquery" }
