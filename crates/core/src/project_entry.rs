@@ -35,6 +35,19 @@ pub(crate) fn inputs_model_entry(inputs: &crate::Inputs) -> Option<(String, Stri
         .and_then(|source| generated_model_entry(source))
 }
 
+/// A generated entry can outlive its source after a project is reorganized on disk.
+/// Keep the imported files browsable instead of executing a dangling adapter.
+pub(crate) fn reset_missing_model_entry(inputs: &mut crate::Inputs) {
+    if let Some((entry, _)) = inputs_model_entry(inputs) {
+        if !inputs.files.contains_key(&entry) {
+            inputs.files.insert(
+                inputs.entry_point.clone(),
+                portable::PROJECT_BROWSER_SOURCE.into(),
+            );
+        }
+    }
+}
+
 // Ignore private view adapters and build-discovered dependencies when comparing user content.
 // Comparing borrowed inputs avoids copying scene metadata or Python source strings.
 pub(crate) fn same_project_content(current: &crate::Inputs, saved: &crate::Inputs) -> bool {
@@ -626,4 +639,47 @@ pub fn configure_entry(
     }
     result?;
     Ok(selected)
+}
+
+#[cfg(test)]
+mod missing_entry_tests {
+    use super::*;
+
+    #[test]
+    fn deleted_generated_target_returns_to_browser_without_restoring_deleted_files() {
+        let mut inputs = crate::Inputs::default();
+        inputs.entry_point = "cadpad_view_0.py".into();
+        let adapter = "# Generated Cadpad entry point.\ndef build(context):\n    path = Path(__file__).parent / \"old/model.py\"\n    result = getattr(module, \"chassis\")()\n";
+        inputs
+            .files
+            .insert(inputs.entry_point.clone(), adapter.into());
+        inputs
+            .files
+            .insert("new/model.py".into(), "# moved source".into());
+        reset_missing_model_entry(&mut inputs);
+        assert_eq!(
+            inputs.files[&inputs.entry_point],
+            portable::PROJECT_BROWSER_SOURCE
+        );
+        assert!(inputs.files.contains_key("new/model.py"));
+        assert!(!inputs.files.contains_key("old/model.py"));
+    }
+
+    #[test]
+    fn existing_generated_target_and_user_entry_are_preserved() {
+        let mut inputs = crate::Inputs::default();
+        inputs.entry_point = "cadpad_view_0.py".into();
+        let adapter = "# Generated Cadpad entry point.\ndef build(context):\n    path = Path(__file__).parent / \"model.py\"\n    result = getattr(module, \"chassis\")()\n";
+        inputs
+            .files
+            .insert(inputs.entry_point.clone(), adapter.into());
+        inputs.files.insert("model.py".into(), "# source".into());
+        reset_missing_model_entry(&mut inputs);
+        assert_eq!(inputs.files[&inputs.entry_point], adapter);
+        inputs
+            .files
+            .insert(inputs.entry_point.clone(), "# user code".into());
+        reset_missing_model_entry(&mut inputs);
+        assert_eq!(inputs.files[&inputs.entry_point], "# user code");
+    }
 }

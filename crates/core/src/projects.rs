@@ -453,7 +453,9 @@ impl Core {
                 "Reload base changed while reading files",
             ));
         }
-        let mut draft = Self::input_draft(loaded.inputs, base, actor);
+        let mut inputs = loaded.inputs;
+        crate::project_entry::reset_missing_model_entry(&mut inputs);
+        let mut draft = Self::input_draft(inputs, base, actor);
         draft.external_fingerprint = Some(loaded.fingerprint);
         draft.source_hashes = ws.stored.revisions[base]
             .inputs

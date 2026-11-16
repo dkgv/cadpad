@@ -1072,3 +1072,43 @@ async fn project_loading_skips_symlinks_and_keeps_regular_sources_and_assets() {
             .is_symlink()
     );
 }
+
+#[tokio::test]
+async fn reload_with_deleted_generated_target_stages_a_browsable_project() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("project");
+    std::fs::create_dir_all(directory.join("old")).unwrap();
+    std::fs::write(directory.join("old/model.py"), "# old source\n").unwrap();
+    std::fs::write(directory.join("cadpad_view_0.py"), "# Generated Cadpad entry point.\ndef build(context):\n    path = Path(__file__).parent / \"old/model.py\"\n    result = getattr(module, \"chassis\")()\n").unwrap();
+    portable::initialize_folder(&directory, "cadpad_view_0.py").unwrap();
+    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
+    let opened = core.open_project(directory.clone(), "user").await.unwrap();
+    std::fs::remove_file(directory.join("old/model.py")).unwrap();
+    std::fs::write(directory.join("new.py"), "# replacement source\n").unwrap();
+    let observed = core
+        .scan_external_changes(&opened.workspace_id)
+        .await
+        .unwrap();
+    assert_eq!(observed["changed"], true);
+    let draft = core
+        .stage_external_changes(
+            &opened.workspace_id,
+            &opened.base_revision,
+            observed["fingerprint"].as_str().unwrap(),
+            "user",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        draft.inputs.files[&draft.inputs.entry_point],
+        portable::PROJECT_BROWSER_SOURCE
+    );
+    assert!(draft.inputs.files.contains_key("new.py"));
+    assert!(!draft.inputs.files.contains_key("old/model.py"));
+    // Recovery changes the staged adapter, never resurrects or rewrites disk source.
+    assert!(
+        std::fs::read_to_string(directory.join("cadpad_view_0.py"))
+            .unwrap()
+            .contains("old/model.py")
+    );
+}
