@@ -28,10 +28,12 @@ pub mod project_result;
 pub mod projects;
 pub mod recovery;
 pub mod runtime;
+mod source_files;
 pub mod tools;
 pub mod views;
 pub mod worker;
 mod worker_cache;
+pub use source_files::SourceFiles;
 pub mod worker_limits;
 
 use schemars::JsonSchema;
@@ -79,7 +81,7 @@ impl Error {
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Inputs {
-    pub files: BTreeMap<String, String>,
+    pub files: SourceFiles,
     pub parameters: Value,
     pub annotations: Value,
     pub mechanism: Value,
@@ -95,7 +97,8 @@ impl Default for Inputs {
             files: BTreeMap::from([(
                 "model.py".into(),
                 "# Describe a part to get started.\n".into(),
-            )]),
+            )])
+            .into(),
             parameters: json!({}),
             annotations: json!([]),
             mechanism: json!({}),
@@ -337,24 +340,27 @@ impl Core {
                 ));
             }
             // A process restart cannot resurrect a running native operation.
+            let mut recovered_jobs = false;
             for job in stored.jobs.values_mut() {
                 if matches!(job.state, JobState::Queued | JobState::Running) {
+                    recovered_jobs = true;
                     job.state = JobState::Failed;
                     job.diagnostics = json!({"code":"WORKER_UNAVAILABLE","message":"Application restarted during build"});
                 }
             }
-            let revision = &stored.revisions[&stored.current];
-            let inputs = revision.inputs.clone();
-            let model = revision.model.clone();
-            let motion = tokio::task::spawn_blocking(move || motion::State::new(&inputs, &model))
-                .await
-                .map_err(|_| Error::domain("INVALID_MECHANISM", "Motion recovery failed"))??;
+            // Only changed recovery state needs rewriting. Avoid cloning and
+            // serializing the entire saved history on every launch.
+            if recovered_jobs {
+                let directory = root.join("workspaces").join(&stored.id);
+                persist_workspace(&directory, &stored).await?;
+            }
             workspaces.insert(
                 stored.id.clone(),
                 Workspace {
                     recovery: Arc::new(Mutex::new(())),
                     display_epoch: Arc::new(id()),
-                    motion: Some(motion),
+                    // Recover collision/motion resources only when requested.
+                    motion: None,
                     stored,
                     worker: None,
                     worker_last_used: 0,
@@ -387,16 +393,6 @@ impl Core {
                 construction::MAX_CONSTRUCTIONS,
             )),
         };
-        let recovered = core
-            .workspaces
-            .lock()
-            .await
-            .values()
-            .map(|ws| ws.stored.clone())
-            .collect::<Vec<_>>();
-        for stored in recovered {
-            core.persist(&stored).await?;
-        }
         // Cache maintenance cannot invalidate authoritative recovery if a cache
         // directory is unreadable. Explicit maintenance still reports the error.
         let _ = core.collect_cache().await;
@@ -404,16 +400,7 @@ impl Core {
     }
     async fn persist(&self, stored: &StoredWorkspace) -> Result<()> {
         let directory = self.root.join("workspaces").join(&stored.id);
-        tokio::fs::create_dir_all(&directory).await?;
-        let temporary = directory.join(format!("{}.tmp", id()));
-        let bytes = serde_json::to_vec_pretty(stored)?;
-        use tokio::io::AsyncWriteExt;
-        let mut file = tokio::fs::File::create(&temporary).await?;
-        file.write_all(&bytes).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&temporary, directory.join("workspace.json")).await?;
-        Ok(())
+        persist_workspace(&directory, stored).await
     }
     pub fn disk_usage(&self) -> Result<cache::DiskUsage> {
         cache::managed_disk_usage(&self.root, self.disk_quota_bytes)
@@ -1399,6 +1386,43 @@ pub fn error_value(error: &Error) -> Value {
 mod process_lock_tests {
     use super::*;
     #[tokio::test]
+    async fn reopening_defers_motion_and_preserves_recovered_job_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("app");
+        let config = WorkerConfig::bundled("unused".into());
+        let core = Core::open(root.clone(), config.clone()).await.unwrap();
+        let workspace = core.create_workspace("test").await.unwrap();
+        {
+            let mut all = core.workspaces.lock().await;
+            let ws = all.get_mut(&workspace).unwrap();
+            let job: Job = serde_json::from_value(json!({
+                "id":"interrupted", "draft_id":"draft", "actor":"test",
+                "state":"running", "resulting_revision":null, "diagnostics":null
+            }))
+            .unwrap();
+            ws.stored.jobs.insert(job.id.clone(), job);
+            core.persist(&ws.stored).await.unwrap();
+        }
+        drop(core);
+        let reopened = Core::open(root.clone(), config).await.unwrap();
+        let mut all = reopened.workspaces.lock().await;
+        let ws = all.get_mut(&workspace).unwrap();
+        assert!(ws.motion.is_none());
+        assert_eq!(ws.stored.jobs["interrupted"].state, JobState::Failed);
+        assert!(motion::state(ws).is_ok());
+        assert!(ws.motion.is_some());
+        let persisted: StoredWorkspace = serde_json::from_slice(
+            &std::fs::read(
+                root.join("workspaces")
+                    .join(workspace)
+                    .join("workspace.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.jobs["interrupted"].state, JobState::Failed);
+    }
+    #[tokio::test]
     async fn app_lock_releases_with_its_owner_even_when_a_duplicate_description_survives() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("app");
@@ -1426,3 +1450,16 @@ mod process_lock_tests {
 #[cfg(test)]
 #[path = "../tests/unit/mod.rs"]
 mod contract_tests;
+
+async fn persist_workspace(directory: &std::path::Path, stored: &StoredWorkspace) -> Result<()> {
+    tokio::fs::create_dir_all(&directory).await?;
+    let temporary = directory.join(format!("{}.tmp", id()));
+    let bytes = serde_json::to_vec_pretty(stored)?;
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::File::create(&temporary).await?;
+    file.write_all(&bytes).await?;
+    file.sync_all().await?;
+    drop(file);
+    tokio::fs::rename(&temporary, directory.join("workspace.json")).await?;
+    Ok(())
+}
