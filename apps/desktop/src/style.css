@@ -78,7 +78,7 @@
 .composer{border-radius:8px}
 .composer textarea{min-height:64px;padding:10px 10px 4px;font-size:13px;line-height:1.45;color:var(--text-strong)}
 .composer-actions{padding:4px 6px 6px}
-.composer-settings{font-size:12px;color:#3d4450}
+.composer-settings{font-size:12px;color:var(--muted)}
 .composer-hint{margin:6px 2px 0;font-size:11px}
 .assistant-welcome{padding:2px 0 12px}
 .assistant-welcome h3{display:flex;align-items:center;gap:6px;font-size:13px;margin:0 0 4px;color:var(--text-strong)}

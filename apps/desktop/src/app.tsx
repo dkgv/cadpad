@@ -1201,7 +1201,6 @@ export function App({host}:{host?:SessionHost}={}) {
         <div className="tool-group"><Icon name="cube" size={16}/><button className="native-picker" aria-label="Selection kind" title="Click picks one item. Shift-drag selects by rectangle. ⌘/Ctrl-click adds or removes." aria-haspopup="menu" onClick={event=>nativePopup('selection',event.currentTarget)}>Pick {({face:'faces',edge:'edges',part:'objects'})[selectionMode]}<Icon name="chevron" size={10}/></button></div><span className="tool-divider"/>
         <button className={dimensions?'active':''} aria-pressed={dimensions} onClick={()=>setDimensions(!dimensions)}><Icon name="measure" size={16}/>Dimensions</button>
 
-        {dimensions&&<button className="native-picker" aria-label="Dimension scope" aria-haspopup="menu" onClick={event=>nativePopup('scope',event.currentTarget)}>{({selected:'Selected object',pinned:'Pinned',all:'All visible'})[scope]}<Icon name="chevron" size={10}/></button>}
       </nav>}
       <div className="viewport" ref={container} aria-busy={scenePhase==='loading'||scenePhase==='lost'}/>
       {(scenePhase==='lost'||scenePhase==='loading'||scenePhase==='failed'||scenePhase==='missing'&&!retainedView)&&<div className={`view-recovery ${retainedView?'retained-view':''}`}><div className="view-recovery-card" role={scenePhase==='failed'?'alert':'status'}>
