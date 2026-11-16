@@ -3,7 +3,7 @@ use crate::{Core, Draft, Error, Inputs, Result, StoredWorkspace, Workspace, hash
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
 };
 
@@ -21,59 +21,8 @@ async fn blocking<T: Send + 'static>(
         .await
         .map_err(|error| Error::domain("IO_ERROR", error.to_string()))?
 }
-fn file_bodies(files: &BTreeMap<String, String>) -> Vec<&str> {
-    let mut bodies: Vec<&str> = files.values().map(String::as_str).collect();
-    bodies.sort_unstable();
-    bodies
-}
-/// Map each current path to its path on disk when the move preserved every
-/// source body. Identical files keep a path that still exists.
-fn path_map(
-    current: &BTreeMap<String, String>,
-    disk: &BTreeMap<String, String>,
-) -> Option<BTreeMap<String, String>> {
-    if current == disk || file_bodies(current) != file_bodies(disk) {
-        return None;
-    }
-    let mut pools: HashMap<&str, Vec<&str>> = HashMap::new();
-    for (path, body) in disk {
-        pools.entry(body.as_str()).or_default().push(path.as_str());
-    }
-    let mut assigned: HashMap<&str, &str> = HashMap::new();
-    let mut used = HashSet::new();
-    for (path, body) in current {
-        if pools
-            .get(body.as_str())
-            .is_some_and(|paths| paths.iter().any(|candidate| *candidate == path.as_str()))
-        {
-            assigned.insert(path.as_str(), path.as_str());
-            used.insert(path.as_str());
-        }
-    }
-    for (path, body) in current {
-        if assigned.contains_key(path.as_str()) {
-            continue;
-        }
-        let choice = pools
-            .get(body.as_str())?
-            .iter()
-            .copied()
-            .find(|candidate| !used.contains(candidate))?;
-        assigned.insert(path.as_str(), choice);
-        used.insert(choice);
-    }
-    if assigned.len() != current.len() {
-        return None;
-    }
-    Some(
-        assigned
-            .into_iter()
-            .map(|(from, to)| (from.to_string(), to.to_string()))
-            .collect(),
-    )
-}
 impl Core {
-    async fn load_portable(&self, directory: PathBuf) -> Result<portable::Loaded> {
+    pub(crate) async fn load_portable(&self, directory: PathBuf) -> Result<portable::Loaded> {
         let mut loaded = blocking(move || portable::read_project(&directory)).await?;
         let blobs = std::mem::take(&mut loaded.blobs);
         let directory = self.root.join("blobs");
@@ -375,25 +324,7 @@ impl Core {
         };
         let directory = binding.directory.clone();
         let loaded = blocking(move || portable::read_project(&directory)).await?;
-        // The open project would otherwise keep the directory tree from the
-        // first visit. A move that preserves source bytes updates that tree
-        // immediately; edited bytes still wait for review.
-        let layout_refreshed = self.adopt_reorganized_layout(workspace_id, &loaded).await?;
-        let (inputs, observed) = if layout_refreshed {
-            let workspaces = self.workspaces.lock().await;
-            let ws = &workspaces[workspace_id];
-            (
-                ws.stored.revisions[&revision].inputs.clone(),
-                ws.stored
-                    .project
-                    .as_ref()
-                    .map(|binding| binding.fingerprint.clone())
-                    .unwrap_or_default(),
-            )
-        } else {
-            (inputs, binding.fingerprint)
-        };
-        let changed = loaded.fingerprint != observed;
+        let changed = loaded.fingerprint != binding.fingerprint;
         let mut changes = BTreeMap::new();
         for path in inputs.files.keys().chain(loaded.inputs.files.keys()) {
             if inputs.files.get(path) != loaded.inputs.files.get(path) {
@@ -439,83 +370,8 @@ impl Core {
             changes.insert("project.json".into(), "modified");
         }
         Ok(
-            json!({"workspace_id":workspace_id,"revision":revision,"changed":changed,"layout_refreshed":layout_refreshed,"fingerprint":loaded.fingerprint,"changes":changes}),
+            json!({"workspace_id":workspace_id,"revision":revision,"changed":changed,"fingerprint":loaded.fingerprint,"changes":changes}),
         )
-    }
-    /// Point the open project at the folder's current paths when every source
-    /// body is unchanged. Unsaved drafts keep their text and move with the file.
-    async fn adopt_reorganized_layout(
-        &self,
-        workspace_id: &str,
-        loaded: &portable::Loaded,
-    ) -> Result<bool> {
-        let mut workspaces = self.workspaces.lock().await;
-        let (map, inputs) = {
-            let Some(ws) = workspaces.get(workspace_id) else {
-                return Ok(false);
-            };
-            if ws.stored.model_parent.is_some() || ws.stored.python_origin.is_some() {
-                return Ok(false);
-            }
-            if ws.stored.jobs.values().any(|job| {
-                matches!(
-                    job.state,
-                    crate::JobState::Queued | crate::JobState::Running
-                )
-            }) {
-                return Ok(false);
-            }
-            if ws.stored.project.is_none() {
-                return Ok(false);
-            }
-            let current = &ws.stored.revisions[&ws.stored.current].inputs;
-            let Some(map) = path_map(&current.files, &loaded.inputs.files) else {
-                return Ok(false);
-            };
-            let mut inputs = current.clone();
-            inputs.files = loaded.inputs.files.clone();
-            if let Some(entry) = map.get(&inputs.entry_point) {
-                inputs.entry_point = entry.clone();
-            }
-            if !inputs.files.contains_key(&inputs.entry_point) {
-                return Ok(false);
-            }
-            (map, inputs)
-        };
-        let ws = workspaces.get_mut(workspace_id).unwrap();
-        let mut next = ws.stored.clone();
-        let current_id = next.current.clone();
-        next.revisions.get_mut(&current_id).unwrap().inputs = inputs.clone();
-        for draft in next.drafts.values_mut() {
-            let mut files = BTreeMap::new();
-            for (path, source) in &draft.inputs.files {
-                let target = map.get(path).cloned().unwrap_or_else(|| path.clone());
-                files.insert(target, source.clone());
-            }
-            draft.inputs.files = files;
-            if let Some(entry) = map.get(&draft.inputs.entry_point) {
-                draft.inputs.entry_point = entry.clone();
-            }
-            draft.source_hashes = draft
-                .inputs
-                .files
-                .iter()
-                .map(|(path, source)| (path.clone(), hash(source)))
-                .collect();
-            if draft.external_fingerprint.is_some() {
-                draft.external_fingerprint = portable::fingerprint(&draft.inputs)
-                    .ok()
-                    .filter(|fingerprint| fingerprint == &loaded.fingerprint);
-            }
-        }
-        if portable::fingerprint(&inputs).ok().as_ref() == Some(&loaded.fingerprint)
-            && let Some(binding) = &mut next.project
-        {
-            binding.fingerprint = loaded.fingerprint.clone();
-        }
-        self.persist(&next).await?;
-        ws.stored = next;
-        Ok(true)
     }
     pub async fn stage_external_changes(
         &self,

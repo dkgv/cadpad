@@ -118,17 +118,6 @@ impl Core {
         Ok(plan)
     }
     pub async fn index_project_sources(&self, workspace: &str, revision: &str) -> Result<Value> {
-        // Explorer reads this on a timer. Pick up a directory move before
-        // serving the tree, instead of waiting for the next app launch.
-        let tracked = self
-            .workspaces
-            .lock()
-            .await
-            .get(workspace)
-            .is_some_and(|ws| ws.stored.model_parent.is_none() && ws.stored.project.is_some());
-        if tracked {
-            let _ = self.scan_external_changes(workspace).await;
-        }
         let sources = {
             let all = self.workspaces.lock().await;
             let ws = all
@@ -241,6 +230,30 @@ impl Core {
         builder: &str,
         actor: &str,
     ) -> Result<(String, crate::Job)> {
+        // Opening a model executes the selected disk sources in a private view.
+        // Keep the project's saved checkpoints independent of that live layout.
+        let directory = {
+            let all = self.workspaces.lock().await;
+            let parent = all
+                .get(workspace)
+                .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+            if parent.stored.current != revision {
+                return Err(Error::domain(
+                    "REVISION_CONFLICT",
+                    "Project changed while opening a model",
+                ));
+            }
+            parent
+                .stored
+                .project
+                .as_ref()
+                .map(|binding| binding.directory.clone())
+        };
+        let publication = self.blob_publication.read().await;
+        let disk = match directory {
+            Some(directory) => Some(self.load_portable(directory).await?),
+            None => None,
+        };
         let workspace_id = crate::id();
         let base = crate::id();
         {
@@ -268,6 +281,13 @@ impl Core {
             initial.id = base.clone();
             initial.parent = Some(revision.into());
             initial.model = json!({"parts":[]});
+            if let Some(disk) = disk {
+                initial.inputs = disk.inputs;
+                if let Some(binding) = &mut stored.project {
+                    binding.saved_revision = base.clone();
+                    binding.fingerprint = disk.fingerprint;
+                }
+            }
             stored.revisions.insert(base.clone(), initial);
             stored.drafts.clear();
             stored.jobs.clear();
@@ -289,6 +309,7 @@ impl Core {
                 },
             );
         }
+        drop(publication);
         match self
             .work_on_project_builder(&workspace_id, &base, entry, builder, actor)
             .await
@@ -390,8 +411,58 @@ impl Core {
         };
         self.build(workspace, revision, &draft.id, actor).await
     }
+    /// The Explorer catalog describes disk, never the saved revision's layout.
+    /// Fingerprints only avoid repeating Python analysis; every call reads disk.
+    pub async fn project_source_catalog(
+        &self,
+        workspace: &str,
+        revision: &str,
+        fingerprint: Option<&str>,
+    ) -> Result<Value> {
+        let directory = {
+            let all = self.workspaces.lock().await;
+            let ws = all
+                .get(workspace)
+                .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+            if !ws.stored.revisions.contains_key(revision) {
+                return Err(Error::domain("REVISION_CONFLICT", "Unknown revision"));
+            }
+            ws.stored
+                .project
+                .as_ref()
+                .map(|binding| binding.directory.clone())
+        };
+        if let Some(directory) = directory {
+            let sources = Self::catalog_sources(directory).await?;
+            let observed = crate::hash(&serde_json::to_string(&sources)?);
+            if fingerprint == Some(observed.as_str()) {
+                return Ok(json!({"unchanged":true,"fingerprint":observed}));
+            }
+            let mut index = self
+                .entry_analysis_request("index_sources", json!({"sources":sources}))
+                .await?;
+            // Preview the exact disk text that was indexed, including new files.
+            if let Some(files) = index["files"].as_array_mut() {
+                for file in files {
+                    if let Some(source) = file["path"].as_str().and_then(|path| sources.get(path)) {
+                        file["source"] = json!(source);
+                    }
+                }
+            }
+            index["fingerprint"] = json!(observed);
+            return Ok(index);
+        }
+        self.index_project_sources(workspace, revision).await
+    }
     pub async fn index_project_folder(&self, directory: PathBuf) -> Result<Value> {
-        let sources = tokio::task::spawn_blocking(move || -> Result<_> {
+        let sources = Self::catalog_sources(directory).await?;
+        self.entry_analysis_request("index_sources", json!({"sources":sources}))
+            .await
+    }
+    async fn catalog_sources(
+        directory: PathBuf,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        tokio::task::spawn_blocking(move || -> Result<_> {
             let root = directory.canonicalize()?;
             let mut sources = std::collections::BTreeMap::new();
             let mut total = 0;
@@ -414,12 +485,14 @@ impl Core {
                     })?,
                 );
             }
+            sources.retain(|_, source| {
+                !source.starts_with("# Generated Cadpad entry point.")
+                    && source.as_str() != portable::PROJECT_BROWSER_SOURCE
+            });
             Ok(sources)
         })
         .await
-        .map_err(|_| Error::domain("IO_ERROR", "Could not index project source"))??;
-        self.entry_analysis_request("index_sources", json!({"sources":sources}))
-            .await
+        .map_err(|_| Error::domain("IO_ERROR", "Could not index project source"))?
     }
     async fn entry_analysis_request(&self, method: &str, params: Value) -> Result<Value> {
         let (_send, cancel) = tokio::sync::watch::channel(false);

@@ -10,6 +10,7 @@ use builtin::{
 };
 mod files;
 mod git_status;
+mod project_watch;
 mod subscriptions;
 use agents::{
     clean_cache, complete_view, connect_activity, connect_motion, connect_view,
@@ -268,12 +269,14 @@ fn main() {
             app.manage(core);
             app.manage(files::PendingProjectFolder::default());
             app.manage(subscriptions::Subscriptions::default());
+            app.manage(project_watch::ProjectWatchers::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             initialize,
             retain_workspace_memory,
             subscriptions::disconnect_stream,
+            project_watch::connect_project_files,
             project,
             read_source,
             example,

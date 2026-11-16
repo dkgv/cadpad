@@ -2,9 +2,9 @@ import type {MessageSink} from './session-host';
 import {invoke,Channel} from '@tauri-apps/api/core';
 
 /** Detach callbacks immediately, then drop the Rust channel after registration completes. */
-export function connectNativeStream<T>(command:string,channel:Channel<T>,onError:(error:unknown)=>void){
+export function connectNativeStream<T>(command:string,channel:Channel<T>,onError:(error:unknown)=>void,args:Record<string,unknown>={}){
   let active=true;
-  const connected=invoke<void>(command,{channel}).catch(error=>{if(active)onError(error);});
+  const connected=invoke<void>(command,{...args,channel}).catch(error=>{if(active)onError(error);});
   return ()=>{
     active=false;
     channel.onmessage=()=>{};

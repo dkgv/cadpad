@@ -1,3 +1,4 @@
+import {watchProjectFiles,reconnectProjectFiles} from './project-files';
 import {connectNativeStream,messageChannel} from './native-stream';
 import {JointWizard} from './joint-wizard';
 import {createPortal} from 'react-dom';
@@ -1011,7 +1012,7 @@ export function App({host}:{host?:SessionHost}={}) {
     setBusy(true);setError('');
     try {
       const result=await invoke<Project&{cancelled?:boolean}>('save_project',{workspace,revision:project.revision,saveAs});
-      if(!result.cancelled && activeWorkspace.current===workspace)adopt(result);
+      if(!result.cancelled){reconnectProjectFiles(workspace);if(activeWorkspace.current===workspace)adopt(result);}
     }catch(e){if(activeWorkspace.current===workspace)setError(message(e));}finally{setBusy(false);}
   }
   // Bound projects write through quietly whenever the committed model changes.
@@ -1038,20 +1039,23 @@ export function App({host}:{host?:SessionHost}={}) {
   useEffect(() => {
     if(!project || !project.external_tracking){setExternal(null);return;}
     let active=true;
-    let pending=false;reviewFingerprint.current='';
+    let pending=false,again=false;reviewFingerprint.current='';
     const workspace=project.workspace_id;
     const check=async()=>{
-      if(pending)return;
+      if(pending){again=true;return;}
       pending=true;
-      try {
-        const next=await invoke<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string;layout_refreshed?:boolean}>('check_external',{workspace});
-        if(active && activeWorkspace.current===workspace){if(reviewFingerprint.current!==next.fingerprint){reviewFingerprint.current=next.fingerprint;setExternalResolutions({});}setExternal(next);if(next.layout_refreshed){resetSourceCatalogCache();const refreshed=await invoke<Project>('project',{workspace});if(active&&activeWorkspace.current===workspace)adopt(refreshed);}}
-      }catch(e){if(active)setError(message(e));}finally{pending=false;}
+      do{
+        again=false;
+        try {
+          const next=await invoke<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}>('check_external',{workspace});
+          if(active && activeWorkspace.current===workspace){if(reviewFingerprint.current!==next.fingerprint){reviewFingerprint.current=next.fingerprint;setExternalResolutions({});}setExternal(next);}
+        }catch(e){if(active)setError(message(e));}
+      }while(active&&again);
+      pending=false;
     };
-    void check();const timer=setInterval(check,2500);
-    const onFocus=()=>{void check();};
-    window.addEventListener('focus',onFocus);
-    return()=>{active=false;clearInterval(timer);window.removeEventListener('focus',onFocus);};
+    const close=watchProjectFiles(workspace,()=>{void check();},error=>{if(active)setError(message(error));});
+    void check();
+    return()=>{active=false;close();};
   },[project?.workspace_id,project?.revision,project?.saved_revision,project?.external_tracking]);
   function prepareMotionTest(intent:string,id?:string){
     const request=(id?`Edit the saved CAD requirement with ID ${id}. List saved requirements and inspect its existing definition first.\n`:'Create a saved CAD requirement from this free-text requirement:\n')+intent+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';

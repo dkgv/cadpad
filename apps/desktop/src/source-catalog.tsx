@@ -2,17 +2,20 @@ import React,{useEffect,useMemo,useRef,useState,useSyncExternalStore} from 'reac
 import {invoke} from '@tauri-apps/api/core';
 import {Icon,errorSummary} from './ui';
 import {SourcePreview} from './source-preview';
+import {watchProjectFiles} from './project-files';
 
 export type Builder={id:string;label:string;available:boolean;reason:string;line:number;kind?:'geometry_candidate'|'part'|'assembly'|'function'};
-export type SourceFile={path:string;description:string;builders:Builder[];diagnostic:string|null;recommended?:string|null};
+export type SourceFile={path:string;description:string;builders:Builder[];diagnostic:string|null;recommended?:string|null;source?:string};
 export type IndexedModel={file:SourceFile;builder:Builder};
-const indexes=new Map<string,Promise<{files:SourceFile[]}>>();
+type SourceIndex={files:SourceFile[];fingerprint?:string};
+const indexes=new Map<string,Promise<SourceIndex>>();
+const refreshing=new Map<string,{promise:Promise<SourceIndex>;reading:boolean;dirty:boolean}>();
 const locations=new Map<string,string>();
 const listeners=new Set<()=>void>();
 let epoch=0;
 function subscribe(listener:()=>void){listeners.add(listener);return()=>{listeners.delete(listener);};}
 export function useSourceCatalogEpoch(){return useSyncExternalStore(subscribe,()=>epoch);}
-export function resetSourceCatalogCache(){indexes.clear();locations.clear();epoch+=1;for(const listener of listeners)listener();}
+export function resetSourceCatalogCache(){indexes.clear();refreshing.clear();locations.clear();epoch+=1;for(const listener of listeners)listener();}
 export function loadSourceIndex(requestId?:string,workspace?:string,revision?:string){
   const key=JSON.stringify([requestId,workspace,revision]);
   let request=indexes.get(key);
@@ -24,6 +27,34 @@ export function loadSourceIndex(requestId?:string,workspace?:string,revision?:st
     indexes.set(key,request);
   }
   return request;
+}
+export function refreshSourceIndex(requestId?:string,workspace?:string,revision?:string){
+  const key=JSON.stringify([requestId,workspace,revision]);
+  const pending=refreshing.get(key);
+  if(pending){if(pending.reading)pending.dirty=true;return pending.promise;}
+  const state={promise:null as unknown as Promise<SourceIndex>,reading:false,dirty:false};
+  state.promise=(async()=>{
+    let result:SourceIndex;
+    do{
+      state.dirty=false;
+      const cached=indexes.get(key);
+      const previous=await cached?.catch(()=>undefined);
+      state.reading=true;
+      const next=await invoke<SourceIndex&{unchanged?:boolean}>('project_source_index',{requestId,workspace,revision,fingerprint:previous?.fingerprint});
+      state.reading=false;
+      if(next.unchanged&&previous)result=previous;
+      else{
+        if(!Array.isArray(next.files))throw new Error('Project index is unavailable');
+        result=next;
+        // A project switch or explicit reset may have invalidated this request.
+        if(indexes.get(key)===cached){
+          indexes.set(key,Promise.resolve(result));epoch+=1;for(const listener of listeners)listener();
+        }
+      }
+    }while(state.dirty&&refreshing.get(key)===state);
+    return result;
+  })().finally(()=>{if(refreshing.get(key)===state)refreshing.delete(key);});
+  refreshing.set(key,state);return state.promise;
 }
 export function modelCaption(builder:Builder){
   return builder.id.split(':')[0].replace(/_/g,' ').replace(/^./,letter=>letter.toUpperCase());
@@ -105,24 +136,31 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
     return()=>{active=false;};
   },[requestId,workspace,revision,attempt,catalogEpoch]);
   useEffect(()=>{
+    if(!workspace)return;
+    let active=true;
+    const refresh=()=>{void refreshSourceIndex(requestId,workspace,revision).then(()=>{if(active)setError('');}).catch(error=>{if(active)setError(errorSummary(JSON.stringify(error)));});};
+    const close=watchProjectFiles(workspace,refresh,error=>{if(active)setError(errorSummary(JSON.stringify(error)));});
+    return()=>{active=false;close();};
+  },[requestId,workspace,revision]);
+  useEffect(()=>{
     if(!workspace||!showGit){gitProject.current='';setGitEntries(current=>current.length?[]:current);return;}
     if(gitProject.current!==workspace){gitProject.current=workspace;setGitEntries(current=>current.length?[]:current);}
     if(compact&&!visible)return;
-    let active=true,pending=false;
+    let active=true,pending=false,again=false;
     const load=()=>{
-      if(pending)return;pending=true;
+      if(pending){again=true;return;}pending=true;again=false;
       invoke<unknown>('project_git_status',{workspace}).then(value=>{
         if(!active)return;
         const status=readGitStatus(value);if(!status)return;
         const next=status.repo?status.entries:[];
         setGitEntries(current=>sameEntries(current,next)?current:next);
-      }).catch(()=>undefined).finally(()=>{pending=false;});
+      }).catch(()=>undefined).finally(()=>{pending=false;if(active&&again)load();});
     };
     load();
-    const timer=window.setInterval(load,4000);
-    window.addEventListener('focus',load);
-    return()=>{active=false;window.clearInterval(timer);window.removeEventListener('focus',load);};
+    const close=watchProjectFiles(workspace,load);
+    return()=>{active=false;close();};
   },[workspace,revision,showGit,compact,visible]);
+  useEffect(()=>{setSourcePath(path=>path&&files.some(file=>file.path===path)?path:null);},[files]);
   const highlighted=openingModel??activeModel;
   useEffect(()=>{
     if(!compact||!highlighted)return;
@@ -170,7 +208,7 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
     const name=file.path.split('/').at(-1)!,change=showGit?fileGit(file.path,git):undefined,mark=gitMark(change);
     return <li key={file.path}>{compact?<button type="button" className={`library-file-link${mark?` ${mark}`:''}`} aria-current={activeModel?.entry===file.path?'true':undefined} title={file.path} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined} onClick={()=>setSourcePath(file.path)}><Icon name="file" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</button>:<details open={!!search}><summary className={mark||undefined} title={change?`${file.description} · ${GIT_LABEL[change]}`:file.description} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</summary>{file.diagnostic&&<p role="status">{file.diagnostic}</p>}<ul>{[...file.builders].sort((a,b)=>byName(a.label,b.label)||byName(a.id,b.id)).map(builder=><li key={builder.id}><button type="button" disabled={disabled||!builder.available} title={builder.reason||`Line ${builder.line}`} onClick={()=>onChoose(file.path,builder.id)}>{builder.label}</button></li>)}</ul></details>}</li>;
   })}</ul>;
-  if(compact)return <div ref={catalog} className="source-catalog catalog-compact" aria-busy={loading}>{error?<p role="alert">{error}</p>:<nav aria-label={compactView==='models'?'Indexed models':'Project source files'}>{fileTree(tree)}{!!search&&!(compactView==='models'?groups.length:matching.length)&&<p className="muted" role="status">{compactView==='models'?'No matching models.':'No matching files.'}</p>}</nav>}{sourcePath&&workspace&&revision&&<SourcePreview workspace={workspace} revision={revision} path={sourcePath} onClose={()=>setSourcePath(null)}/>}</div>;
+  if(compact)return <div ref={catalog} className="source-catalog catalog-compact" aria-busy={loading}>{error?<p role="alert">{error}</p>:<nav aria-label={compactView==='models'?'Indexed models':'Project source files'}>{fileTree(tree)}{!!search&&!(compactView==='models'?groups.length:matching.length)&&<p className="muted" role="status">{compactView==='models'?'No matching models.':'No matching files.'}</p>}</nav>}{sourcePath&&workspace&&revision&&<SourcePreview workspace={workspace} revision={revision} path={sourcePath} source={files.find(file=>file.path===sourcePath)?.source} onClose={()=>setSourcePath(null)}/>}</div>;
   return <div className="source-catalog">
     <div className="library-toolbar"><div className="catalog-view" role="group" aria-label="Project library view"><button type="button" aria-pressed={view==='parts'} onClick={()=>{setView('parts');setLimit(60);}}>Geometry candidates</button><button type="button" aria-pressed={view==='files'} onClick={()=>setView('files')}>Files</button></div>
     <input type="search" className="explorer-search" aria-label="Search project" placeholder="Search entries…" value={query} onChange={event=>{setQuery(event.target.value);setLimit(60);}}/></div>

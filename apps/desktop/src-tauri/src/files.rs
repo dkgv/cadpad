@@ -260,6 +260,7 @@ pub async fn project_source_index(
     request_id: Option<String>,
     workspace: Option<String>,
     revision: Option<String>,
+    fingerprint: Option<String>,
 ) -> Result<Value, Value> {
     if let Some(id) = request_id {
         let directory = pending
@@ -275,13 +276,14 @@ pub async fn project_source_index(
             .await
             .map_err(error_value_owned);
     }
-    core.index_project_sources(
+    core.project_source_catalog(
         workspace
             .as_deref()
             .ok_or_else(|| dialog_error("Workspace is required"))?,
         revision
             .as_deref()
             .ok_or_else(|| dialog_error("Revision is required"))?,
+        fingerprint.as_deref(),
     )
     .await
     .map_err(error_value_owned)

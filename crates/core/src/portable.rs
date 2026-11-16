@@ -211,11 +211,10 @@ fn scan_files(
             continue;
         }
         let kind = entry.file_type()?;
+        // Unrelated links must not prevent loading regular project files.
+        // Explicit reads and writes still reject links through checked_path.
         if kind.is_symlink() {
-            return Err(Error::domain(
-                "INVALID_REQUEST",
-                "Project symlinks are not followed",
-            ));
+            continue;
         }
         if kind.is_dir() {
             scan_files(root, &entry.path(), files, sources_only, excluded)?;
@@ -582,22 +581,6 @@ pub fn read_project(directory: &Path) -> Result<Loaded> {
         let source = String::from_utf8(bytes)
             .map_err(|_| Error::domain("INVALID_REQUEST", "Python source must be UTF-8"))?;
         inputs.files.insert(path, source);
-    }
-    if !inputs.files.contains_key(&manifest.entry_point) {
-        use std::io::Write;
-        let path = checked_path(&root, &manifest.entry_point)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let source = "# Describe a part to get started.\n";
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
-        file.write_all(source.as_bytes())?;
-        inputs
-            .files
-            .insert(manifest.entry_point.clone(), source.into());
     }
     let mut blobs = BTreeMap::new();
     let mut asset_paths = Vec::new();

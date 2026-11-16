@@ -1,3 +1,4 @@
+import {watchProjectFiles} from './project-files';
 import React,{useEffect,useId,useMemo,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import type {SceneModel} from '@cadpad/viewer';
@@ -24,12 +25,18 @@ export function ProjectExplorer({workspace,revision,projectName,catalogWorkspace
   useEffect(()=>{setQuery('');setInspect(null);},[workspace]);
   useEffect(()=>{
     let active=true;
-    invoke<{files?:unknown}>('project_meshes',{workspace}).then(result=>{
-      if(!active)return;
-      const files=Array.isArray(result?.files)?result.files.filter((path):path is string=>typeof path==='string'&&path.toLowerCase().endsWith('.stl')):[];
-      setMeshes(files);
-    }).catch(()=>{if(active)setMeshes([]);});
-    return()=>{active=false;};
+    let pending=false,again=false;
+    const load=()=>{
+      if(pending){again=true;return;}pending=true;again=false;
+      invoke<{files?:unknown}>('project_meshes',{workspace}).then(result=>{
+        if(!active)return;
+        const files=Array.isArray(result?.files)?result.files.filter((path):path is string=>typeof path==='string'&&path.toLowerCase().endsWith('.stl')):[];
+        setMeshes(current=>current.length===files.length&&current.every((path,index)=>path===files[index])?current:files);
+      }).catch(()=>{if(active)setMeshes([]);}).finally(()=>{pending=false;if(active&&again)load();});
+    };
+    const close=watchProjectFiles(workspace,load);
+    load();
+    return()=>{active=false;close();};
   },[workspace,revision]);
   useEffect(()=>{
     if(!activeModel)return;

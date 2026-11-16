@@ -400,23 +400,6 @@ impl Core {
         // Cache maintenance cannot invalidate authoritative recovery if a cache
         // directory is unreadable. Explicit maintenance still reports the error.
         let _ = core.collect_cache().await;
-        // Recent projects otherwise reopen the directory tree from the first
-        // visit. A missing folder must not block startup.
-        let bound = {
-            let workspaces = core.workspaces.lock().await;
-            workspaces
-                .iter()
-                .filter(|(_, ws)| {
-                    ws.stored.model_parent.is_none()
-                        && ws.stored.python_origin.is_none()
-                        && ws.stored.project.is_some()
-                })
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>()
-        };
-        for id in bound {
-            let _ = core.scan_external_changes(&id).await;
-        }
         Ok(core)
     }
     async fn persist(&self, stored: &StoredWorkspace) -> Result<()> {

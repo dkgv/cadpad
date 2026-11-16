@@ -2695,3 +2695,32 @@ test('selecting another Explorer model cancels the one that is still opening',as
   await act(async()=>resolvers.get('stringer')());await flush(20);
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Stringer');
 });
+
+test('filesystem notifications refresh Explorer meshes and external review through a shared watch',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.project.external_tracking=true;
+  let changed=false,sourceReads=0,externalReads=0;
+  const watches=[];
+  harness.invoke=async(command,args)=>{
+    if(command==='connect_project_files'){watches.push(args.channel);return;}
+    if(command==='project_source_index'){
+      sourceReads++;
+      const fingerprint=changed?'new':'old';
+      return args.fingerprint===fingerprint?{unchanged:true,fingerprint}:{fingerprint,files:[{path:changed?'new/added.py':'old.py',source:'# disk source\n',description:'',diagnostic:null,builders:[]}]};
+    }
+    if(command==='project_meshes')return {files:changed?['new.stl']:['old.stl']};
+    if(command==='project_git_status')return {repo:false,entries:[]};
+    if(command==='check_external'){externalReads++;return {changed,fingerprint:changed?'new':'old',changes:changed?{'new/added.py':'added'}:{}};}
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(20);
+  assert.equal(watches.length,1,'Explorer, mesh listings and external review share a workspace stream');
+  const before=sourceReads,checks=externalReads;
+  changed=true;
+  await act(async()=>watches[0].onmessage({kind:'changed'}));await flush(20);
+  assert.ok(sourceReads>before);assert.ok(externalReads>checks);
+  assert.ok(document.querySelector('[aria-label="Review files changed outside Cadpad"]'));
+  assert.ok([...document.querySelectorAll('.library-file-link')].some(row=>row.title==='new/added.py'));
+  const text=document.getElementById('panel-model').textContent;
+  assert.match(text,/new.stl/);assert.doesNotMatch(text,/old.stl/);
+});

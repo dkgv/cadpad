@@ -9,13 +9,14 @@ import React,{act} from 'react';
 
 test('source candidates use generic labels and shared Explorer sections',async()=>{
  const directory=await mkdtemp(path.join(process.cwd(),'target/index-ui-'));
- const result=await build({stdin:{contents:"export {SourceCatalog,indexGit,fileGit,folderGit} from './source-catalog';export {ProjectExplorer} from './explorer';export {SidebarSections} from './sidebar-sections';export {QuickModelSelector} from './quick-model';",resolveDir:new URL('../src/',import.meta.url).pathname,loader:'tsx'},bundle:true,format:'esm',platform:'node',write:false,external:['react','react-dom'],plugins:[{name:'native-fixture',setup(builder){builder.onResolve({filter:/^@tauri-apps\/api\/core$/},()=>({path:'native',namespace:'fixture'}));builder.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export const invoke=(...args)=>globalThis.__indexInvoke(...args);',loader:'js'}));}}]});
+ const result=await build({stdin:{contents:"export {SourceCatalog,indexGit,fileGit,folderGit} from './source-catalog';export {ProjectExplorer} from './explorer';export {SidebarSections} from './sidebar-sections';export {QuickModelSelector} from './quick-model';",resolveDir:new URL('../src/',import.meta.url).pathname,loader:'tsx'},bundle:true,format:'esm',platform:'node',write:false,external:['react','react-dom'],plugins:[{name:'native-fixture',setup(builder){builder.onResolve({filter:/^@tauri-apps\/api\/core$/},()=>({path:'native',namespace:'fixture'}));builder.onLoad({filter:/.*/,namespace:'fixture'},()=>({contents:'export const invoke=(...args)=>globalThis.__indexInvoke(...args);export class Channel{id=++globalThis.__indexChannels;onmessage=()=>{};}',loader:'js'}));}}]});
  const file=path.join(directory,'catalog.mjs');await writeFile(file,result.outputFiles[0].text);
  const dom=new JSDOM('<div id="root"></div>',{url:'https://cadpad.test'});
  for(const key of ['window','document','navigator','HTMLElement','Node','Event','MouseEvent','KeyboardEvent'])Object.defineProperty(globalThis,key,{value:dom.window[key],configurable:true});
  dom.window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
  dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;};
  globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+ globalThis.__indexChannels=0;
  const calls=[],chosen=[];
  globalThis.__indexInvoke=async(...args)=>{calls.push(args);if(args[0]==='read_source')return {source:'# Python source preview\n'};if(args[0]==='project_git_status')return {repo:true,entries:[{path:'cad/brake.py',change:'modified'},{path:'zoo/nested/yoke.py',change:'untracked'},{path:'cad/fresh',change:'untracked',directory:true}]};if(args[0]==='project_meshes')return {files:[]};return {files:[{path:'zoo/nested/yoke.py',description:'Yoke',diagnostic:null,builders:[{id:'yoke',kind:'geometry_candidate',label:'yoke()',available:true,reason:'',line:2}]},{path:'cad/brake.py',description:'Brake mechanism',diagnostic:null,builders:[{id:'pin',kind:'geometry_candidate',label:'pin()',available:true,reason:'',line:6},{id:'brake_body',kind:'geometry_candidate',label:'brake_body()',available:true,reason:'',line:4},{id:'shoe',kind:'geometry_candidate',label:'shoe(size)',available:false,reason:'Requires arguments: size',line:8}]},{path:'cad/axle.py',description:'Axle',diagnostic:null,builders:[{id:'axle',kind:'geometry_candidate',label:'axle()',available:true,reason:'',line:3}]}]};};
  const {createRoot}=await import('react-dom/client');const {SourceCatalog,ProjectExplorer,SidebarSections,QuickModelSelector,indexGit,fileGit,folderGit}=await import(pathToFileURL(file));const root=createRoot(document.getElementById('root'));
@@ -28,7 +29,7 @@ test('source candidates use generic labels and shared Explorer sections',async()
  assert.equal(fileGit('other.py',inherited),undefined);
  try{
   await act(async()=>root.render(React.createElement(SourceCatalog,{workspace:'ws',revision:'r1',onChoose:(...args)=>chosen.push(args)})));
-  assert.equal(calls.length,1);assert.equal(calls[0][0],'project_source_index');
+  assert.equal(calls.filter(([command])=>command==='project_source_index').length,1);
   assert.match(document.querySelector('.library-inference').textContent,/inferred from source/);
   assert.doesNotMatch(document.body.textContent,/detected parts|parts and assemblies|Assembly|Component/);
 
@@ -202,6 +203,49 @@ test('source candidates use generic labels and shared Explorer sections',async()
   await act(async()=>document.querySelector('.quick-model-row').click());
   assert.deepEqual(quickChosen,[['cad/brake.py','pin']]);
   assert.equal(calls.filter(call=>call[0]==='project_source_index').length,1,'quick open reuses the shared source index');
+
+  // The same revision must follow disk changes in both Explorer sections.
+  const diskFile={path:'new/nested/added.py',source:'# fresh disk source\n',description:'New',diagnostic:null,builders:[{id:'added',kind:'geometry_candidate',label:'added()',available:true,reason:'',line:1}]};
+  const diskCalls=[];let fingerprint='disk-1',hold=false,release;
+  globalThis.__indexInvoke=async(command,args)=>{
+    diskCalls.push([command,args]);
+    if(command==='project_source_index'){const result=args.fingerprint===fingerprint?{unchanged:true,fingerprint}:{files:[{...diskFile}],fingerprint};return hold?new Promise(resolve=>{release=()=>resolve(result);}):result;}
+    if(command==='connect_project_files'||command==='disconnect_stream')return;
+    if(command==='project_meshes')return {files:[]};
+    if(command==='project_git_status')return {repo:false,entries:[]};
+    throw new Error('Preview should use the indexed disk text');
+  };
+  const timers=new Map();let timerId=0;
+  const realInterval=window.setInterval,realClear=window.clearInterval;
+  window.setInterval=(callback,ms)=>{const id=++timerId;timers.set(id,{callback,ms});return id;};
+  window.clearInterval=id=>timers.delete(id);
+  try{
+    await act(async()=>root.render(React.createElement(ProjectExplorer,explorer)));
+    await act(async()=>window.dispatchEvent(new window.Event('focus')));
+    assert.deepEqual([...document.querySelectorAll('[aria-label="Project source files"] .library-file-link')].map(row=>row.title),['new/nested/added.py']);
+    assert.deepEqual([...document.querySelectorAll('[aria-label="Indexed models"] .library-part-link')].map(row=>row.textContent),['Added']);
+    assert.equal(diskCalls.filter(([command])=>command==='project_source_index').length,1,'Models and Files share an in-flight refresh');
+    await act(async()=>document.querySelector('.library-file-link').click());
+    assert.equal(document.querySelector('[aria-label="Source code"]').textContent,'# fresh disk source\n');
+    const row=document.querySelector('.library-file-link');
+    assert.equal(timers.size,0,'Explorer installs no polling intervals');
+    const watch=diskCalls.find(([command])=>command==='connect_project_files')[1].channel;
+    await act(async()=>watch.onmessage({kind:'changed'}));
+    assert.equal(document.querySelector('.library-file-link'),row,'an unchanged disk fingerprint preserves existing rows');
+    assert.ok(diskCalls.filter(([command])=>command==='project_source_index').at(-1)[1].fingerprint==='disk-1');
+    fingerprint='disk-2';diskFile.path='moved/renamed.py';diskFile.source='# edited and moved\n';
+    await act(async()=>watch.onmessage({kind:'changed'}));
+    assert.equal(document.querySelector('.library-file-link').title,'moved/renamed.py');
+    assert.equal(document.querySelector('.source-preview-dialog'),null,'a removed path closes its preview');
+    fingerprint='disk-3';hold=true;
+    await act(async()=>watch.onmessage({kind:'changed'}));
+    assert.ok(release,'a source read is in flight');
+    fingerprint='disk-4';hold=false;diskFile.path='final/added.py';
+    await act(async()=>{watch.onmessage({kind:'changed'});release();});
+    assert.equal(document.querySelector('.library-file-link').title,'final/added.py','a change arriving during a read triggers another read instead of being lost');
+
+  }finally{window.setInterval=realInterval;window.clearInterval=realClear;}
+
 
  }finally{await act(async()=>root.unmount());dom.window.close();await rm(directory,{recursive:true,force:true});delete globalThis.__indexInvoke;}
 });

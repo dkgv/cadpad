@@ -564,3 +564,63 @@ async fn browsing_a_model_in_the_original_workspace_does_not_mark_user_content_u
         false
     );
 }
+
+#[tokio::test]
+async fn opening_a_new_disk_model_uses_disk_sources_without_changing_project_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("design");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("original.py"), "# original source\n").unwrap();
+    portable::initialize_project_browser(&root).unwrap();
+    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
+    let project = core.open_project(root.clone(), "user").await.unwrap();
+    std::fs::create_dir(root.join("new")).unwrap();
+    let source = "import cadquery as cq\ndef plate(): return cq.Workplane().box(2,3,4)\n";
+    std::fs::write(root.join("new/geometry.py"), source).unwrap();
+    std::fs::remove_file(root.join("original.py")).unwrap();
+    let (view, job) = core
+        .open_project_model(
+            &project.workspace_id,
+            &project.base_revision,
+            "new/geometry.py",
+            "plate",
+            "user",
+        )
+        .await
+        .unwrap();
+    assert_eq!(done(&core, &view, job).await.state, JobState::Succeeded);
+    let model = core.get_project(&view).await.unwrap();
+    assert_eq!(
+        model["model"]["parts"][0]["bounds"]["size"],
+        serde_json::json!([2.0, 3.0, 4.0])
+    );
+    assert_eq!(
+        core.read_source(
+            &view,
+            model["revision"].as_str().unwrap(),
+            "new/geometry.py"
+        )
+        .await
+        .unwrap()["source"],
+        source
+    );
+    assert!(!core.model_source_dirty(&view).await);
+    assert!(
+        core.read_source(&project.workspace_id, &project.base_revision, "original.py")
+            .await
+            .is_ok()
+    );
+    assert!(
+        core.read_source(
+            &project.workspace_id,
+            &project.base_revision,
+            "new/geometry.py"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("new/geometry.py")).unwrap(),
+        source
+    );
+}
