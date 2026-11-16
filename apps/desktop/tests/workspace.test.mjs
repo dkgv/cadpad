@@ -520,6 +520,26 @@ test('agent settings lists provider models and saves the selected one',async()=>
   assert.equal(harness.calls.findLast(([name])=>name==='configure_agent')[1].model,'gpt-5.6-sol-xhigh');
 });
 
+test('OpenCode settings discovers models and saves a custom variant',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_settings')return {provider:'opencode_cli',backend:'opencode_cli',model:'',configured:true,credential_storage:'local_cli',bridge_available:true,cli:[{backend:'opencode_cli',installed:true,authenticated:true,detail:'Models available'}]};
+    if(command==='agent_models'){harness.calls.push([command,args]);return [{id:'openrouter/openai/test',label:'openrouter/openai/test'}];}
+    if(command==='configure_agent'){harness.calls.push([command,args]);return {provider:args.backend,backend:args.backend,model:args.model,configured:true,bridge_available:true};}
+    return original(command,args);
+  };
+  await act(async()=>harness.menu.onmessage('settings'));await flush(30);
+  assert.equal(document.querySelector('.provider-settings select').value,'opencode_cli');
+  assert.ok(harness.calls.some(([name,args])=>name==='agent_models'&&args.backend==='opencode_cli'));
+  assert.deepEqual([...document.querySelector('[aria-label="Model"]').options].map(option=>option.value),['','openrouter/openai/test','__custom__']);
+  await setValue(document.querySelector('[aria-label="Model"]'),'__custom__','change');
+  await setValue(document.querySelector('[aria-label="Model ID"]'),'openrouter/openai/test#high');
+  await click(button('Save settings'));await flush();
+  const saved=harness.calls.findLast(([name])=>name==='configure_agent')[1];
+  assert.equal(saved.backend,'opencode_cli');
+  assert.equal(saved.model,'openrouter/openai/test#high');
+});
+
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 const agentTurn=(id,workspace_id,state='running')=>({id,workspace_id,state,text:'',activity:'Connecting to the model',error:null,artifacts:[]});
 async function submitPrompt(text){if(document.getElementById('panel-assistant').hidden)await click(document.getElementById('tab-assistant'));await setValue(document.getElementById('model-prompt'),text);await act(async()=>{document.querySelector('.prompt-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));});}

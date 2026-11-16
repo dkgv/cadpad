@@ -1,4 +1,4 @@
-//! Headless Claude / Codex / Cursor CLIs as subscription-backed agent hosts.
+//! Headless Claude / Codex / Cursor / OpenCode CLIs as agent hosts.
 //! Cadpad supplies tools through the existing MCP bridge; the CLI owns the loop.
 use cadpad_core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,8 @@ pub enum Backend {
     ClaudeCli,
     CodexCli,
     CursorCli,
+    #[serde(rename = "opencode_cli")]
+    OpenCodeCli,
 }
 impl Default for Backend {
     fn default() -> Self {
@@ -34,6 +36,7 @@ impl Backend {
             Self::ClaudeCli => "claude_cli",
             Self::CodexCli => "codex_cli",
             Self::CursorCli => "cursor_cli",
+            Self::OpenCodeCli => "opencode_cli",
         }
     }
     pub fn label(self) -> &'static str {
@@ -42,6 +45,7 @@ impl Backend {
             Self::ClaudeCli => "Claude Code CLI",
             Self::CodexCli => "Codex CLI",
             Self::CursorCli => "Cursor CLI",
+            Self::OpenCodeCli => "OpenCode CLI",
         }
     }
     pub fn is_cli(self) -> bool {
@@ -53,9 +57,10 @@ impl Backend {
             "claude_cli" | "claude" => Ok(Self::ClaudeCli),
             "codex_cli" | "codex" => Ok(Self::CodexCli),
             "cursor_cli" | "cursor" => Ok(Self::CursorCli),
+            "opencode_cli" | "opencode" => Ok(Self::OpenCodeCli),
             _ => Err(Error::domain(
                 "INVALID_PARAMETER",
-                "Choose Anthropic API, Claude CLI, Codex CLI, or Cursor CLI",
+                "Choose Anthropic API, Claude CLI, Codex CLI, Cursor CLI, or OpenCode CLI",
             )),
         }
     }
@@ -82,6 +87,7 @@ fn candidates(backend: Backend) -> &'static [&'static str] {
         Backend::ClaudeCli => &["claude"],
         Backend::CodexCli => &["codex"],
         Backend::CursorCli => &["cursor-agent", "agent"],
+        Backend::OpenCodeCli => &["opencode"],
         Backend::AnthropicApi => &[],
     }
 }
@@ -103,10 +109,18 @@ async fn which(name: &str) -> Option<PathBuf> {
 }
 
 async fn run_status(binary: &Path, args: &[&str]) -> Option<(bool, String)> {
+    run_status_at(binary, args, None).await
+}
+
+async fn run_status_at(binary: &Path, args: &[&str], directory: Option<&Path>) -> Option<(bool, String)> {
+    let mut command = Command::new(binary);
+    command.args(args);
+    if let Some(directory) = directory {
+        command.current_dir(directory).env("PWD", directory);
+    }
     let output = tokio::time::timeout(
         Duration::from_secs(15),
-        Command::new(binary)
-            .args(args)
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -186,18 +200,32 @@ pub async fn detect(backend: Backend) -> Detection {
                 detection.detail = "Run `agent login` to use your Cursor subscription".into();
             }
         }
+        Backend::OpenCodeCli => {
+            let version = run_status(&binary, &["--version"]).await;
+            if !version.is_some_and(|(ok, text)| ok && opencode_v2(&text)) {
+                detection.detail = "Install OpenCode 2 or newer to use it from Cadpad".into();
+            } else if !opencode_models(&binary).await.is_empty() {
+                // OpenCode can use saved accounts, environment credentials, local
+                // providers, or free models; auth-list alone is not a readiness check.
+                detection.authenticated = true;
+                detection.detail = "Models available through your OpenCode configuration".into();
+            } else {
+                detection.detail = "Configure a provider with `opencode auth login`, then check `opencode models`".into();
+            }
+        }
         Backend::AnthropicApi => {}
     }
     detection
 }
 
 pub async fn detect_all() -> Vec<Detection> {
-    let (claude, codex, cursor) = tokio::join!(
+    let (claude, codex, cursor, opencode) = tokio::join!(
         detect(Backend::ClaudeCli),
         detect(Backend::CodexCli),
-        detect(Backend::CursorCli)
+        detect(Backend::CursorCli),
+        detect(Backend::OpenCodeCli)
     );
-    vec![claude, codex, cursor]
+    vec![claude, codex, cursor, opencode]
 }
 
 pub struct LaunchRequest<'a> {
@@ -224,7 +252,7 @@ pub fn valid_model_id(model: &str) -> bool {
         && !model.starts_with('-')
         && model.chars().all(|char| {
             char.is_ascii_alphanumeric()
-                || matches!(char, '.' | '_' | '-' | ':' | '@' | '/' | '+' | '=' | '[' | ']' | ',')
+                || matches!(char, '.' | '_' | '-' | ':' | '@' | '/' | '+' | '=' | '[' | ']' | ',' | '#' | '~' | '%')
         })
 }
 
@@ -242,6 +270,7 @@ pub fn legacy_default_model(model: &str) -> bool {
             Backend::ClaudeCli,
             Backend::CodexCli,
             Backend::CursorCli,
+            Backend::OpenCodeCli,
         ]
         .into_iter()
         .any(|backend| backend.label() == model)
@@ -259,6 +288,34 @@ pub fn parse_cursor_models(text: &str) -> Vec<ModelChoice> {
         models.push(ModelChoice { id: id.to_string(), label: label.to_string() });
     }
     models
+}
+
+fn opencode_v2(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        word.trim_start_matches('v').split_once('.')
+            .is_some_and(|(major, _)| major.parse::<u32>().is_ok_and(|major| major >= 2))
+    })
+}
+
+/// `opencode models` emits one provider/model[#variant] id per line.
+pub fn parse_opencode_models(text: &str) -> Vec<ModelChoice> {
+    let mut models: Vec<ModelChoice> = Vec::new();
+    for id in text.lines().map(str::trim) {
+        if !valid_model_id(id)
+            || !id.split_once('/').is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
+            || models.iter().any(|model| model.id == id)
+        { continue; }
+        models.push(ModelChoice { id: id.into(), label: id.into() });
+    }
+    models
+}
+
+async fn opencode_models(binary: &Path) -> Vec<ModelChoice> {
+    // Match the isolated launch directory while retaining the user's global
+    // OpenCode configuration and authentication.
+    run_status_at(binary, &["models", "--standalone"], Some(&std::env::temp_dir()))
+        .await.filter(|(ok, _)| *ok)
+        .map(|(_, text)| parse_opencode_models(&text)).unwrap_or_default()
 }
 
 pub fn parse_codex_models(value: &Value) -> Vec<ModelChoice> {
@@ -357,6 +414,7 @@ pub async fn list_models(backend: Backend) -> Vec<ModelChoice> {
         Backend::CursorCli => {
             run_status(&binary, &["--list-models"]).await.map(|(_, text)| parse_cursor_models(&text)).unwrap_or_default()
         }
+        Backend::OpenCodeCli => opencode_models(&binary).await,
         Backend::AnthropicApi => Vec::new(),
     }
 }
@@ -522,6 +580,22 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                 .kill_on_drop(true)
                 .spawn()
         }
+        Backend::OpenCodeCli => {
+            let config = opencode_config(request.bridge, request.client_name, &system);
+            Command::new(&binary)
+                .current_dir(&work_dir)
+                .env("PWD", &work_dir)
+                .env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&config)?)
+                .args(["run", "--standalone", "--format", "json", "--thinking", "--agent", "cadpad"])
+                .args(model_args)
+                .arg("--")
+                .arg(request.prompt)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+        }
         Backend::AnthropicApi => {
             return Err(Error::domain(
                 "INVALID_REQUEST",
@@ -536,6 +610,27 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
         )
     })?;
     Ok(Launch { child, work_dir })
+}
+
+/// OpenCode v2 configuration is scoped to this process. The dedicated agent
+/// exposes Cadpad tools directly and prevents shell/file edits bypassing MCP.
+fn opencode_config(bridge: &Bridge, client_name: &str, system: &str) -> Value {
+    json!({
+        "mcp": {"servers": {"cadpad": {
+            "type": "local",
+            "command": [bridge.mcp_executable, "--connection", bridge.connection_file, "--client-name", client_name],
+            "codemode": false
+        }}},
+        "agents": {"cadpad": {
+            "description": "Edit the active Cadpad document through MCP",
+            "mode": "primary",
+            "system": system,
+            "permissions": [
+                {"action": "*", "resource": "*", "effect": "deny"},
+                {"action": "cadpad_*", "resource": "*", "effect": "allow"}
+            ]
+        }}
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -564,7 +659,7 @@ pub enum StreamEvent {
 /// Normalizes `mcp__cadpad__build`, `cadpad-build` and similar to `build`.
 pub fn tool_name(raw: &str) -> String {
     let raw = raw.trim();
-    for prefix in ["mcp__cadpad__", "cadpad-", "cadpad__", "cadpad."] {
+    for prefix in ["mcp__cadpad__", "cadpad-", "cadpad__", "cadpad.", "cadpad_"] {
         if let Some(rest) = raw.strip_prefix(prefix) {
             return rest.to_string();
         }
@@ -607,6 +702,7 @@ impl StreamParser {
             Some(Backend::ClaudeCli) => self.claude(&value),
             Some(Backend::CursorCli) => self.cursor(&value),
             Some(Backend::CodexCli) => codex(&value),
+            Some(Backend::OpenCodeCli) => opencode(&value),
             _ => vec![],
         }
     }
@@ -868,6 +964,34 @@ fn codex(value: &Value) -> Vec<StreamEvent> {
     }
 }
 
+fn opencode(value: &Value) -> Vec<StreamEvent> {
+    let part = &value["part"];
+    match value["type"].as_str().unwrap_or("") {
+        "text" => part["text"].as_str()
+            .map(|text| vec![StreamEvent::Text(text.into()), StreamEvent::TextBreak])
+            .unwrap_or_default(),
+        "reasoning" => part["text"].as_str()
+            .map(|text| vec![StreamEvent::Thinking(text.into()), StreamEvent::ThinkingDone])
+            .unwrap_or_default(),
+        "tool_use" => {
+            let id = part["callID"].as_str().or_else(|| part["id"].as_str()).map(str::to_string);
+            let name = tool_name(part["tool"].as_str().unwrap_or("tool"));
+            let status = part["state"]["status"].as_str().unwrap_or("");
+            if !matches!(status, "completed" | "error") { return vec![]; }
+            // OpenCode reports tools only after completion. Emit the pair so
+            // the chat still records the call and its outcome.
+            vec![
+                StreamEvent::ToolStarted { id: id.clone(), name: name.clone(), detail: None },
+                StreamEvent::ToolFinished { id, name, error: status == "error" },
+            ]
+        }
+        // A step is one model invocation; tool-calls finishes are not terminal.
+        // Wait for EOF and the exit code even after a final stop, so later
+        // errors or background work cannot be mistaken for success.
+        _ => vec![],
+    }
+}
+
 /// One-line convenience for callers that only need the first event of a line.
 pub fn parse_line(backend: Backend, line: &str) -> Option<StreamEvent> {
     StreamParser::new(backend).parse(line).into_iter().next()
@@ -899,6 +1023,15 @@ pub async fn drive(
             };
             match next {
                 Ok(Some(line)) => {
+                    if backend == Backend::OpenCodeCli
+                        && let Ok(value) = serde_json::from_str::<Value>(&line)
+                        && value["type"] == "error"
+                    {
+                        let message = value["error"]["message"].as_str()
+                            .or_else(|| value["error"]["data"]["message"].as_str())
+                            .unwrap_or("OpenCode could not complete the turn");
+                        return Err(Error::domain("LLM_UNAVAILABLE", message));
+                    }
                     for event in parser.parse(&line) {
                         if matches!(event, StreamEvent::Done) { done = true; }
                         on_event(event);

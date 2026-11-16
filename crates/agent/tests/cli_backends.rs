@@ -8,6 +8,7 @@ fn backend_labels_round_trip() {
         Backend::ClaudeCli,
         Backend::CodexCli,
         Backend::CursorCli,
+        Backend::OpenCodeCli,
     ] {
         assert_eq!(Backend::parse(backend.as_str()).unwrap(), backend);
     }
@@ -139,12 +140,134 @@ fn tool_names_drop_cadpad_prefixes() {
     assert_eq!(tool_name("mcp__cadpad__build"), "build");
     assert_eq!(tool_name("cadpad-get_project"), "get_project");
     assert_eq!(tool_name("inspect"), "inspect");
+    assert_eq!(tool_name("cadpad_get_project"), "get_project");
+}
+
+#[test]
+fn opencode_catalog_keeps_provider_ids_nested_models_and_variants() {
+    use cadpad_agent::cli::{parse_opencode_models, selected_model};
+    let models = parse_opencode_models("Available models\nopenai/gpt-test\nopenrouter/~openai/gpt-test#high\nopenai/gpt-test\n--flag/model\nprovider/\n/model\nprovider/bad model\n");
+    assert_eq!(models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+        ["openai/gpt-test", "openrouter/~openai/gpt-test#high"]);
+    assert_eq!(selected_model("openai/gpt-test#high"), "openai/gpt-test#high");
+    assert_eq!(Backend::parse("opencode").unwrap(), Backend::OpenCodeCli);
+    assert_eq!(serde_json::to_value(Backend::OpenCodeCli).unwrap(), "opencode_cli");
+}
+
+#[test]
+fn opencode_steps_do_not_end_the_turn_and_completed_tools_are_recorded() {
+    let events = run(Backend::OpenCodeCli, &[
+        json!({"type":"reasoning","part":{"text":"Checking geometry"}}),
+        json!({"type":"tool_use","part":{"id":"call1","tool":"cadpad_get_project","state":{"status":"completed"}}}),
+        json!({"type":"step_finish","part":{"reason":"tool-calls"}}),
+        json!({"type":"tool_use","part":{"callID":"call2","tool":"cadpad_build","state":{"status":"error"}}}),
+        json!({"type":"text","part":{"text":"Build needs repair."}}),
+        json!({"type":"step_finish","part":{"reason":"stop"}}),
+    ]);
+    assert_eq!(text(&events), "Build needs repair.|");
+    assert!(events.contains(&StreamEvent::Thinking("Checking geometry".into())));
+    assert!(events.contains(&StreamEvent::ToolStarted { id: Some("call1".into()), name: "get_project".into(), detail: None }));
+    assert!(events.contains(&StreamEvent::ToolFinished { id: Some("call2".into()), name: "build".into(), error: true }));
+    assert!(!events.contains(&StreamEvent::Done));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn opencode_protocol_errors_fail_even_with_a_successful_exit() {
+    let (_directory, launch) = stalled_cli(r#"printf '%s\n' '{"type":"error","error":{"type":"unknown","message":"Model unavailable"}}'"#).await;
+    let path = launch.work_dir.clone();
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    let error = cadpad_agent::cli::drive(launch, Backend::OpenCodeCli, receiver, |_| {}).await.unwrap_err();
+    assert_eq!(error.code(), "LLM_UNAVAILABLE");
+    assert!(error.to_string().contains("Model unavailable"));
+    assert!(!path.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn opencode_can_be_cancelled_between_model_steps() {
+    use std::time::Duration;
+    let (_directory, launch) = stalled_cli(r#"printf '%s\n' '{"type":"step_finish","part":{"reason":"tool-calls"}}'; exec /bin/sleep 30"#).await;
+    let path = launch.work_dir.clone();
+    let (cancel, receiver) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.send_replace(true);
+    });
+    let error = tokio::time::timeout(Duration::from_secs(2),
+        cadpad_agent::cli::drive(launch, Backend::OpenCodeCli, receiver, |_| {}))
+        .await.unwrap().unwrap_err();
+    assert_eq!(error.code(), "CANCELLED");
+    assert!(!path.exists());
+}
+
+// Isolate PATH in a subprocess so tests never launch a real model or change
+// environment variables shared by concurrent Rust tests.
+#[cfg(unix)]
+#[test]
+fn opencode_launch_connects_mcp_and_passes_default_or_explicit_models() {
+    use std::os::unix::fs::PermissionsExt;
+    const FLAG: &str = "CADPAD_OPENCODE_LAUNCH_TEST";
+    if std::env::var_os(FLAG).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("/usr/bin/which", directory.path().join("which")).unwrap();
+        let binary = directory.path().join("opencode");
+        std::fs::write(&binary, r#"#!/bin/sh
+case "$1" in
+  --version) echo 'opencode v2.2.6'; exit 0;;
+  models) echo 'test/model'; exit 0;;
+esac
+printf '%s' "$OPENCODE_CONFIG_CONTENT" > "$CADPAD_OPENCODE_CONFIG_LOG"
+printf '%s\000' "$@" > "$CADPAD_OPENCODE_ARGS_LOG"
+printf '%s\n' '{"type":"text","part":{"text":"Project checked."}}' '{"type":"step_finish","part":{"reason":"stop"}}'
+"#).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "opencode_launch_connects_mcp_and_passes_default_or_explicit_models"])
+            .env(FLAG, "1")
+            .env("PATH", directory.path())
+            .env("CADPAD_OPENCODE_CONFIG_LOG", directory.path().join("config.json"))
+            .env("CADPAD_OPENCODE_ARGS_LOG", directory.path().join("args"))
+            .status().unwrap();
+        assert!(status.success());
+        return;
+    }
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        use cadpad_agent::cli::{Bridge, LaunchRequest, drive, spawn};
+        let bridge = Bridge { mcp_executable: "/usr/bin/true".into(), connection_file: "/tmp/connection with spaces.json".into() };
+        for model in ["", "test/model#high"] {
+            let launch = spawn(LaunchRequest {
+                backend: Backend::OpenCodeCli, bridge: &bridge, workspace_id: "workspace-test",
+                project_directory: None, prompt: "--a prompt\nwith a newline", client_name: "Cadpad test", model,
+            }).await.unwrap();
+            let path = launch.work_dir.clone();
+            let (_cancel, receiver) = tokio::sync::watch::channel(false);
+            let mut events = vec![];
+            drive(launch, Backend::OpenCodeCli, receiver, |event| events.push(event)).await.unwrap();
+            assert_eq!(text(&events), "Project checked.|");
+            assert!(!path.exists());
+            let config: serde_json::Value = serde_json::from_slice(&std::fs::read(std::env::var_os("CADPAD_OPENCODE_CONFIG_LOG").unwrap()).unwrap()).unwrap();
+            assert_eq!(config["mcp"]["servers"]["cadpad"]["command"], json!(["/usr/bin/true", "--connection", "/tmp/connection with spaces.json", "--client-name", "Cadpad test"]));
+            assert_eq!(config["mcp"]["servers"]["cadpad"]["codemode"], false);
+            assert!(config["agents"]["cadpad"]["system"].as_str().unwrap().contains("workspace-test"));
+            assert_eq!(config["agents"]["cadpad"]["permissions"], json!([
+                {"action":"*","resource":"*","effect":"deny"},
+                {"action":"cadpad_*","resource":"*","effect":"allow"}
+            ]));
+            let args = std::fs::read(std::env::var_os("CADPAD_OPENCODE_ARGS_LOG").unwrap()).unwrap();
+            let args: Vec<_> = args.split(|byte| *byte == 0).filter(|arg| !arg.is_empty()).map(|arg| std::str::from_utf8(arg).unwrap()).collect();
+            assert_eq!(&args[..8], ["run", "--standalone", "--format", "json", "--thinking", "--agent", "cadpad", if model.is_empty() { "--" } else { "--model" }]);
+            assert_eq!(args.last(), Some(&"--a prompt\nwith a newline"));
+            assert_eq!(args.contains(&"--model"), !model.is_empty());
+            if !model.is_empty() { assert!(args.contains(&model)); }
+        }
+    });
 }
 
 #[tokio::test]
 async fn detects_local_cli_binaries_without_panicking() {
     let detections = cadpad_agent::cli::detect_all().await;
-    assert_eq!(detections.len(), 3);
+    assert_eq!(detections.len(), 4);
     for item in detections {
         assert!(item.backend.is_cli());
         assert!(!item.detail.is_empty());

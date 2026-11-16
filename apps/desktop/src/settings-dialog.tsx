@@ -10,6 +10,7 @@ const providers:[string,string][]=[
   ['claude_cli','Claude Code CLI'],
   ['codex_cli','Codex CLI'],
   ['cursor_cli','Cursor CLI'],
+  ['opencode_cli','OpenCode CLI'],
   ['anthropic_api','Anthropic API key'],
 ];
 
@@ -103,7 +104,7 @@ export function SettingsDialog({
         {open&&<section className="provider-settings settings-section">
           <header className="settings-section-header">
             <strong>Agent</strong>
-            <p>Use a local CLI with your existing Claude, ChatGPT/Codex, or Cursor subscription, or an Anthropic API key. CLIs talk to Cadpad through MCP.</p>
+            <p>Use Claude Code, Codex, Cursor, or OpenCode with its configured models and accounts, or an Anthropic API key. CLIs talk to Cadpad through MCP.</p>
           </header>
           <label>Provider
             <select value={agentBackend} onChange={event=>onBackend(event.target.value)}>
