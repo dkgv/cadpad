@@ -1120,7 +1120,7 @@ export function App({host}:{host?:SessionHost}={}) {
   useEffect(()=>{
     const dialog=settingsDialog.current;if(!dialog)return;
     if(providerOpen&&!dialog.open)dialog.showModal();else if(!providerOpen&&dialog.open)dialog.close();
-  },[providerOpen]);
+  },[providerOpen,host?.active,host?.chrome]);
   const scenePhase=startupError?'failed':graphicsLost?'lost':!project?'idle':viewStatus?.workspace===project.workspace_id&&viewStatus.revision===project.revision&&viewStatus.generation===project.display_generation?viewStatus.phase:'loading';
   const agentChromeStatus=agentStartCancelling?'Stopping…':agentWorking?agentTurn.activity:agentSending?'Starting request…':'';
   const projectBound=!!project&&(project.saved_revision!=null||project.external_tracking);
@@ -1267,8 +1267,8 @@ export function App({host}:{host?:SessionHost}={}) {
         />
         {!!imageDropDepth&&<div className="assistant-image-drop" aria-hidden="true">Drop image to attach</div>}
       </aside>);
-  const dialogs=(<>{error&&<AppAlert message={error} active={!host||host.active} onDismiss={()=>setError('')}/>}{externalReviewOpen&&external?.changed&&<ExternalChangesDialog changes={external.changes} conflicts={external.conflicts} resolutions={externalResolutions} busy={working} onResolve={(path,value)=>setExternalResolutions(values=>({...values,[path]:value}))} onClose={()=>setExternalReviewOpen(false)} onReload={()=>{setExternalReviewOpen(false);void run('reload_project',{fingerprint:external.fingerprint,resolutions:externalResolutions});}}/>}{project&&<QuickModelSelector open={quickModelOpen} workspace={project.workspace_id} revision={project.revision} activeEntry={host?.modelEntry?.entry} activeBuilder={host?.modelEntry?.builder} busy={host?busy||agentSending||agentWorking:working} onClose={()=>setQuickModelOpen(false)} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/>}    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}
-    <SettingsDialog
+  const dialogs=(<>{error&&<AppAlert message={error} active={!host||host.active} onDismiss={()=>setError('')}/>}{externalReviewOpen&&external?.changed&&<ExternalChangesDialog changes={external.changes} conflicts={external.conflicts} resolutions={externalResolutions} busy={working} onResolve={(path,value)=>setExternalResolutions(values=>({...values,[path]:value}))} onClose={()=>setExternalReviewOpen(false)} onReload={()=>{setExternalReviewOpen(false);void run('reload_project',{fingerprint:external.fingerprint,resolutions:externalResolutions});}}/>}{project&&<QuickModelSelector open={quickModelOpen} workspace={project.workspace_id} revision={project.revision} activeEntry={host?.modelEntry?.entry} activeBuilder={host?.modelEntry?.builder} busy={host?busy||agentSending||agentWorking:working} onClose={()=>setQuickModelOpen(false)} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/>}    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}</>);
+  const providerDialog=(<SettingsDialog
       open={providerOpen}
       dialogRef={settingsDialog}
       agentBackend={agentBackend}
@@ -1290,7 +1290,7 @@ export function App({host}:{host?:SessionHost}={}) {
       onExternalOpen={setSettingsOpen}
       onDisconnect={sessionId=>invoke('disconnect_external',{sessionId}).catch(e=>setError(message(e)))}
       onError={setError}
-    /></>);
+    />);
   if(host)return <>
     {host.chrome&&createPortal(headerBar,host.header)}
     {host.chrome&&createPortal(activityRail,host.rail)}
@@ -1300,7 +1300,7 @@ export function App({host}:{host?:SessionHost}={}) {
     {host.active&&createPortal(motionPanel('simulate'),host.tools.simulate,'simulate')}
     {host.active&&createPortal(motionPanel('test'),host.tools.test,'test')}
     {host.chrome&&createPortal(assistantPanel,host.tools.assistant)}
-    {canvasPanel}{host.active&&dialogs}
+    {canvasPanel}{host.active&&dialogs}{(host.active||host.chrome)&&providerDialog}
   </>;
   return <div className={`app ${/Mac/.test(navigator.platform)?'macos':''}`} style={{'--model-width':`${panelSizes.model}px`,'--assistant-width':`${panelSizes.assistant}px`,'--motion-width':`${panelSizes.motion}px`} as React.CSSProperties}>
     {headerBar}
@@ -1319,6 +1319,6 @@ export function App({host}:{host?:SessionHost}={}) {
       </div>
       {assistantPanel}
     </main>
-    {dialogs}
+    {dialogs}{providerDialog}
   </div>;
 }
