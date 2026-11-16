@@ -2514,7 +2514,9 @@ test('sidebar models open independent project tabs and clicking again focuses th
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Wheel','Pin','Stringer'],'tab title keeps the selected model identity even when geometry is named model');
   assert.match(document.querySelector('#panel-model .explorer-parts').textContent,/model/);
   assert.equal(document.querySelector('#panel-model .explorer-parts').closest('details'),null);
+  const loadsBeforeReturn=harness.viewer.filter(([name])=>name==='load').length;
   await choose('Wheel');
+  assert.equal(harness.viewer.filter(([name])=>name==='load').length,loadsBeforeReturn,'returning to a loaded tab reuses its rendered scene');
   assert.equal(canvasTabs().length,4);
   assert.equal(harness.calls.filter(([name])=>name==='open_project_model').length,3,'reopening a model focuses its existing tab');
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Wheel');
@@ -2620,8 +2622,8 @@ test('opening an Explorer model shows progress until its geometry finishes build
   const row=[...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent==='Stringer');
   await click(row);
   assert.equal(row.disabled,false,'the Explorer row stays clickable while the model opens');
-  assert.equal(row.getAttribute('aria-busy'),null);
-  assert.equal(document.querySelector('[aria-label="Opening Stringer"]'),null);
+  assert.equal(row.getAttribute('aria-busy'),'true');
+  assert.ok(document.querySelector('[aria-label="Opening Stringer"]'));
   assert.ok(document.querySelector('.canvas-model-opening .model-opening-spinner'),'the canvas shows loading as soon as the model is clicked');
   await click(row);
   assert.equal(allocations,1,'clicking the same model again while it is opening does not start another build');
@@ -2657,7 +2659,7 @@ test('opening an Explorer model shows progress until its geometry finishes build
 
 });
 
-test('selecting another Explorer model cancels the one that is still opening',async()=>{
+test('selecting another Explorer model preserves loading tabs and the latest selection',async()=>{
   const original=harness.invoke.bind(harness);
   const resolvers=new Map();
   const files=[{path:'cad/models.py',description:'Models',diagnostic:null,builders:['stringer','pin'].map(id=>({id,label:id+'()',kind:'geometry_candidate',available:true,reason:'',line:1}))}];
@@ -2673,27 +2675,27 @@ test('selecting another Explorer model cancels the one that is still opening',as
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
-  const row=name=>[...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent===name);
+  const row=name=>[...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('span')?.textContent===name);
   await click(row('Stringer'));
   assert.equal(row('Stringer').disabled,false);
-  assert.equal(row('Stringer').getAttribute('aria-busy'),null);
+  assert.equal(row('Stringer').getAttribute('aria-busy'),'true');
   assert.ok(document.querySelector('.canvas-model-opening .model-opening-spinner'));
+  assert.ok(canvasTabs().some(tab=>tab.textContent==='Stringer'),'the tab opens before the native request resolves');
   await click(row('Pin'));
+  assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Pin');
   assert.ok(document.querySelector('.canvas-model-opening .model-opening-spinner'),'the next model takes over the canvas loading state immediately');
-  await act(async()=>resolvers.get('stringer')());await flush(20);
-  assert.ok(!canvasTabs().some(tab=>tab.textContent==='Stringer'),'a superseded open never becomes a tab');
-  assert.ok(harness.calls.some(([name,args])=>name==='stop'&&args.workspace==='view-stringer'&&args.jobId==='build-stringer'));
-  assert.ok(harness.calls.some(([name,args])=>name==='forget_workspace'&&args.workspace==='view-stringer'));
   await act(async()=>resolvers.get('pin')());await flush(20);
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Pin');
-  assert.ok(document.querySelector('.model-opening .model-opening-spinner'),'queued geometry keeps the canvas loading state');
-  await click(row('Stringer'));
-  assert.ok(!canvasTabs().some(tab=>tab.textContent==='Pin'),'selecting another model cancels geometry that is still building');
-  assert.ok(document.querySelector('.canvas-model-opening .model-opening-spinner'));
-  assert.ok(harness.calls.some(([name,args])=>name==='stop'&&args.workspace==='view-pin'&&args.jobId==='build-pin'));
-  assert.ok(harness.calls.some(([name,args])=>name==='forget_workspace'&&args.workspace==='view-pin'));
   await act(async()=>resolvers.get('stringer')());await flush(20);
+  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Stringer','Pin']);
+  assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Pin','an earlier open resolving late does not steal focus');
+  assert.ok(document.querySelector('.model-opening .model-opening-spinner'),'queued geometry keeps its loading state');
+  await click(row('Stringer'));
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Stringer');
+  assert.ok(canvasTabs().some(tab=>tab.textContent==='Pin'),'switching back keeps the other loading tab');
+  await click(row('Pin'));
+  assert.equal(canvasTabs().length,3,'reopening a loading model focuses its existing tab');
+  assert.equal(harness.calls.some(([name])=>name==='stop'||name==='forget_workspace'),false,'both builds are allowed to finish');
 });
 
 test('filesystem notifications refresh Explorer meshes and external review through a shared watch',async()=>{

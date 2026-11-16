@@ -816,12 +816,14 @@ export function App({host}:{host?:SessionHost}={}) {
   },[viewportAttempt]);
   useEffect(()=>{const retained=project&&viewer.current?.sceneState(project.workspace_id,project.revision);displayRetry.current=false;setHidden(new Set(retained?.hidden||[]));setSelection(intendedSelection(project)||retained?.selection||null);if(cameraIntent.current&&(cameraIntent.current.workspace!==project?.workspace_id||cameraIntent.current.revision!==project?.revision))cameraIntent.current=null;},[project?.workspace_id,project?.revision]);
   useEffect(() => {
-    if(host&&!host.visible){viewer.current?.suspend();return;}
+    if(host&&!host.visible)return;
     if (!project || !viewer.current || graphicsLost) return;
     let active=true;const viewport=viewer.current;
     const scoped=()=>active&&currentProject.current?.workspace_id===project.workspace_id&&currentProject.current?.revision===project.revision&&currentProject.current?.display_generation===project.display_generation;
     const status=(phase:ViewStatus['phase'],message?:string)=>{if(scoped())setViewStatus({workspace:project.workspace_id,revision:project.revision,generation:project.display_generation,phase,message});};
     if(project.display_error&&viewport.sceneState(project.workspace_id,project.revision)){status('missing',project.display_error.message);return;}
+    // Open tabs retain their scene; visibility alone does not require another upload.
+    if(viewport.hasScene(project.workspace_id,project.revision)&&viewStatus?.phase==='ready'&&viewStatus.workspace===project.workspace_id&&viewStatus.revision===project.revision&&viewStatus.generation===project.display_generation)return;
     status('loading');
     const browseGenerated=!host?.modelEntry&&!!project.model_entry;
     viewport.load(project.display_error||browseGenerated?{parts:[]}:project.model,project.revision,handle => invoke<ArrayBuffer>('artifact',{

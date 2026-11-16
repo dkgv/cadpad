@@ -11,7 +11,7 @@ import {AppAlert} from './app-alert';
 import './workbench.css';
 
 type Area='canvas'|'left'|'right';
-type DocumentTab={id:string;workspace:string;name:string;dirty:boolean;modelEntry?:{entry:string;builder:string;project:string}};
+type DocumentTab={id:string;workspace:string;name:string;dirty:boolean;pending?:boolean;modelEntry?:{entry:string;builder:string;project:string}};
 type ModelOpen={identity:string;cancelled:boolean;done:boolean;dropped:boolean;docClosed:boolean;workspace:string;jobId:string;docId:string;promise:Promise<void>};
 function modelJob(job:unknown):{id:string;state:string}|undefined{
   if(!job||typeof job!=='object')return;
@@ -28,8 +28,12 @@ const key='cadpad.dock-layout.v2';
 const describeError=(error:unknown)=>error&&typeof error==='object'&&'message' in error?String(error.message):String(error);
 const titleCase=(name:string)=>name.replace(/_/g,' ').replace(/^./,letter=>letter.toUpperCase());
 /** Explorer entry names stay stable even when an adapter publishes a generic model root. */
-function modelTabTitle(project:Project|undefined,fallback:string,entry?:{builder:string}){
-  if(entry)return titleCase(entry.builder.split(':')[0]);
+function modelTabTitle(project:Project|undefined,fallback:string,entry?:{builder:string;entry?:string}){
+  if(entry){
+    const builder=entry.builder.split(':')[0];
+    const filename=entry.entry?.split(/[\\/]/).pop()?.replace(/\.[^.]+$/,'');
+    return titleCase(builder==='model'&&filename?filename:builder);
+  }
   // A generated view left on the project root is not a model the user opened.
   if(project?.model_entry)return fallback;
   const roots=[...new Set((project?.model.parts||[]).map(part=>part.name.split('/')[0]).filter(Boolean))];
@@ -173,6 +177,11 @@ export function Workbench(){
   useEffect(()=>{const doc=layout?.documents.find(doc=>doc.id===layout.focus);if(doc)void invoke('switch_project',{workspace:doc.workspace}).catch(error=>setFailure(describeError(error)));},[layout?.focus]);
   useEffect(()=>{if(!layout||layout.documents.length)return;void invoke('update_native_menu',{status:{has_project:false,has_parts:false,working:false,busy:false,can_undo:false,editing:false,dimensions:false,advanced:false,document_name:'Cadpad',inspector:'',model_browser_open:false,motion_panel_open:false,has_selection:false,has_hidden_parts:false,selection_mode:'face',dimension_scope:'selected',workspaces:known.filter(ws=>!ws.model_parent).map(ws=>({id:ws.workspace_id,name:ws.name,selected:false,running:!!ws.running}))}}).catch(()=>{});},[layout?.documents.length,known]);
   function focus(area:Area,groupId:string,tab:string){
+    if(area==='canvas'&&activeOpen.current?.docId!==tab){
+      activeOpen.current=null;
+      setCanvasOpening(false);
+      setOpeningModel(null);
+    }
     update(current=>{
       const node=groups(current[area]).find(g=>g.id===groupId);if(node?.active===tab&&(area!=='canvas'||current.focus===tab))return current;
       return {...current,[area]:updateGroup(current[area],groupId,g=>({...g,active:tab})),focus:area==='canvas'?tab:current.focus};
@@ -223,7 +232,6 @@ export function Workbench(){
     if(jobId)void invoke('stop',{workspace,jobId}).catch(()=>{});
     void invoke('forget_workspace',{workspace}).catch(()=>{});
   }
-  function cancelOpen(open:ModelOpen){if(!open.done)releaseOpen(open);}
   function noteModelProgress(project:Project){
     const open=activeOpen.current;
     if(!open||open.cancelled||open.workspace!==project.workspace_id)return;
@@ -238,10 +246,9 @@ export function Workbench(){
     const project=current.projectWorkspace||source.workspace;
     const root=current.documents.find(doc=>doc.workspace===project&&!doc.modelEntry)||source;
     const identity=JSON.stringify([project,entry,builder]);
-    const existing=current.documents.find(doc=>doc.modelEntry?.project===project&&doc.modelEntry.entry===entry&&doc.modelEntry.builder===builder);
+    const existing=current.documents.find(doc=>!doc.pending&&doc.modelEntry?.project===project&&doc.modelEntry.entry===entry&&doc.modelEntry.builder===builder);
     if(existing){
-      const flight=activeOpen.current;
-      if(flight&&flight.docId!==existing.id&&!flight.done)cancelOpen(flight);
+      activeOpen.current=null;
       setCanvasOpening(false);
       setOpeningModel(null);
       focusDocument(existing.id);
@@ -249,27 +256,32 @@ export function Workbench(){
     }
     const pending=openingModels.current.get(identity);
     if(pending&&!pending.cancelled&&!pending.done){
+      activeOpen.current=pending;
       setCanvasOpening(true);
       setOpeningModel({entry,builder});
       if(pending.docId)focusDocument(pending.docId);
       return pending.promise;
     }
-    const flight=activeOpen.current;
-    const replacing=!!flight&&!flight.done&&flight.identity!==identity;
-    if(!replacing&&current.documents.length>=32){setFailure('Close a model tab before opening another.');return;}
+    const allocating=[...openingModels.current.values()].filter(open=>!open.cancelled&&!open.docId).length;
+    if(current.documents.length+allocating>=32){setFailure('Close a model tab before opening another.');return;}
     const sourceProject=projects.current.get(project)||projects.current.get(root.workspace)||projects.current.get(source.workspace);
     if(!sourceProject)return;
-    if(replacing&&flight)cancelOpen(flight);
     setCanvasOpening(true);
     setOpeningModel({entry,builder});
     const open:ModelOpen={identity,cancelled:false,done:false,dropped:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
     openingModels.current.set(identity,open);
     activeOpen.current=open;
+    const placeholder:DocumentTab={id:dockId(),workspace:project,name:modelTabTitle(undefined,entry,{entry,builder}),dirty:false,pending:true,modelEntry:{entry,builder,project}};
+    open.docId=placeholder.id;
+    update(layout=>{
+      const target=groups(layout.canvas).find(pane=>pane.tabs.includes(layout.focus))||groups(layout.canvas)[0];
+      return {...layout,documents:[...layout.documents,placeholder],canvas:placeTab(layout.canvas,placeholder.id,target.id),focus:placeholder.id};
+    });
     const task=(async()=>{
       try{
         const cached=modelViews.current.get(identity);
         let result:{project:Project;job?:unknown}|undefined;
-        if(cached?.sourceRevision===sourceProject.revision){
+        if(cached?.sourceRevision===sourceProject.revision&&!sourceProject.external_tracking){
           try{result={project:await invoke<Project>('project',{workspace:cached.workspace})};}
           catch{modelViews.current.delete(identity);}
         }
@@ -277,7 +289,7 @@ export function Workbench(){
         const job=modelJob(result.job)??modelJob(result.project.activity.find(item=>['queued','running'].includes(item.state))??result.project.activity.at(-1));
         open.workspace=result.project.workspace_id;
         open.jobId=job?.id??'';
-        if(open.cancelled||state.current?.projectWorkspace!==project){
+        if(open.cancelled||state.current?.projectWorkspace!==project||!state.current.documents.some(doc=>doc.id===open.docId)){
           const active=activeOpen.current===open;
           releaseOpen(open);
           if(active)setCanvasOpening(false);
@@ -287,16 +299,11 @@ export function Workbench(){
         if(modelViews.current.size>=128&&!modelViews.current.has(identity))modelViews.current.delete(modelViews.current.keys().next().value!);
         modelViews.current.set(identity,{workspace:result.project.workspace_id,sourceRevision:sourceProject.revision});
         projects.current.set(result.project.workspace_id,result.project);
-        const doc:DocumentTab={id:dockId(),workspace:result.project.workspace_id,name:modelTabTitle(result.project,entry,{builder}),dirty:hasUnsavedChanges(result.project),modelEntry:{entry,builder,project}};
-        open.docId=doc.id;
-        update(layout=>{
-          if(open.cancelled||layout.projectWorkspace!==project)return layout;
-          const target=groups(layout.canvas).find(group=>group.tabs.includes(layout.focus))||groups(layout.canvas)[0];
-          return {...layout,documents:[...layout.documents,doc],canvas:placeTab(layout.canvas,doc.id,target.id),focus:doc.id};
-        });
+        update(layout=>({...layout,documents:layout.documents.map(doc=>doc.id===open.docId?{...doc,workspace:result.project.workspace_id,pending:false,dirty:hasUnsavedChanges(result.project)}:doc)}));
         if(open.cancelled)releaseOpen(open);
       }catch(error){
         if(!open.cancelled&&state.current?.projectWorkspace===project)setFailure(describeError(error));
+        closeDocument(open.docId);
         open.done=true;
         if(activeOpen.current===open){activeOpen.current=null;setCanvasOpening(false);}
       }finally{
@@ -565,6 +572,7 @@ export function Workbench(){
       {!!layout.documents.length&&groups(layout.right).some(g=>g.tabs.length)&&<><WidthDivider side="right" value={layout.rightWidth} onChange={width=>update(current=>({...current,rightWidth:width}))}/><div className="docked-sidebar right" style={{width:layout.rightWidth}}>{area('right')}</div></>}
     </div>
     {[...layout.documents,...(chromeDocument.current&&!layout.documents.some(doc=>doc.id===chromeId.current)?[chromeDocument.current.document]:[])].filter(doc=>{
+      if(doc.pending)return false;
       if(visible.has(doc.id)||doc.id===chromeId.current)mounted.current.add(doc.id);
       return mounted.current.has(doc.id);
     }).map(doc=>{
