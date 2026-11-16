@@ -1303,6 +1303,8 @@ fn activity(tool: &str) -> String {
         "set_joint_coordinate" => "Moving a joint",
         "control_motion_tests" => "Working on motion tests",
         "control_playback" => "Controlling playback",
+        "capture_views" => "Capturing model views",
+        "compare_views" => "Comparing before and after",
         "tool_schema" => "Looking up Cadpad tools",
         "cli:command" => "Running a command",
         "cursor:read" => "Reading a file",

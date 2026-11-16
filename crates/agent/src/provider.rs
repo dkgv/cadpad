@@ -145,10 +145,19 @@ fn wire_block(block: &Block) -> Value {
             let image = result
                 .as_object_mut()
                 .and_then(|object| object.remove("image"));
+            let images = result
+                .as_object_mut()
+                .and_then(|object| object.remove("images"));
             let mut content =
                 vec![json!({"type":"text","text":serde_json::to_string(&result).unwrap()})];
             if let Some(image) = image {
                 content.push(json!({"type":"image","source":{"type":"base64","media_type":image["mime_type"],"data":image["data"]}}));
+            }
+            if let Some(Value::Array(images)) = images {
+                for image in images {
+                    content.push(json!({"type":"text","text":image["label"]}));
+                    content.push(json!({"type":"image","source":{"type":"base64","media_type":image["mime_type"],"data":image["data"]}}));
+                }
             }
             json!({"type":"tool_result","tool_use_id":tool_use_id,"content":content,"is_error":is_error})
         }
@@ -481,4 +490,30 @@ fn protocol() -> Error {
         "LLM_PROTOCOL_ERROR",
         "Provider sent an incomplete or inconsistent message",
     )
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    #[test]
+    fn multiple_views_are_labeled_image_blocks_without_base64_in_text() {
+        let block = wire_block(&Block::ToolResult {
+            tool_use_id: "capture".into(),
+            result: json!({"capture_id":"baseline","images":[
+                {"label":"front before","mime_type":"image/png","data":"before-png"},
+                {"label":"front after","mime_type":"image/png","data":"after-png"}
+            ]}),
+            is_error: false,
+        });
+        let content = block["content"].as_array().unwrap();
+        assert_eq!(content.len(), 5);
+        assert_eq!(
+            serde_json::from_str::<Value>(content[0]["text"].as_str().unwrap()).unwrap(),
+            json!({"capture_id":"baseline"})
+        );
+        assert_eq!(content[1]["text"], "front before");
+        assert_eq!(content[2]["source"]["data"], "before-png");
+        assert_eq!(content[3]["text"], "front after");
+        assert_eq!(content[4]["source"]["data"], "after-png");
+    }
 }

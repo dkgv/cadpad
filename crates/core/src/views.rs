@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -21,7 +21,7 @@ pub struct Camera {
     pub zoom: f64,
     pub orthographic: bool,
 }
-#[derive(Clone, Serialize, Deserialize, JsonSchema, Debug)]
+#[derive(Clone, Serialize, Deserialize, JsonSchema, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Preset {
     Iso,
@@ -84,6 +84,63 @@ pub struct CaptureReply {
     pub metadata: CaptureMetadata,
     pub image: CaptureImage,
 }
+/// Capture before editing; compare_views reuses these exact cameras after editing.
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureViews {
+    pub workspace_id: String,
+    pub revision: String,
+    pub pose_version: Option<u64>,
+    /// Defaults to iso, front, right, top. One to four distinct views.
+    pub views: Option<Vec<Preset>>,
+    pub dimensions: Option<bool>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompareViews {
+    pub workspace_id: String,
+    pub revision: String,
+    pub pose_version: Option<u64>,
+    pub capture_id: String,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ComparedView {
+    pub view: Preset,
+    pub before: Option<CaptureMetadata>,
+    pub after: CaptureMetadata,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ViewsMetadata {
+    pub workspace_id: String,
+    pub capture_id: String,
+    pub compared_to: Option<String>,
+    /// Images follow this order: after for captures; before then after per view for comparisons.
+    pub views: Vec<ComparedView>,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct LabeledImage {
+    pub label: String,
+    #[serde(flatten)]
+    pub image: CaptureImage,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ViewsReply {
+    #[serde(flatten)]
+    pub metadata: ViewsMetadata,
+    pub images: Vec<LabeledImage>,
+}
+struct SavedViews {
+    id: String,
+    actor: String,
+    workspace: String,
+    dimensions: bool,
+    views: Vec<(Preset, CaptureReply)>,
+}
+// Bounded across the app: at most eight sets, each at most 4 MiB encoded PNGs.
+const MAX_CAPTURE_SET_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Clone, Serialize, Deserialize, JsonSchema, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DimensionScope {
@@ -129,6 +186,7 @@ struct ViewState {
     sender: Option<(String, mpsc::Sender<ViewRequest>)>,
     pending: HashMap<String, Pending>,
     selections: HashMap<String, Vec<Entity>>,
+    captures: VecDeque<Arc<SavedViews>>,
 }
 #[derive(Clone, Default)]
 pub struct ViewService {
@@ -499,6 +557,161 @@ impl Core {
                 data: encoded.into()
             },
         }))
+    }
+    pub async fn capture_views(&self, actor: &str, args: CaptureViews) -> Result<Value> {
+        self.ensure_actor_active(actor)?;
+        let views = args
+            .views
+            .unwrap_or_else(|| vec![Preset::Iso, Preset::Front, Preset::Right, Preset::Top]);
+        if views.is_empty()
+            || views.len() > 4
+            || views
+                .iter()
+                .enumerate()
+                .any(|(i, v)| views[..i].contains(v))
+        {
+            return Err(Error::domain(
+                "INVALID_PARAMETER",
+                "Choose one to four distinct views",
+            ));
+        }
+        let dimensions = args.dimensions.unwrap_or(false);
+        let mut captured = Vec::new();
+        let mut bytes = 0;
+        for view in views {
+            let reply: CaptureReply = serde_json::from_value(
+                self.capture_view(
+                    actor,
+                    Capture {
+                        workspace_id: args.workspace_id.clone(),
+                        revision: args.revision.clone(),
+                        pose_version: args.pose_version,
+                        camera_preset: Some(view.clone()),
+                        camera: None,
+                        dimensions: Some(dimensions),
+                        width: Some(args.width.unwrap_or(640)),
+                        height: Some(args.height.unwrap_or(480)),
+                    },
+                )
+                .await?,
+            )?;
+            bytes += reply.image.data.len();
+            if bytes > MAX_CAPTURE_SET_BYTES {
+                return Err(Error::domain(
+                    "INVALID_PARAMETER",
+                    "Capture set exceeds 4 MiB; request smaller images",
+                ));
+            }
+            captured.push((view, reply));
+        }
+        self.finish_capture(
+            actor,
+            &args.workspace_id,
+            &args.revision,
+            args.pose_version,
+            dimensions,
+            captured,
+            None,
+        )
+        .await
+    }
+    pub async fn compare_views(&self, actor: &str, args: CompareViews) -> Result<Value> {
+        self.ensure_actor_active(actor)?;
+        let baseline = self.views.state.lock().unwrap().captures.iter()
+            .find(|saved| saved.id == args.capture_id && saved.actor == actor && saved.workspace == args.workspace_id)
+            .cloned().ok_or_else(|| Error::domain("INVALID_REQUEST", "Capture expired or does not belong to this session and workspace; capture_views before editing"))?;
+        let mut captured = Vec::new();
+        let mut bytes = 0;
+        for (view, before) in &baseline.views {
+            let reply: CaptureReply = serde_json::from_value(
+                self.capture_view(
+                    actor,
+                    Capture {
+                        workspace_id: args.workspace_id.clone(),
+                        revision: args.revision.clone(),
+                        pose_version: args.pose_version,
+                        camera_preset: None,
+                        camera: Some(before.metadata.camera.clone()),
+                        dimensions: Some(baseline.dimensions),
+                        width: Some(before.metadata.width),
+                        height: Some(before.metadata.height),
+                    },
+                )
+                .await?,
+            )?;
+            if reply.metadata.width != before.metadata.width
+                || reply.metadata.height != before.metadata.height
+            {
+                return Err(Error::domain(
+                    "VIEW_NOT_READY",
+                    "Viewport size changed; restore its previous size before comparing",
+                ));
+            }
+            bytes += reply.image.data.len();
+            if bytes > MAX_CAPTURE_SET_BYTES {
+                return Err(Error::domain(
+                    "INVALID_PARAMETER",
+                    "Comparison exceeds 4 MiB; capture a smaller baseline",
+                ));
+            }
+            captured.push((view.clone(), reply));
+        }
+        self.finish_capture(
+            actor,
+            &args.workspace_id,
+            &args.revision,
+            args.pose_version,
+            baseline.dimensions,
+            captured,
+            Some(baseline),
+        )
+        .await
+    }
+    async fn finish_capture(
+        &self,
+        actor: &str,
+        workspace: &str,
+        revision: &str,
+        pose_version: Option<u64>,
+        dimensions: bool,
+        captured: Vec<(Preset, CaptureReply)>,
+        baseline: Option<Arc<SavedViews>>,
+    ) -> Result<Value> {
+        // Reject the whole set if the model moved or changed between individual captures.
+        self.ensure_actor_active(actor)?;
+        if self.get_motion(workspace, revision).await?.pose_version != pose_version.unwrap_or(0) {
+            return Err(Error::domain(
+                "POSE_CONFLICT",
+                "Model moved during capture; retry with the current pose_version",
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut images = Vec::new();
+        let mut views = Vec::new();
+        for (index, (view, after)) in captured.iter().enumerate() {
+            let before = baseline.as_ref().map(|saved| &saved.views[index].1);
+            let label = serde_json::to_value(view)?.as_str().unwrap().to_owned();
+            if let Some(before) = before {
+                images.push(json!({"label":format!("{label} before"), "mime_type":"image/png", "data":before.image.data}));
+            }
+            images.push(json!({"label":format!("{label} after"), "mime_type":"image/png", "data":after.image.data}));
+            views.push(
+                json!({"view":view,"before":before.map(|b| &b.metadata),"after":after.metadata}),
+            );
+        }
+        let result = json!({"workspace_id":workspace,"capture_id":id,"compared_to":baseline.as_ref().map(|b| &b.id),"views":views,"images":images});
+        let mut state = self.views.state.lock().unwrap();
+        while state.captures.len() >= 8 {
+            state.captures.pop_front();
+        }
+        state.captures.push_back(Arc::new(SavedViews {
+            id,
+            actor: actor.into(),
+            workspace: workspace.into(),
+            dimensions,
+            views: captured,
+        }));
+        Ok(result)
     }
     pub async fn set_dimensions(&self, actor: &str, args: SetDimensions) -> Result<Value> {
         self.ensure_actor_active(actor)?;

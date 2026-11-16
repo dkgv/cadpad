@@ -5509,6 +5509,2029 @@
       }
     },
     {
+      "description": "Capture one to four views (default iso/front/right/top) and save a temporary baseline. Returns labeled PNGs, exact camera/pose context and capture_id. Before editing, save this ID for compare_views. Requires the connected viewport. Last eight sets retained across the app; not persisted. Images are not authoritative measurements.",
+      "input_schema": {
+        "$defs": {
+          "Preset": {
+            "enum": [
+              "iso",
+              "front",
+              "rear",
+              "top",
+              "bottom",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "description": "Capture before editing; compare_views reuses these exact cameras after editing.",
+        "properties": {
+          "dimensions": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "height": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pose_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "string"
+          },
+          "views": {
+            "description": "Defaults to iso, front, right, top. One to four distinct views.",
+            "items": {
+              "$ref": "#/$defs/Preset"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "width": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "revision"
+        ],
+        "title": "CaptureViews",
+        "type": "object"
+      },
+      "mcp_output_schema": {
+        "$defs": {
+          "Accuracy": {
+            "enum": [
+              "exact"
+            ],
+            "type": "string"
+          },
+          "Bounds": {
+            "properties": {
+              "max": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "min": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "size": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "min",
+              "max",
+              "size"
+            ],
+            "type": "object"
+          },
+          "Camera": {
+            "additionalProperties": false,
+            "properties": {
+              "orthographic": {
+                "type": "boolean"
+              },
+              "position": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "quaternion": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 4,
+                "minItems": 4,
+                "type": "array"
+              },
+              "target": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "zoom": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "position",
+              "quaternion",
+              "target",
+              "zoom",
+              "orthographic"
+            ],
+            "type": "object"
+          },
+          "CaptureMetadata": {
+            "description": "MCP keeps the PNG in a content block; all numeric metadata stays structured.",
+            "properties": {
+              "accuracy": {
+                "$ref": "#/$defs/Accuracy"
+              },
+              "camera": {
+                "$ref": "#/$defs/Camera"
+              },
+              "height": {
+                "format": "uint32",
+                "maximum": 1200,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "joint_states": {
+                "items": {
+                  "$ref": "#/$defs/JointState"
+                },
+                "type": "array"
+              },
+              "numeric_context": {
+                "items": {
+                  "$ref": "#/$defs/CapturePart"
+                },
+                "maxItems": 128,
+                "type": "array"
+              },
+              "pose_version": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "poses": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/Pose"
+                },
+                "type": "object"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "units": {
+                "$ref": "#/$defs/Units"
+              },
+              "visible_part_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "width": {
+                "format": "uint32",
+                "maximum": 1600,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "revision",
+              "pose_version",
+              "accuracy",
+              "units",
+              "camera",
+              "poses",
+              "joint_states",
+              "visible_part_ids",
+              "width",
+              "height",
+              "numeric_context"
+            ],
+            "type": "object"
+          },
+          "CapturePart": {
+            "properties": {
+              "bounds": {
+                "$ref": "#/$defs/Bounds"
+              },
+              "coordinate_space": {
+                "$ref": "#/$defs/CoordinateSpace"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "volume": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "instance_id",
+              "bounds",
+              "volume",
+              "coordinate_space"
+            ],
+            "type": "object"
+          },
+          "ComparedView": {
+            "properties": {
+              "after": {
+                "$ref": "#/$defs/CaptureMetadata"
+              },
+              "before": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CaptureMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "view": {
+                "$ref": "#/$defs/Preset"
+              }
+            },
+            "required": [
+              "view",
+              "before",
+              "after"
+            ],
+            "type": "object"
+          },
+          "CoordinateSpace": {
+            "enum": [
+              "part_local"
+            ],
+            "type": "string"
+          },
+          "JointState": {
+            "properties": {
+              "axis_world": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "child": {
+                "type": "string"
+              },
+              "coordinate": {
+                "format": "double",
+                "type": "number"
+              },
+              "drivable": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "limits": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "origin_mm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "parent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/State"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unit": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "parent",
+              "child",
+              "kind",
+              "coordinate",
+              "unit",
+              "limits",
+              "axis_world",
+              "origin_mm",
+              "drivable"
+            ],
+            "type": "object"
+          },
+          "Pose": {
+            "additionalProperties": false,
+            "properties": {
+              "position": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "quaternion": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 4,
+                "minItems": 4,
+                "type": "array"
+              }
+            },
+            "required": [
+              "position",
+              "quaternion"
+            ],
+            "type": "object"
+          },
+          "Preset": {
+            "enum": [
+              "iso",
+              "front",
+              "rear",
+              "top",
+              "bottom",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          },
+          "Sample": {
+            "properties": {
+              "coordinate_m": {
+                "format": "double",
+                "type": "number"
+              },
+              "position_mm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "coordinate_m",
+              "position_mm"
+            ],
+            "type": "object"
+          },
+          "State": {
+            "properties": {
+              "closed": {
+                "type": "boolean"
+              },
+              "frame_rule": {
+                "type": "string"
+              },
+              "length_m": {
+                "format": "double",
+                "type": "number"
+              },
+              "samples": {
+                "items": {
+                  "$ref": "#/$defs/Sample"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "length_m",
+              "closed",
+              "frame_rule",
+              "samples"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "Units": {
+            "enum": [
+              "mm"
+            ],
+            "type": "string"
+          },
+          "ViewsMetadata": {
+            "properties": {
+              "capture_id": {
+                "type": "string"
+              },
+              "compared_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "views": {
+                "description": "Images follow this order: after for captures; before then after per view for comparisons.",
+                "items": {
+                  "$ref": "#/$defs/ComparedView"
+                },
+                "type": "array"
+              },
+              "workspace_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workspace_id",
+              "capture_id",
+              "compared_to",
+              "views"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ViewsMetadata"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      },
+      "name": "capture_views",
+      "output_schema": {
+        "$defs": {
+          "Accuracy": {
+            "enum": [
+              "exact"
+            ],
+            "type": "string"
+          },
+          "Bounds": {
+            "properties": {
+              "max": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "min": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "size": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "min",
+              "max",
+              "size"
+            ],
+            "type": "object"
+          },
+          "Camera": {
+            "additionalProperties": false,
+            "properties": {
+              "orthographic": {
+                "type": "boolean"
+              },
+              "position": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "quaternion": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 4,
+                "minItems": 4,
+                "type": "array"
+              },
+              "target": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "zoom": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "position",
+              "quaternion",
+              "target",
+              "zoom",
+              "orthographic"
+            ],
+            "type": "object"
+          },
+          "CaptureMetadata": {
+            "description": "MCP keeps the PNG in a content block; all numeric metadata stays structured.",
+            "properties": {
+              "accuracy": {
+                "$ref": "#/$defs/Accuracy"
+              },
+              "camera": {
+                "$ref": "#/$defs/Camera"
+              },
+              "height": {
+                "format": "uint32",
+                "maximum": 1200,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "joint_states": {
+                "items": {
+                  "$ref": "#/$defs/JointState"
+                },
+                "type": "array"
+              },
+              "numeric_context": {
+                "items": {
+                  "$ref": "#/$defs/CapturePart"
+                },
+                "maxItems": 128,
+                "type": "array"
+              },
+              "pose_version": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "poses": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/Pose"
+                },
+                "type": "object"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "units": {
+                "$ref": "#/$defs/Units"
+              },
+              "visible_part_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "width": {
+                "format": "uint32",
+                "maximum": 1600,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "revision",
+              "pose_version",
+              "accuracy",
+              "units",
+              "camera",
+              "poses",
+              "joint_states",
+              "visible_part_ids",
+              "width",
+              "height",
+              "numeric_context"
+            ],
+            "type": "object"
+          },
+          "CapturePart": {
+            "properties": {
+              "bounds": {
+                "$ref": "#/$defs/Bounds"
+              },
+              "coordinate_space": {
+                "$ref": "#/$defs/CoordinateSpace"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "volume": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "instance_id",
+              "bounds",
+              "volume",
+              "coordinate_space"
+            ],
+            "type": "object"
+          },
+          "ComparedView": {
+            "properties": {
+              "after": {
+                "$ref": "#/$defs/CaptureMetadata"
+              },
+              "before": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CaptureMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "view": {
+                "$ref": "#/$defs/Preset"
+              }
+            },
+            "required": [
+              "view",
+              "before",
+              "after"
+            ],
+            "type": "object"
+          },
+          "CoordinateSpace": {
+            "enum": [
+              "part_local"
+            ],
+            "type": "string"
+          },
+          "ImageMime": {
+            "enum": [
+              "image/png"
+            ],
+            "type": "string"
+          },
+          "JointState": {
+            "properties": {
+              "axis_world": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "child": {
+                "type": "string"
+              },
+              "coordinate": {
+                "format": "double",
+                "type": "number"
+              },
+              "drivable": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "limits": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "origin_mm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "parent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/State"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unit": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "parent",
+              "child",
+              "kind",
+              "coordinate",
+              "unit",
+              "limits",
+              "axis_world",
+              "origin_mm",
+              "drivable"
+            ],
+            "type": "object"
+          },
+          "LabeledImage": {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "mime_type": {
+                "$ref": "#/$defs/ImageMime"
+              }
+            },
+            "required": [
+              "label",
+              "mime_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          "Pose": {
+            "additionalProperties": false,
+            "properties": {
+              "position": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "quaternion": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 4,
+                "minItems": 4,
+                "type": "array"
+              }
+            },
+            "required": [
+              "position",
+              "quaternion"
+            ],
+            "type": "object"
+          },
+          "Preset": {
+            "enum": [
+              "iso",
+              "front",
+              "rear",
+              "top",
+              "bottom",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          },
+          "Sample": {
+            "properties": {
+              "coordinate_m": {
+                "format": "double",
+                "type": "number"
+              },
+              "position_mm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "coordinate_m",
+              "position_mm"
+            ],
+            "type": "object"
+          },
+          "State": {
+            "properties": {
+              "closed": {
+                "type": "boolean"
+              },
+              "frame_rule": {
+                "type": "string"
+              },
+              "length_m": {
+                "format": "double",
+                "type": "number"
+              },
+              "samples": {
+                "items": {
+                  "$ref": "#/$defs/Sample"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "length_m",
+              "closed",
+              "frame_rule",
+              "samples"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "Units": {
+            "enum": [
+              "mm"
+            ],
+            "type": "string"
+          },
+          "ViewsReply": {
+            "properties": {
+              "capture_id": {
+                "type": "string"
+              },
+              "compared_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "images": {
+                "items": {
+                  "$ref": "#/$defs/LabeledImage"
+                },
+                "type": "array"
+              },
+              "views": {
+                "description": "Images follow this order: after for captures; before then after per view for comparisons.",
+                "items": {
+                  "$ref": "#/$defs/ComparedView"
+                },
+                "type": "array"
+              },
+              "workspace_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workspace_id",
+              "capture_id",
+              "compared_to",
+              "views",
+              "images"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ViewsReply"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Compare the current model against a capture_views baseline owned by this session/workspace. Reuses baseline cameras, dimensions and image sizes; returns labeled before/after PNG pairs and revision/pose metadata. Capture the baseline before editing; historical revisions cannot be rendered on demand. Camera stays fixed, so enlarged geometry may extend outside the frame.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "capture_id": {
+            "type": "string"
+          },
+          "pose_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "revision",
+          "capture_id"
+        ],
+        "title": "CompareViews",
+        "type": "object"
+      },
+      "mcp_output_schema": {
+        "$defs": {
+          "Accuracy": {
+            "enum": [
+              "exact"
+            ],
+            "type": "string"
+          },
+          "Bounds": {
+            "properties": {
+              "max": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "min": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "size": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "min",
+              "max",
+              "size"
+            ],
+            "type": "object"
+          },
+          "Camera": {
+            "additionalProperties": false,
+            "properties": {
+              "orthographic": {
+                "type": "boolean"
+              },
+              "position": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "quaternion": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 4,
+                "minItems": 4,
+                "type": "array"
+              },
+              "target": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "zoom": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "position",
+              "quaternion",
+              "target",
+              "zoom",
+              "orthographic"
+            ],
+            "type": "object"
+          },
+          "CaptureMetadata": {
+            "description": "MCP keeps the PNG in a content block; all numeric metadata stays structured.",
+            "properties": {
+              "accuracy": {
+                "$ref": "#/$defs/Accuracy"
+              },
+              "camera": {
+                "$ref": "#/$defs/Camera"
+              },
+              "height": {
+                "format": "uint32",
+                "maximum": 1200,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "joint_states": {
+                "items": {
+                  "$ref": "#/$defs/JointState"
+                },
+                "type": "array"
+              },
+              "numeric_context": {
+                "items": {
+                  "$ref": "#/$defs/CapturePart"
+                },
+                "maxItems": 128,
+                "type": "array"
+              },
+              "pose_version": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "poses": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/Pose"
+                },
+                "type": "object"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "units": {
+                "$ref": "#/$defs/Units"
+              },
+              "visible_part_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "width": {
+                "format": "uint32",
+                "maximum": 1600,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "revision",
+              "pose_version",
+              "accuracy",
+              "units",
+              "camera",
+              "poses",
+              "joint_states",
+              "visible_part_ids",
+              "width",
+              "height",
+              "numeric_context"
+            ],
+            "type": "object"
+          },
+          "CapturePart": {
+            "properties": {
+              "bounds": {
+                "$ref": "#/$defs/Bounds"
+              },
+              "coordinate_space": {
+                "$ref": "#/$defs/CoordinateSpace"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "volume": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "instance_id",
+              "bounds",
+              "volume",
+              "coordinate_space"
+            ],
+            "type": "object"
+          },
+          "ComparedView": {
+            "properties": {
+              "after": {
+                "$ref": "#/$defs/CaptureMetadata"
+              },
+              "before": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CaptureMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "view": {
+                "$ref": "#/$defs/Preset"
+              }
+            },
+            "required": [
+              "view",
+              "before",
+              "after"
+            ],
+            "type": "object"
+          },
+          "CoordinateSpace": {
+            "enum": [
+              "part_local"
+            ],
+            "type": "string"
+          },
+          "JointState": {
+            "properties": {
+              "axis_world": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "child": {
+                "type": "string"
+              },
+              "coordinate": {
+                "format": "double",
+                "type": "number"
+              },
+              "drivable": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "limits": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "origin_mm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "parent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/State"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unit": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "parent",
+              "child",
+              "kind",
+              "coordinate",
+              "unit",
+              "limits",
+              "axis_world",
+              "origin_mm",
+              "drivable"
+            ],
+            "type": "object"
+          },
+          "Pose": {
+            "additionalProperties": false,
+            "properties": {
+              "position": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "quaternion": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 4,
+                "minItems": 4,
+                "type": "array"
+              }
+            },
+            "required": [
+              "position",
+              "quaternion"
+            ],
+            "type": "object"
+          },
+          "Preset": {
+            "enum": [
+              "iso",
+              "front",
+              "rear",
+              "top",
+              "bottom",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          },
+          "Sample": {
+            "properties": {
+              "coordinate_m": {
+                "format": "double",
+                "type": "number"
+              },
+              "position_mm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "coordinate_m",
+              "position_mm"
+            ],
+            "type": "object"
+          },
+          "State": {
+            "properties": {
+              "closed": {
+                "type": "boolean"
+              },
+              "frame_rule": {
+                "type": "string"
+              },
+              "length_m": {
+                "format": "double",
+                "type": "number"
+              },
+              "samples": {
+                "items": {
+                  "$ref": "#/$defs/Sample"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "length_m",
+              "closed",
+              "frame_rule",
+              "samples"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "Units": {
+            "enum": [
+              "mm"
+            ],
+            "type": "string"
+          },
+          "ViewsMetadata": {
+            "properties": {
+              "capture_id": {
+                "type": "string"
+              },
+              "compared_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "views": {
+                "description": "Images follow this order: after for captures; before then after per view for comparisons.",
+                "items": {
+                  "$ref": "#/$defs/ComparedView"
+                },
+                "type": "array"
+              },
+              "workspace_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workspace_id",
+              "capture_id",
+              "compared_to",
+              "views"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ViewsMetadata"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      },
+      "name": "compare_views",
+      "output_schema": {
+        "$defs": {
+          "Accuracy": {
+            "enum": [
+              "exact"
+            ],
+            "type": "string"
+          },
+          "Bounds": {
+            "properties": {
+              "max": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "min": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "size": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "min",
+              "max",
+              "size"
+            ],
+            "type": "object"
+          },
+          "Camera": {
+            "additionalProperties": false,
+            "properties": {
+              "orthographic": {
+                "type": "boolean"
+              },
+              "position": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "quaternion": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 4,
+                "minItems": 4,
+                "type": "array"
+              },
+              "target": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "zoom": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "position",
+              "quaternion",
+              "target",
+              "zoom",
+              "orthographic"
+            ],
+            "type": "object"
+          },
+          "CaptureMetadata": {
+            "description": "MCP keeps the PNG in a content block; all numeric metadata stays structured.",
+            "properties": {
+              "accuracy": {
+                "$ref": "#/$defs/Accuracy"
+              },
+              "camera": {
+                "$ref": "#/$defs/Camera"
+              },
+              "height": {
+                "format": "uint32",
+                "maximum": 1200,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "joint_states": {
+                "items": {
+                  "$ref": "#/$defs/JointState"
+                },
+                "type": "array"
+              },
+              "numeric_context": {
+                "items": {
+                  "$ref": "#/$defs/CapturePart"
+                },
+                "maxItems": 128,
+                "type": "array"
+              },
+              "pose_version": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "poses": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/Pose"
+                },
+                "type": "object"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "units": {
+                "$ref": "#/$defs/Units"
+              },
+              "visible_part_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "width": {
+                "format": "uint32",
+                "maximum": 1600,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "revision",
+              "pose_version",
+              "accuracy",
+              "units",
+              "camera",
+              "poses",
+              "joint_states",
+              "visible_part_ids",
+              "width",
+              "height",
+              "numeric_context"
+            ],
+            "type": "object"
+          },
+          "CapturePart": {
+            "properties": {
+              "bounds": {
+                "$ref": "#/$defs/Bounds"
+              },
+              "coordinate_space": {
+                "$ref": "#/$defs/CoordinateSpace"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "volume": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "instance_id",
+              "bounds",
+              "volume",
+              "coordinate_space"
+            ],
+            "type": "object"
+          },
+          "ComparedView": {
+            "properties": {
+              "after": {
+                "$ref": "#/$defs/CaptureMetadata"
+              },
+              "before": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CaptureMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "view": {
+                "$ref": "#/$defs/Preset"
+              }
+            },
+            "required": [
+              "view",
+              "before",
+              "after"
+            ],
+            "type": "object"
+          },
+          "CoordinateSpace": {
+            "enum": [
+              "part_local"
+            ],
+            "type": "string"
+          },
+          "ImageMime": {
+            "enum": [
+              "image/png"
+            ],
+            "type": "string"
+          },
+          "JointState": {
+            "properties": {
+              "axis_world": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "child": {
+                "type": "string"
+              },
+              "coordinate": {
+                "format": "double",
+                "type": "number"
+              },
+              "drivable": {
+                "type": "boolean"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "limits": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "origin_mm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "parent": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "path": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/State"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "unit": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "parent",
+              "child",
+              "kind",
+              "coordinate",
+              "unit",
+              "limits",
+              "axis_world",
+              "origin_mm",
+              "drivable"
+            ],
+            "type": "object"
+          },
+          "LabeledImage": {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "mime_type": {
+                "$ref": "#/$defs/ImageMime"
+              }
+            },
+            "required": [
+              "label",
+              "mime_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          "Pose": {
+            "additionalProperties": false,
+            "properties": {
+              "position": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "quaternion": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 4,
+                "minItems": 4,
+                "type": "array"
+              }
+            },
+            "required": [
+              "position",
+              "quaternion"
+            ],
+            "type": "object"
+          },
+          "Preset": {
+            "enum": [
+              "iso",
+              "front",
+              "rear",
+              "top",
+              "bottom",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          },
+          "Sample": {
+            "properties": {
+              "coordinate_m": {
+                "format": "double",
+                "type": "number"
+              },
+              "position_mm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "coordinate_m",
+              "position_mm"
+            ],
+            "type": "object"
+          },
+          "State": {
+            "properties": {
+              "closed": {
+                "type": "boolean"
+              },
+              "frame_rule": {
+                "type": "string"
+              },
+              "length_m": {
+                "format": "double",
+                "type": "number"
+              },
+              "samples": {
+                "items": {
+                  "$ref": "#/$defs/Sample"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "length_m",
+              "closed",
+              "frame_rule",
+              "samples"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "Units": {
+            "enum": [
+              "mm"
+            ],
+            "type": "string"
+          },
+          "ViewsReply": {
+            "properties": {
+              "capture_id": {
+                "type": "string"
+              },
+              "compared_to": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "images": {
+                "items": {
+                  "$ref": "#/$defs/LabeledImage"
+                },
+                "type": "array"
+              },
+              "views": {
+                "description": "Images follow this order: after for captures; before then after per view for comparisons.",
+                "items": {
+                  "$ref": "#/$defs/ComparedView"
+                },
+                "type": "array"
+              },
+              "workspace_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workspace_id",
+              "capture_id",
+              "compared_to",
+              "views",
+              "images"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ViewsReply"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
       "description": "Set transient dimension visibility and selected/pinned/all-visible scope in the connected viewport. This does not create or edit saved annotation definitions.",
       "input_schema": {
         "$defs": {

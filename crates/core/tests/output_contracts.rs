@@ -15,13 +15,13 @@ fn advertised_output_schemas_are_valid_and_accept_both_execution_error_forms() {
         .iter()
         .filter(|tool| tool.output_schema.is_some())
         .collect();
-    assert_eq!(covered.len(), 23);
+    assert_eq!(covered.len(), 25);
     assert_eq!(
         covered
             .iter()
             .filter(|tool| tool.mcp_output_schema.is_some())
             .count(),
-        2
+        4
     );
     for tool in covered {
         for schema in tool

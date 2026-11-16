@@ -188,6 +188,14 @@ fn build_definitions() -> Vec<ToolSpec> {
             "capture_view",
             "Capture a bounded PNG from the connected viewport with explicit workspace, revision, pose, camera and dimension options. Includes numeric context; images are not authoritative measurements.",
         ),
+        spec::<crate::views::CaptureViews>(
+            "capture_views",
+            "Capture one to four views (default iso/front/right/top) and save a temporary baseline. Returns labeled PNGs, exact camera/pose context and capture_id. Before editing, save this ID for compare_views. Requires the connected viewport. Last eight sets retained across the app; not persisted. Images are not authoritative measurements.",
+        ),
+        spec::<crate::views::CompareViews>(
+            "compare_views",
+            "Compare the current model against a capture_views baseline owned by this session/workspace. Reuses baseline cameras, dimensions and image sizes; returns labeled before/after PNG pairs and revision/pose metadata. Capture the baseline before editing; historical revisions cannot be rendered on demand. Camera stays fixed, so enlarged geometry may extend outside the frame.",
+        ),
         spec::<crate::views::SetDimensions>(
             "set_dimensions",
             "Set transient dimension visibility and selected/pinned/all-visible scope in the connected viewport. This does not create or edit saved annotation definitions.",
@@ -286,12 +294,16 @@ fn build_definitions() -> Vec<ToolSpec> {
             "inspect" => Some(result_schema::<crate::geometry::InspectionReply>()),
             "check_interference" => Some(result_schema::<crate::geometry::InterferenceReply>()),
             "capture_view" => Some(result_schema::<crate::views::CaptureReply>()),
+            "capture_views" | "compare_views" => Some(result_schema::<crate::views::ViewsReply>()),
             "export" => Some(result_schema::<crate::artifacts::ExportReply>()),
             "get_project" => Some(result_schema::<crate::project_result::Reply>()),
             _ => None,
         };
         tool.mcp_output_schema = match tool.name.as_str() {
             "capture_view" => Some(result_schema::<crate::views::CaptureMetadata>()),
+            "capture_views" | "compare_views" => {
+                Some(result_schema::<crate::views::ViewsMetadata>())
+            }
             "export" => Some(result_schema::<crate::artifacts::McpExportReply>()),
             _ => None,
         };
@@ -405,6 +417,8 @@ impl Core {
                 let args: crate::views::Capture = parse(arguments)?;
                 self.capture_view(&context.actor, args).await
             }
+            "capture_views" => self.capture_views(&context.actor, parse(arguments)?).await,
+            "compare_views" => self.compare_views(&context.actor, parse(arguments)?).await,
             "set_dimensions" => {
                 let args: crate::views::SetDimensions = parse(arguments)?;
                 self.set_dimensions(&context.actor, args).await

@@ -856,3 +856,119 @@ async fn sdk(peer: &rmcp::service::Peer<rmcp::RoleClient>, name: &str, args: Val
     assert_ne!(result.is_error, Some(true), "{result:?}");
     result.structured_content.unwrap()
 }
+
+#[tokio::test]
+async fn multi_view_capture_and_comparison_deliver_labeled_mcp_images() {
+    let root = tempfile::tempdir().unwrap();
+    let core = Core::open(root.path().join("app"), config()).await.unwrap();
+    let ws = core.create_workspace("local-user").await.unwrap();
+    let mut revision = core.get_project(&ws).await.unwrap()["revision"].clone();
+    let server = AppServer::start(core.clone(), root.path().join("connection"))
+        .await
+        .unwrap();
+    let (client_transport, server_transport) = tokio::io::duplex(1024 * 1024);
+    let bridge =
+        cadpad_mcp::mcp::Bridge::new(server.connection_file().into(), "multi-view test".into());
+    let bridge_task = tokio::spawn(async move { bridge.serve(server_transport).await.unwrap() });
+    let mcp = ().serve(client_transport).await.unwrap();
+    let running_bridge = bridge_task.await.unwrap();
+    let (token, mut requests) = core.attach_view();
+    let view_core = core.clone();
+    let renderer = tokio::spawn(async move {
+        while let Some(request) = requests.recv().await {
+            let camera = request.arguments["camera"].as_object().map(|_| request.arguments["camera"].clone()).unwrap_or_else(|| json!({"position":[10,10,10],"target":[0,0,0],"quaternion":[0,0,0,1],"zoom":1,"orthographic":true}));
+            view_core.complete_view(&token, &request.id, cadpad_core::views::ViewReply {
+                data: Some(json!({"image":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jA98AAAAASUVORK5CYII=","camera":camera,"revision":request.revision,"pose_version":0,"visible_part_ids":["plate"]})), error:None,
+            }).unwrap();
+        }
+    });
+    let mut baseline_id = Value::Null;
+    for (name, expected_images) in [("capture_views", 4), ("compare_views", 8)] {
+        // Build different geometry on each side of the comparison through the same MCP session.
+        let thickness = if name == "capture_views" { 1 } else { 2 };
+        let draft = sdk(mcp.peer(), "update_source", json!({"workspace_id":ws,"expected_base_revision":revision,"changes":{"model.py":format!("import cadquery as cq\nshow(cq.Workplane().box(10,10,{thickness}), name='plate')\n")}})).await;
+        let job = sdk(
+            mcp.peer(),
+            "build",
+            json!({"workspace_id":ws,"expected_base_revision":revision,"draft_id":draft["id"]}),
+        )
+        .await;
+        revision = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let job = sdk(
+                    mcp.peer(),
+                    "get_job",
+                    json!({"workspace_id":ws,"job_id":job["id"]}),
+                )
+                .await;
+                if job["state"] == "succeeded" {
+                    break job["resulting_revision"].clone();
+                }
+                assert!(
+                    ["queued", "running"].contains(&job["state"].as_str().unwrap()),
+                    "{job}"
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut args = json!({"workspace_id":ws,"revision":revision});
+        if name == "compare_views" {
+            args["capture_id"] = baseline_id.clone();
+        }
+        let result = mcp
+            .peer()
+            .call_tool(
+                CallToolRequestParams::new(name).with_arguments(args.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        let metadata = result.structured_content.unwrap();
+        assert!(metadata.get("images").is_none());
+        let schema = cadpad_core::tools::definition(name)
+            .unwrap()
+            .mcp_output_schema
+            .as_ref()
+            .unwrap();
+        assert!(
+            jsonschema::validator_for(schema)
+                .unwrap()
+                .is_valid(&metadata)
+        );
+        assert_eq!(
+            result
+                .content
+                .iter()
+                .filter(|block| matches!(block, rmcp::model::ContentBlock::Image(_)))
+                .count(),
+            expected_images
+        );
+        for view in metadata["views"].as_array().unwrap() {
+            assert!(
+                (view["after"]["numeric_context"][0]["volume"]
+                    .as_f64()
+                    .unwrap()
+                    - 100.0 * thickness as f64)
+                    .abs()
+                    < 1e-8
+            );
+            if name == "compare_views" {
+                assert!(
+                    (view["before"]["numeric_context"][0]["volume"]
+                        .as_f64()
+                        .unwrap()
+                        - 100.0)
+                        .abs()
+                        < 1e-8
+                );
+                assert_ne!(view["before"]["revision"], view["after"]["revision"]);
+            }
+        }
+        baseline_id = metadata["capture_id"].clone();
+    }
+    renderer.abort();
+    mcp.cancel().await.unwrap();
+    running_bridge.cancel().await.unwrap();
+}

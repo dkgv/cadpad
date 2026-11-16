@@ -143,6 +143,24 @@ impl ServerHandler for Bridge {
                             .to_string(),
                     ));
                     result
+                } else if let Some(Value::Array(images)) = value
+                    .as_object_mut()
+                    .and_then(|value| value.remove("images"))
+                {
+                    let mut result = CallToolResult::structured(value);
+                    for image in images {
+                        result.content.push(ContentBlock::text(
+                            image["label"].as_str().unwrap_or("View"),
+                        ));
+                        result.content.push(ContentBlock::image(
+                            image["data"].as_str().unwrap_or("").to_string(),
+                            image["mime_type"]
+                                .as_str()
+                                .unwrap_or("image/png")
+                                .to_string(),
+                        ));
+                    }
+                    result
                 } else if request.name == "export" {
                     let workspace = args_workspace(&request.arguments);
                     let uri = format!(
