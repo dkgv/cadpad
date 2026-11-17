@@ -48,31 +48,6 @@ pub(crate) fn reset_missing_model_entry(inputs: &mut crate::Inputs) {
     }
 }
 
-// Ignore private view adapters and build-discovered dependencies when comparing user content.
-// Comparing borrowed inputs avoids copying scene metadata or Python source strings.
-pub(crate) fn same_project_content(current: &crate::Inputs, saved: &crate::Inputs) -> bool {
-    let generated_entry = |inputs: &crate::Inputs| {
-        inputs.files.get(&inputs.entry_point).is_some_and(|source| {
-            source.starts_with("# Generated Cadpad entry point.")
-                || source == portable::PROJECT_BROWSER_SOURCE
-        })
-    };
-    let current_generated = generated_entry(current);
-    let saved_generated = generated_entry(saved);
-    current
-        .files
-        .iter()
-        .filter(|(path, _)| !current_generated || *path != &current.entry_point)
-        .eq(saved
-            .files
-            .iter()
-            .filter(|(path, _)| !saved_generated || *path != &saved.entry_point))
-        && (current.entry_point == saved.entry_point || current_generated || saved_generated)
-        && current.assets == saved.assets
-        && current.parameters == saved.parameters
-        && current.annotations == saved.annotations
-        && current.mechanism == saved.mechanism
-}
 
 impl Core {
     pub async fn project_directory(&self, workspace: &str) -> Result<PathBuf> {
@@ -131,15 +106,16 @@ impl Core {
         Ok(plan)
     }
     pub async fn index_project_sources(&self, workspace: &str, revision: &str) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace).await?;
         let sources = {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             let ws = all
                 .get(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
             ws.stored
                 .revisions
-                .get(revision)
-                .ok_or_else(|| Error::domain("REVISION_CONFLICT", "Unknown revision"))?
+                .load(revision)
+                .await?
                 .inputs
                 .files
                 .iter()
@@ -206,7 +182,12 @@ impl Core {
             .and_then(|ws| ws.stored.model_parent.clone())
     }
     pub async fn model_source_dirty(&self, workspace: &str) -> bool {
-        let all = self.workspaces.lock().await;
+        let Ok(_memory) = self.pin_workspace(workspace).await else {
+            return false;
+        };
+        let Ok(all) = self.workspace(workspace).await else {
+            return false;
+        };
         let Some(ws) = all.get(workspace) else {
             return false;
         };
@@ -216,24 +197,11 @@ impl Core {
         let Some(binding) = ws.stored.project.as_ref() else {
             return false;
         };
-        let Some(saved) = ws.stored.revisions.get(&binding.saved_revision) else {
+        let Some(saved) = ws.stored.revisions.header(&binding.saved_revision) else {
             return false;
         };
-        let current = &ws.stored.revisions[&ws.stored.current].inputs;
-        let previous = &saved.inputs;
-        let files = |inputs: &crate::Inputs| {
-            inputs
-                .files
-                .iter()
-                .filter(|(path, _)| *path != &current.entry_point)
-                .map(|(path, value)| (path.clone(), value.clone()))
-                .collect::<std::collections::BTreeMap<_, _>>()
-        };
-        files(current) != files(previous)
-            || current.assets != previous.assets
-            || current.parameters != previous.parameters
-            || current.annotations != previous.annotations
-            || current.mechanism != previous.mechanism
+        let current = ws.stored.revisions.header(&ws.stored.current).unwrap();
+        !current.same_content(saved)
     }
     pub async fn open_project_model(
         &self,
@@ -243,10 +211,11 @@ impl Core {
         builder: &str,
         actor: &str,
     ) -> Result<(String, crate::Job)> {
+        let _memory = self.pin_workspace(workspace).await?;
         // Opening a model executes the selected disk sources in a private view.
         // Keep the project's saved checkpoints independent of that live layout.
         let directory = {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             let parent = all
                 .get(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -270,7 +239,7 @@ impl Core {
         let workspace_id = crate::id();
         let base = crate::id();
         {
-            let mut all = self.workspaces.lock().await;
+            let mut all = self.workspace(workspace).await?;
             self.ensure_actor_active(actor)?;
             let parent = all
                 .get(workspace)
@@ -289,8 +258,8 @@ impl Core {
                     .unwrap_or_else(|| workspace.into()),
             );
             stored.id = workspace_id.clone();
+            let mut initial = stored.current_revision().clone();
             stored.current = base.clone();
-            let mut initial = stored.revisions[revision].clone();
             initial.id = base.clone();
             initial.parent = Some(revision.into());
             initial.model = json!({"parts":[]});
@@ -312,6 +281,9 @@ impl Core {
             all.insert(
                 workspace_id.clone(),
                 crate::Workspace {
+                    archived: None,
+                    memory: std::sync::Arc::new(()),
+                    saved_pose: None,
                     stored,
                     motion: None,
                     recovery: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -342,6 +314,7 @@ impl Core {
         builder: &str,
         actor: &str,
     ) -> Result<crate::Job> {
+        let _memory = self.pin_workspace(workspace).await?;
         let source = self.read_source(workspace, revision, entry).await?;
         let mut group_builders = Vec::new();
         if builder == "$group" {
@@ -388,7 +361,7 @@ impl Core {
             })?
             .to_string();
         let draft = {
-            let mut all = self.workspaces.lock().await;
+            let mut all = self.workspace(workspace).await?;
             self.ensure_actor_active(actor)?;
             let ws = all
                 .get_mut(workspace)
@@ -399,7 +372,7 @@ impl Core {
                     "Project changed while selecting a builder",
                 ));
             }
-            let inputs = ws.stored.revisions[revision].inputs.clone();
+            let inputs = ws.stored.current_revision().inputs.clone();
             let mut draft = Self::input_draft(inputs, revision, actor);
             let existing = &draft.inputs.entry_point;
             let name = if draft.inputs.files.get(existing).is_some_and(|source| {
@@ -432,8 +405,9 @@ impl Core {
         revision: &str,
         fingerprint: Option<&str>,
     ) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace).await?;
         let directory = {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             let ws = all
                 .get(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;

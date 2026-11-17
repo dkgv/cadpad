@@ -767,81 +767,27 @@ impl Core {
         let (referenced, current, meshes, ranks, protected) = {
             let workspaces = self.workspaces.lock().await;
             let mut hashes = HashSet::new();
-            for ws in workspaces.values() {
-                for inputs in ws
-                    .stored
-                    .revisions
-                    .values()
-                    .map(|r| &r.inputs)
-                    .chain(ws.stored.drafts.values().map(|d| &d.inputs))
-                    .chain(ws.stored.job_snapshots.values().map(|d| &d.inputs))
-                {
-                    hashes.extend(inputs.assets.values().cloned());
-                }
-                hashes.extend(ws.stored.recordings.values().map(|r| r.digest.clone()));
-            }
-            let mut current = workspaces
-                .iter()
-                .map(|(id, ws)| (id.clone(), ws.stored.current.clone()))
-                .collect::<HashSet<_>>();
+            let mut current = HashSet::new();
+            let mut meshes = MeshRoots::new();
+            let mut protected = HashSet::new();
             for (id, ws) in workspaces.iter() {
-                for revision in crate::geometry_cache::retained_revisions(&ws.stored.geometry_cache)
-                {
-                    current.insert((id.clone(), revision));
+                let resident;
+                let catalog = if let Some(catalog) = &ws.archived {
+                    catalog
+                } else {
+                    resident = crate::workspace_memory::Catalog::from_stored(&ws.stored);
+                    &resident
+                };
+                hashes.extend(catalog.blobs.iter().cloned());
+                current.insert((id.clone(), ws.stored.current.clone()));
+                for (revision, handles) in &catalog.meshes {
+                    current.insert((id.clone(), revision.clone()));
+                    meshes.push((id.clone(), revision.clone(), handles.clone()));
+                }
+                if catalog.protected {
+                    protected.insert((id.clone(), ws.stored.current.clone()));
                 }
             }
-            let meshes = workspaces
-                .iter()
-                .flat_map(|(id, ws)| {
-                    let mut roots = Vec::new();
-                    let revision = ws.stored.current.clone();
-                    let mut handles = HashSet::new();
-                    handles.extend(crate::geometry_cache::handles(
-                        &ws.stored.geometry_cache,
-                        &revision,
-                    ));
-                    if let Some(parts) = ws.stored.revisions[&revision].model["parts"].as_array() {
-                        for part in parts {
-                            if let Some(buffers) = part["mesh"]["buffers"].as_object() {
-                                handles.extend(buffers.values().filter_map(|value| {
-                                    value["handle"].as_str().map(str::to_owned)
-                                }));
-                            }
-                        }
-                    }
-                    roots.push((id.clone(), revision, handles));
-                    for offer_revision in
-                        crate::geometry_cache::retained_revisions(&ws.stored.geometry_cache)
-                    {
-                        if offer_revision == ws.stored.current {
-                            continue;
-                        }
-                        let handles = crate::geometry_cache::handles(
-                            &ws.stored.geometry_cache,
-                            &offer_revision,
-                        )
-                        .into_iter()
-                        .collect::<HashSet<_>>();
-                        if !handles.is_empty() {
-                            roots.push((id.clone(), offer_revision, handles));
-                        }
-                    }
-                    roots
-                })
-                .collect::<MeshRoots>();
-            let protected = workspaces
-                .iter()
-                .filter_map(|(id, ws)| {
-                    let model = &ws.stored.revisions[&ws.stored.current].model;
-                    if crate::recovery::validate_publication(model).is_err()
-                        || crate::recovery::validate_display_publication(model).is_err()
-                    {
-                        Some((id.clone(), ws.stored.current.clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<HashSet<_>>();
             let ranks = self.display_use.ranks(&meshes);
             (hashes, current, meshes, ranks, protected)
         };
@@ -1117,7 +1063,7 @@ mod tests {
                 .unwrap()
                 .stored
                 .revisions
-                .get_mut(&rev)
+                .resident_mut(&rev)
                 .unwrap()
                 .model["parts"] = serde_json::json!([{"geometry_fingerprint":{"format":"occt-brep-v3-no-display-v1","sha256":"a".repeat(64)},"mesh":{"format":crate::artifacts::MESH_FORMAT,"buffers":{"vertices":{"handle":name}}}}]);
         }
@@ -1235,7 +1181,7 @@ mod tests {
                 .unwrap()
                 .stored
                 .revisions
-                .get_mut(&rev)
+                .resident_mut(&rev)
                 .unwrap()
                 .model["parts"] = serde_json::json!([{"mesh":{"format":crate::artifacts::MESH_FORMAT,"buffers":{"vertices":{"handle":name}}}}]);
         }

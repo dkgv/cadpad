@@ -246,7 +246,8 @@ impl crate::Core {
         &self,
         workspace: &str,
     ) -> Result<Option<(Origin, String, Inputs)>> {
-        let workspaces = self.workspaces.lock().await;
+        let _memory = self.pin_workspace(workspace).await?;
+        let workspaces = self.workspace(workspace).await?;
         let ws = workspaces
             .get(workspace)
             .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -257,7 +258,7 @@ impl crate::Core {
             (
                 origin.clone(),
                 ws.stored.current.clone(),
-                ws.stored.revisions[&ws.stored.current].inputs.clone(),
+                ws.stored.current_revision().inputs.clone(),
             )
         }))
     }
@@ -284,6 +285,7 @@ impl crate::Core {
         actor: &str,
         resolutions: &BTreeMap<String, Resolution>,
     ) -> Result<Option<crate::Draft>> {
+        let _memory = self.pin_workspace(workspace).await?;
         let Some((origin, revision, inputs)) = self.python_origin_context(workspace).await? else {
             return Ok(None);
         };
@@ -313,7 +315,7 @@ impl crate::Core {
         .await
         .map_err(|_| Error::domain("IO_ERROR", "Python origin reload failed"))??;
         self.validate_asset_budget(&merged).await?;
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(workspace).await?;
         self.ensure_actor_active(actor)?;
         let ws = workspaces
             .get_mut(workspace)
@@ -329,7 +331,7 @@ impl crate::Core {
         }
         let mut draft = Self::input_draft(merged, base, actor);
         draft.python_origin = Some(origin);
-        draft.source_hashes = ws.stored.revisions[base]
+        draft.source_hashes = ws.stored.current_revision()
             .inputs
             .files
             .iter()

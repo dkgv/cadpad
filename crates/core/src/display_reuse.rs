@@ -262,9 +262,10 @@ impl Core {
         policy: String,
         mut cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace).await?;
         cancelled(&cancel)?;
         let old = {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             let ws = &all[workspace];
             if ws.stored.current != base {
                 return Err(Error::domain(
@@ -272,7 +273,7 @@ impl Core {
                     "Revision changed before display generation",
                 ));
             }
-            ws.stored.revisions[base].model.clone()
+            ws.stored.current_revision().model.clone()
         };
         let publication = tokio::select! { biased;
             _=cancel.changed()=>return Err(Error::domain("CANCELLED","Cancelled while waiting for display reuse")),
@@ -311,6 +312,7 @@ impl Core {
         mut params: Value,
         cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace).await?;
         params["generate_mesh"] = json!(false);
         let digest = params["input_digest"].as_str().unwrap_or("").to_owned();
         params["geometry_cache"] = self
@@ -336,7 +338,7 @@ impl Core {
             .await?;
         cancelled(&cancel)?;
         {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             if all[workspace].stored.current != base {
                 return Err(Error::domain(
                     "REVISION_CONFLICT",

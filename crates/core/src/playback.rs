@@ -430,17 +430,18 @@ pub(crate) fn metadata_fingerprint(
 }
 impl Core {
     pub async fn control_playback(&self, actor: &str, args: Control) -> Result<Reply> {
+        let _memory = self.pin_workspace(&args.workspace_id).await?;
         let _publication = self.blob_publication.read().await;
         self.ensure_actor_active(actor)?;
         // Serialize disk work on bounded private copies outside the workspace lock.
         let (saved, loaded, cached, mechanism) = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(&args.workspace_id).await?;
             let ws = workspaces
                 .get_mut(&args.workspace_id)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
             revision(ws, &args)?;
             version(motion::state(ws)?, &args)?;
-            let fingerprint = portable::fingerprint(&ws.stored.revisions[&args.revision].inputs)?;
+            let fingerprint = portable::fingerprint(&ws.stored.current_revision().inputs)?;
             match &args.command {
                 Command::FinishRecording => {
                     let recorder = motion::state(ws)?
@@ -453,7 +454,7 @@ impl Core {
                     (Some((recorder, fingerprint)), None, None, None)
                 }
                 Command::Select { recording_id, .. } => {
-                    if ws.stored.revisions[&args.revision].model["rebuild_required"] == true {
+                    if ws.stored.current_revision().model["rebuild_required"] == true {
                         return Err(Error::domain(
                             "UNSUPPORTED_OPERATION",
                             "Build the saved design before opening its recordings",
@@ -546,7 +547,7 @@ impl Core {
         })
         .await
         .map_err(|_| invalid("Recording storage task failed"))??;
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let ws = workspaces
             .get_mut(&args.workspace_id)

@@ -28,11 +28,14 @@ pub mod project_result;
 pub mod projects;
 pub mod recovery;
 pub mod runtime;
+mod snapshots;
 mod source_files;
 pub mod tools;
 pub mod views;
 pub mod worker;
 mod worker_cache;
+mod workspace_memory;
+use snapshots::Snapshots;
 pub use source_files::SourceFiles;
 pub mod worker_limits;
 
@@ -79,7 +82,7 @@ impl Error {
         }
     }
 }
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct Inputs {
     pub files: SourceFiles,
     pub parameters: Value,
@@ -170,11 +173,11 @@ struct StoredWorkspace {
     schema_version: u32,
     id: String,
     current: String,
-    revisions: BTreeMap<String, Revision>,
-    drafts: BTreeMap<String, Draft>,
+    revisions: Snapshots<Revision>,
+    drafts: Snapshots<Draft>,
     jobs: BTreeMap<String, Job>,
     #[serde(default)]
-    job_snapshots: BTreeMap<String, Draft>,
+    job_snapshots: Snapshots<Draft>,
     #[serde(default)]
     project: Option<portable::Binding>,
     #[serde(default)]
@@ -190,7 +193,25 @@ struct StoredWorkspace {
     #[serde(default)]
     geometry_cache: Value,
 }
+impl StoredWorkspace {
+    fn current_revision(&self) -> &Revision {
+        self.revisions
+            .resident(&self.current)
+            .expect("current snapshot is loaded")
+    }
+    async fn retain_current(&mut self) -> Result<()> {
+        self.revisions.retain_current(Some(&self.current)).await?;
+        self.drafts.retain_current(None).await?;
+        self.job_snapshots.retain_current(None).await?;
+        Ok(())
+    }
+}
 struct Workspace {
+    // When archived, stored contains only catalog fields. Access full history
+    // through Core::workspace while holding a WorkspaceUse operation lease.
+    archived: Option<workspace_memory::Catalog>,
+    memory: Arc<()>,
+    saved_pose: Option<motion::IdlePose>,
     motion: Option<motion::State>,
     recovery: Arc<Mutex<()>>,
     // Ephemeral identity of the committed display publication, even when a
@@ -259,7 +280,8 @@ fn validate_path(path: &str) -> Result<()> {
     Ok(())
 }
 impl Core {
-    /// Desktop visibility controls only warm idle workers; in-flight native leases are never stopped.
+    /// Keep full history and idle native state only for visible desktop workspaces.
+    /// In-flight operations retain their state until their leases finish.
     pub fn retain_workspace_memory(&self, workspaces: Vec<String>) {
         self.worker_cache.retain(workspaces);
     }
@@ -323,7 +345,7 @@ impl Core {
                 "Cadpad application data is already open in another core instance",
             )
         })?;
-        let process_lock = ProcessLock(process_lock);
+        let process_lock = Arc::new(ProcessLock(process_lock));
         let mut workspaces = HashMap::new();
         let mut entries = tokio::fs::read_dir(root.join("workspaces")).await?;
         while let Some(entry) = entries.next_entry().await? {
@@ -331,42 +353,20 @@ impl Core {
             if !path.exists() {
                 continue;
             }
-            let mut stored: StoredWorkspace =
-                serde_json::from_slice(&tokio::fs::read(path).await?)?;
-            if stored.schema_version != 1 {
+            let scan_lock = process_lock.clone();
+            let workspace = tokio::task::spawn_blocking(move || {
+                let _process_lock = scan_lock;
+                workspace_memory::read_catalog(&path)
+            })
+            .await
+            .map_err(|e| Error::domain("IO_ERROR", e.to_string()))??;
+            if entry.file_name().to_str() != Some(workspace.stored.id.as_str()) {
                 return Err(Error::domain(
-                    "UNSUPPORTED_OPERATION",
-                    "Unsupported workspace schema",
+                    "INVALID_REQUEST",
+                    "Workspace directory does not match its identity",
                 ));
             }
-            // A process restart cannot resurrect a running native operation.
-            let mut recovered_jobs = false;
-            for job in stored.jobs.values_mut() {
-                if matches!(job.state, JobState::Queued | JobState::Running) {
-                    recovered_jobs = true;
-                    job.state = JobState::Failed;
-                    job.diagnostics = json!({"code":"WORKER_UNAVAILABLE","message":"Application restarted during build"});
-                }
-            }
-            // Only changed recovery state needs rewriting. Avoid cloning and
-            // serializing the entire saved history on every launch.
-            if recovered_jobs {
-                let directory = root.join("workspaces").join(&stored.id);
-                persist_workspace(&directory, &stored).await?;
-            }
-            workspaces.insert(
-                stored.id.clone(),
-                Workspace {
-                    recovery: Arc::new(Mutex::new(())),
-                    display_epoch: Arc::new(id()),
-                    // Recover collision/motion resources only when requested.
-                    motion: None,
-                    stored,
-                    worker: None,
-                    worker_last_used: 0,
-                    cancellation: HashMap::new(),
-                },
-            );
+            workspaces.insert(workspace.stored.id.clone(), workspace);
         }
         let workspaces = Arc::new(Mutex::new(workspaces));
         let worker_cache = Arc::new(worker_cache::WorkerCache::new(&workspaces));
@@ -381,7 +381,7 @@ impl Core {
             native_admission_gate: Arc::new(Mutex::new(())),
             motion_test_runs: Arc::new(motion_test_runs::Runs::default()),
             actor_tokens: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            _process_lock: Arc::new(process_lock),
+            _process_lock: process_lock,
             views: views::ViewService::default(),
             activity: tokio::sync::broadcast::channel(128).0,
             motion_events: tokio::sync::broadcast::channel(32).0,
@@ -400,7 +400,7 @@ impl Core {
     }
     async fn persist(&self, stored: &StoredWorkspace) -> Result<()> {
         let directory = self.root.join("workspaces").join(&stored.id);
-        persist_workspace(&directory, stored).await
+        persist_workspace(&directory, stored, self._process_lock.clone()).await
     }
     pub fn disk_usage(&self) -> Result<cache::DiskUsage> {
         cache::managed_disk_usage(&self.root, self.disk_quota_bytes)
@@ -440,14 +440,14 @@ impl Core {
             model_parent: None,
             geometry_cache: Value::Null,
             motion_tests: BTreeMap::new(),
-            job_snapshots: BTreeMap::new(),
+            job_snapshots: Snapshots::default(),
             recordings: BTreeMap::new(),
             recording_imports: BTreeMap::new(),
             schema_version: 1,
             id: workspace_id.clone(),
             current: revision_id.clone(),
-            revisions: BTreeMap::from([(revision_id, revision)]),
-            drafts: BTreeMap::new(),
+            revisions: BTreeMap::from([(revision_id, revision)]).into(),
+            drafts: Snapshots::default(),
             jobs: BTreeMap::new(),
             project: None,
             python_origin: None,
@@ -457,6 +457,9 @@ impl Core {
         workspaces.insert(
             workspace_id.clone(),
             Workspace {
+                archived: None,
+                memory: Arc::new(()),
+                saved_pose: None,
                 recovery: Arc::new(Mutex::new(())),
                 display_epoch: Arc::new(id()),
                 motion: None,
@@ -476,9 +479,10 @@ impl Core {
         self.workspaces.lock().await.contains_key(workspace_id)
     }
     pub async fn get_project(&self, workspace_id: &str) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         for _ in 0..3 {
             let checked = self.ensure_display_cache(workspace_id).await?;
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces
                 .get_mut(workspace_id)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -492,14 +496,13 @@ impl Core {
             let motion = motion::snapshot(ws)?;
             let recording_fingerprint = playback::metadata_fingerprint(&ws.stored.recordings)?;
             let tests_fingerprint = motion_tests::catalog_fingerprint(&ws.stored.motion_tests)?;
-            let revision = &ws.stored.revisions[&ws.stored.current];
+            let revision = ws.stored.current_revision();
+            let current_header = ws.stored.revisions.header(&ws.stored.current).unwrap();
             let unsaved_changes = ws.stored.project.as_ref().is_none_or(|binding| {
                 ws.stored
                     .revisions
-                    .get(&binding.saved_revision)
-                    .is_none_or(|saved| {
-                        !project_entry::same_project_content(&revision.inputs, &saved.inputs)
-                    })
+                    .header(&binding.saved_revision)
+                    .is_none_or(|saved| !saved.same_content(current_header))
                     || binding.recording_fingerprint != recording_fingerprint
                     || binding.motion_test_fingerprint != tests_fingerprint
             });
@@ -531,24 +534,18 @@ impl Core {
         version: &str,
         path: &str,
     ) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         validate_path(path)?;
-        let workspaces = self.workspaces.lock().await;
+        let workspaces = self.workspace_metadata(workspace_id).await?;
         let ws = workspaces
             .get(workspace_id)
             .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
-        let inputs = if let Some(draft) = ws
-            .stored
-            .drafts
-            .get(version)
-            .or_else(|| ws.stored.job_snapshots.get(version))
-        {
-            &draft.inputs
+        let inputs = if ws.stored.drafts.contains_key(version) {
+            ws.stored.drafts.load(version).await?.inputs.clone()
+        } else if ws.stored.job_snapshots.contains_key(version) {
+            ws.stored.job_snapshots.load(version).await?.inputs.clone()
         } else {
-            &ws.stored
-                .revisions
-                .get(version)
-                .ok_or_else(|| Error::domain("REVISION_CONFLICT", "Unknown revision or draft"))?
-                .inputs
+            ws.stored.revisions.load(version).await?.inputs.clone()
         };
         let source = inputs
             .files
@@ -568,6 +565,7 @@ impl Core {
         changes: BTreeMap<String, String>,
         actor: &str,
     ) -> Result<Draft> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         for (path, source) in &changes {
             validate_path(path)?;
             if source.len() > 1024 * 1024 {
@@ -577,7 +575,7 @@ impl Core {
                 ));
             }
         }
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let ws = workspaces
             .get_mut(workspace_id)
@@ -589,20 +587,16 @@ impl Core {
             ));
         }
         let mut draft = if let Some(draft_id) = draft_id {
-            let draft = ws
-                .stored
-                .drafts
-                .get(draft_id)
-                .ok_or_else(|| Error::domain("INVALID_REQUEST", "Unknown draft"))?;
+            let draft = ws.stored.drafts.load(draft_id).await?;
             if draft.actor != actor || draft.base_revision != base {
                 return Err(Error::domain(
                     "REVISION_CONFLICT",
                     "Draft ownership or base mismatch",
                 ));
             }
-            draft.clone()
+            draft.as_ref().clone()
         } else {
-            let inputs = ws.stored.revisions[base].inputs.clone();
+            let inputs = ws.stored.current_revision().inputs.clone();
             Draft {
                 id: id(),
                 base_revision: base.into(),
@@ -648,8 +642,9 @@ impl Core {
         actor: &str,
         kind: JobKind,
     ) -> Result<Job> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         let (job, snapshot, receive) = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(workspace_id).await?;
             self.ensure_actor_active(actor)?;
             let ws = workspaces
                 .get(workspace_id)
@@ -660,11 +655,7 @@ impl Core {
                     "Expected base is no longer current",
                 ));
             }
-            let draft = ws
-                .stored
-                .drafts
-                .get(draft_id)
-                .ok_or_else(|| Error::domain("INVALID_REQUEST", "Unknown draft"))?;
+            let draft = ws.stored.drafts.load(draft_id).await?;
             if draft.base_revision != base || draft.actor != actor {
                 return Err(Error::domain(
                     "REVISION_CONFLICT",
@@ -672,7 +663,7 @@ impl Core {
                 ));
             }
             construction::check_job_capacity(&workspaces, workspace_id, actor)?;
-            let mut snapshot = draft.clone();
+            let mut snapshot = draft.as_ref().clone();
             snapshot.id = id();
             let job = Job {
                 kind: kind.clone(),
@@ -761,6 +752,9 @@ impl Core {
         draft: Draft,
         cancel: watch::Receiver<bool>,
     ) {
+        let Ok(_memory) = self.pin_workspace(workspace_id).await else {
+            return;
+        };
         let revision_id = id();
         let mut slot = None;
         let mut recording_publication = None;
@@ -771,7 +765,7 @@ impl Core {
             Vec<portable_recordings::Rebinding>,
         )> = async {
             {
-                let workspaces = self.workspaces.lock().await;
+                let workspaces = self.workspace(workspace_id).await?;
                 let ws = workspaces.get(workspace_id).unwrap();
                 if ws.stored.current != draft.base_revision {
                     return Err(Error::domain(
@@ -789,7 +783,7 @@ impl Core {
                 ));
             }
             {
-                let mut workspaces = self.workspaces.lock().await;
+                let mut workspaces = self.workspace(workspace_id).await?;
                 let ws = workspaces.get_mut(workspace_id).unwrap();
                 if ws.stored.current != draft.base_revision {
                     return Err(Error::domain(
@@ -837,7 +831,7 @@ impl Core {
             let (admission, construction) = self.native_construction(cancel.clone()).await?;
             slot = Some(construction);
             {
-                let workspaces = self.workspaces.lock().await;
+                let workspaces = self.workspace(workspace_id).await?;
                 let ws = workspaces.get(workspace_id).unwrap();
                 if ws.stored.current != draft.base_revision {
                     return Err(Error::domain(
@@ -887,7 +881,7 @@ impl Core {
                         Ok(motion) => {
                             recording_publication = Some(self.blob_publication.read().await);
                             let (recordings, imports) = {
-                                let workspaces = self.workspaces.lock().await;
+                                let workspaces = self.workspace(workspace_id).await?;
                                 let ws = &workspaces[workspace_id];
                                 (
                                     ws.stored.recordings.clone(),
@@ -951,7 +945,9 @@ impl Core {
         }
         .await;
         let mut workspaces = self.workspaces.lock().await;
-        let ws = workspaces.get_mut(workspace_id).unwrap();
+        let Some(ws) = workspaces.get_mut(workspace_id) else {
+            return;
+        };
         let mut next = ws.stored.clone();
         let mut candidate = None;
         let mut candidate_motion = None;
@@ -1145,6 +1141,7 @@ impl Core {
         args: Value,
         receive: watch::Receiver<bool>,
     ) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         let mut args = args;
         let pose_version = self.query_pose(workspace_id, revision, &mut args).await?;
         if !matches!(method, "inspect" | "export") {
@@ -1169,7 +1166,7 @@ impl Core {
                 "CANCELLED" | "WORKER_UNAVAILABLE" | "IO_ERROR" | "RESOURCE_LIMIT"
             )
         {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces.get_mut(workspace_id).unwrap();
             if ws
                 .worker
@@ -1181,7 +1178,7 @@ impl Core {
         }
         let result = result?;
         // Caller can still receive useful old data, but it must never be published as current.
-        let workspaces = self.workspaces.lock().await;
+        let workspaces = self.workspace(workspace_id).await?;
         if workspaces[workspace_id].stored.current != revision {
             return Err(Error::domain(
                 "STALE_ENTITY",
@@ -1217,6 +1214,7 @@ impl Core {
         unit: &str,
         actor: &str,
     ) -> Result<Job> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         if !value.is_finite() {
             return Err(Error::domain(
                 "INVALID_PARAMETER",
@@ -1224,7 +1222,7 @@ impl Core {
             ));
         }
         let draft = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces
                 .get_mut(workspace_id)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -1234,7 +1232,7 @@ impl Core {
                     "Expected revision no longer current",
                 ));
             }
-            let mut inputs = ws.stored.revisions[base].inputs.clone();
+            let mut inputs = ws.stored.current_revision().inputs.clone();
             let specification = inputs
                 .parameters
                 .get_mut(parameter)
@@ -1286,8 +1284,9 @@ impl Core {
         expected: &str,
         target: &str,
     ) -> Result<Job> {
+        let _memory = self.pin_workspace(workspace).await?;
         let draft = {
-            let mut all = self.workspaces.lock().await;
+            let mut all = self.workspace(workspace).await?;
             let ws = all
                 .get_mut(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -1297,10 +1296,7 @@ impl Core {
                     "The model changed. Try reverting again.",
                 ));
             }
-            let revision =
-                ws.stored.revisions.get(target).ok_or_else(|| {
-                    Error::domain("INVALID_REQUEST", "Restore point is unavailable")
-                })?;
+            let revision = ws.stored.revisions.load(target).await?;
             let mut draft = Self::input_draft(revision.inputs.clone(), expected, "local-user");
             draft.restore_revision = Some(target.into());
             let mut next = ws.stored.clone();
@@ -1313,8 +1309,9 @@ impl Core {
             .await
     }
     pub async fn undo(&self, workspace_id: &str, expected: &str, actor: &str) -> Result<Job> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         let draft = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces
                 .get_mut(workspace_id)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -1324,28 +1321,38 @@ impl Core {
                     "Expected revision no longer current",
                 ));
             }
-            let current = &ws.stored.revisions[expected];
-            let cursor = current.restored_from.as_deref().unwrap_or(expected);
-            let mut previous = ws.stored.revisions[cursor].parent.as_deref();
+            let current = ws.stored.current_revision();
+            let header = ws.stored.revisions.header(expected).unwrap();
+            let cursor = header.restored_from.as_deref().unwrap_or(expected);
+            let mut previous = ws
+                .stored
+                .revisions
+                .header(cursor)
+                .and_then(|h| h.parent.as_deref());
             while let Some(target) = previous {
-                if portable::fingerprint(&ws.stored.revisions[target].inputs)?
-                    != portable::fingerprint(&current.inputs)?
-                {
+                let prior = ws
+                    .stored
+                    .revisions
+                    .header(target)
+                    .ok_or_else(|| Error::domain("INVALID_REQUEST", "Missing undo history"))?;
+                if prior.input_fingerprint != header.input_fingerprint {
                     break;
                 }
-                let cursor = ws.stored.revisions[target]
-                    .restored_from
-                    .as_deref()
-                    .unwrap_or(target);
-                previous = ws.stored.revisions[cursor].parent.as_deref();
+                let cursor = prior.restored_from.as_deref().unwrap_or(target);
+                previous = ws
+                    .stored
+                    .revisions
+                    .header(cursor)
+                    .and_then(|h| h.parent.as_deref());
             }
             let previous = previous
                 .ok_or_else(|| Error::domain("UNSUPPORTED_OPERATION", "No previous revision"))?;
-            let restore_revision = ws.stored.revisions[previous]
+            let prior = ws.stored.revisions.load(previous).await?;
+            let restore_revision = prior
                 .restored_from
                 .clone()
-                .unwrap_or_else(|| previous.to_string());
-            let inputs = ws.stored.revisions[previous].inputs.clone();
+                .unwrap_or_else(|| previous.into());
+            let inputs = prior.inputs.clone();
             let draft = Draft {
                 id: id(),
                 base_revision: expected.into(),
@@ -1405,7 +1412,20 @@ mod process_lock_tests {
         }
         drop(core);
         let reopened = Core::open(root.clone(), config).await.unwrap();
-        let mut all = reopened.workspaces.lock().await;
+        assert_eq!(
+            reopened
+                .get_job(&workspace, "interrupted")
+                .await
+                .unwrap()
+                .state,
+            JobState::Failed
+        );
+        assert!(
+            reopened.workspaces.lock().await[&workspace]
+                .archived
+                .is_some()
+        );
+        let mut all = reopened.workspace(&workspace).await.unwrap();
         let ws = all.get_mut(&workspace).unwrap();
         assert!(ws.motion.is_none());
         assert_eq!(ws.stored.jobs["interrupted"].state, JobState::Failed);
@@ -1451,15 +1471,32 @@ mod process_lock_tests {
 #[path = "../tests/unit/mod.rs"]
 mod contract_tests;
 
-async fn persist_workspace(directory: &std::path::Path, stored: &StoredWorkspace) -> Result<()> {
-    tokio::fs::create_dir_all(&directory).await?;
-    let temporary = directory.join(format!("{}.tmp", id()));
-    let bytes = serde_json::to_vec_pretty(stored)?;
-    use tokio::io::AsyncWriteExt;
-    let mut file = tokio::fs::File::create(&temporary).await?;
-    file.write_all(&bytes).await?;
-    file.sync_all().await?;
-    drop(file);
-    tokio::fs::rename(&temporary, directory.join("workspace.json")).await?;
+async fn persist_workspace(
+    directory: &std::path::Path,
+    stored: &StoredWorkspace,
+    process_lock: Arc<ProcessLock>,
+) -> Result<()> {
+    let directory = directory.to_path_buf();
+    let destination = directory.join("workspace.json");
+    let snapshot = stored.clone();
+    let commit_stored = stored.clone();
+    let catalog_lock = process_lock.clone();
+    let (temporary, publication) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let _process_lock = process_lock;
+        std::fs::create_dir_all(&directory)?;
+        let temporary = directory.join(format!("{}.tmp", id()));
+        let publication = snapshots::write(&temporary, &snapshot)?;
+        Ok((temporary, publication))
+    })
+    .await
+    .map_err(|e| Error::domain("IO_ERROR", e.to_string()))??;
+    tokio::fs::rename(temporary, &destination).await?;
+    let _ = tokio::task::spawn_blocking(move || -> Result<()> {
+        let _process_lock = catalog_lock;
+        let directory = destination.parent().unwrap();
+        let stamp = publication.commit(directory, &commit_stored)?;
+        workspace_memory::CatalogFile::new(stamp, &commit_stored).write(directory)
+    })
+    .await;
     Ok(())
 }

@@ -37,7 +37,7 @@ pub(crate) struct Loaded {
     pub recordings: BTreeMap<String, playback::Metadata>,
     pub imports: BTreeMap<String, Import>,
     pub blobs: BTreeMap<String, Vec<u8>>,
-    pub revisions: BTreeMap<String, Revision>,
+    pub revisions: crate::Snapshots<Revision>,
 }
 pub(crate) struct Rebinding {
     pub id: String,
@@ -55,10 +55,8 @@ pub(crate) fn model_fingerprint(model: &Value) -> Result<String> {
     contract.as_object_mut().unwrap().remove("revision");
     Ok(portable::bytes_hash(&serde_json::to_vec(&contract)?))
 }
-fn validate_entry(entry: &Entry, revisions: &BTreeMap<String, Revision>) -> Result<()> {
-    let revision = revisions
-        .get(&entry.metadata.revision)
-        .ok_or_else(|| invalid("Recording references missing source history"))?;
+fn validate_entry(entry: &Entry, revisions: &crate::Snapshots<Revision>) -> Result<()> {
+    let revision = revisions.read(&entry.metadata.revision)?;
     if !portable::valid_hash(&entry.model_fingerprint)
         || entry.metadata.bytes > MAX_BYTES
         || !portable::valid_hash(&entry.metadata.digest)
@@ -74,7 +72,7 @@ pub(crate) fn save(
     blobs: &Path,
     recordings: &BTreeMap<String, playback::Metadata>,
     imports: &BTreeMap<String, Import>,
-    revisions: &BTreeMap<String, Revision>,
+    revisions: &crate::Snapshots<Revision>,
 ) -> Result<Option<String>> {
     if recordings.is_empty() {
         return Ok(None);
@@ -94,9 +92,7 @@ pub(crate) fn save(
             .checked_add(metadata.bytes)
             .filter(|n| *n <= TOTAL_BYTES)
             .ok_or_else(|| invalid("Portable recordings exceed 64 MiB"))?;
-        let model = revisions
-            .get(&metadata.revision)
-            .ok_or_else(|| invalid("Recording revision is missing"))?;
+        let model = revisions.read(&metadata.revision)?;
         let model_fingerprint = if model.model["rebuild_required"] == true {
             imports
                 .get(id)
@@ -141,7 +137,7 @@ pub(crate) fn save(
 pub(crate) fn load(
     root: &Path,
     manifest: &portable::Manifest,
-    revisions: &BTreeMap<String, Revision>,
+    revisions: &crate::Snapshots<Revision>,
 ) -> Result<Loaded> {
     let Some(digest) = &manifest.recordings else {
         return Ok(Loaded::default());
@@ -171,7 +167,8 @@ pub(crate) fn load(
             if uuid::Uuid::parse_str(&entry.metadata.revision).is_err() {
                 return Err(invalid("Invalid recording revision"));
             }
-            if let Some(prior) = sources.get(&entry.metadata.revision) {
+            if sources.contains_key(&entry.metadata.revision) {
+                let prior = sources.read(&entry.metadata.revision)?;
                 if portable::fingerprint(&prior.inputs)? != portable::fingerprint(inputs)? {
                     return Err(invalid("Conflicting recording source provenance"));
                 }
@@ -186,8 +183,8 @@ pub(crate) fn load(
                 };
                 loaded
                     .revisions
-                    .insert(revision.id.clone(), revision.clone());
-                sources.insert(revision.id.clone(), revision);
+                    .park(revision.id.clone(), revision.clone())?;
+                sources.park(revision.id.clone(), revision)?;
             }
         }
         validate_entry(&entry, &sources)?;

@@ -714,6 +714,7 @@ impl Core {
         Ok(result)
     }
     pub async fn set_dimensions(&self, actor: &str, args: SetDimensions) -> Result<Value> {
+        let _memory = self.pin_workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let project = self.get_project(&args.workspace_id).await?;
         let revision = project["revision"].as_str().unwrap();
@@ -745,7 +746,7 @@ impl Core {
                 "Viewport did not apply the requested dimension settings",
             ));
         }
-        let workspaces = self.workspaces.lock().await;
+        let workspaces = self.workspace(&args.workspace_id).await?;
         if workspaces
             .get(&args.workspace_id)
             .is_none_or(|ws| ws.stored.current != revision)

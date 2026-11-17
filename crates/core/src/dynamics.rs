@@ -1423,9 +1423,10 @@ impl crate::Core {
         actor: &str,
         args: Control,
     ) -> Result<crate::motion::Snapshot> {
+        let _memory = self.pin_workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let (mechanism, current, model, recorder) = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(&args.workspace_id).await?;
             let ws = workspaces
                 .get_mut(&args.workspace_id)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -1462,7 +1463,7 @@ impl crate::Core {
             (
                 mechanism,
                 current,
-                ws.stored.revisions[&args.revision].model.clone(),
+                ws.stored.current_revision().model.clone(),
                 recorder,
             )
         };
@@ -1530,7 +1531,7 @@ impl crate::Core {
                 "Simulation task failed; committed pose preserved",
             )
         })??;
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let ws = workspaces
             .get_mut(&args.workspace_id)

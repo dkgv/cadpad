@@ -17,6 +17,7 @@ pub(crate) const MAX_IDLE_WORKERS: usize = 4;
 type Workspaces = Mutex<HashMap<String, Workspace>>;
 
 pub(crate) struct WorkerCache {
+    runtime: tokio::runtime::Handle,
     workspaces: Weak<Workspaces>,
     clock: AtomicU64,
     queued: AtomicBool,
@@ -31,6 +32,7 @@ impl Drop for QueuedMaintenance {
 impl WorkerCache {
     pub(crate) fn new(workspaces: &Arc<Workspaces>) -> Self {
         Self {
+            runtime: tokio::runtime::Handle::current(),
             workspaces: Arc::downgrade(workspaces),
             clock: AtomicU64::new(1),
             queued: AtomicBool::new(false),
@@ -70,27 +72,30 @@ impl WorkerCache {
         Arc::try_unwrap(worker).ok().map(Mutex::into_inner)
     }
     pub(crate) fn schedule(self: &Arc<Self>) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
         if self.queued.swap(true, Ordering::AcqRel) {
             return;
         }
         let cache = self.clone();
         let queued = QueuedMaintenance(cache.clone());
-        runtime.spawn(async move {
+        self.runtime.spawn(async move {
             // Coalesce queued maintenance. New idle workers during native stop
             // can schedule a later pass, without retaining the Core/app lock.
             drop(queued);
             cache.trim().await;
         });
     }
-    async fn trim(&self) {
+    pub(crate) async fn trim(&self) {
         let Some(workspaces) = self.workspaces.upgrade() else {
             return;
         };
         let retired = {
             let mut workspaces = workspaces.lock().await;
+            for workspace in workspaces.values_mut() {
+                let current = workspace.stored.current.clone();
+                workspace.stored.revisions.release_except(Some(&current));
+                workspace.stored.drafts.release_except(None);
+                workspace.stored.job_snapshots.release_except(None);
+            }
             let mut idle = workspaces
                 .iter()
                 .filter_map(|(id, workspace)| {
@@ -104,7 +109,8 @@ impl WorkerCache {
             idle.sort_unstable_by(|a, b| b.cmp(a));
             let retained = self.retained.read().unwrap();
             let mut kept = 0;
-            idle.into_iter()
+            let retired = idle
+                .into_iter()
                 .filter(|(_, id)| {
                     if kept < MAX_IDLE_WORKERS
                         && retained.as_ref().is_none_or(|ids| ids.contains(id))
@@ -116,7 +122,15 @@ impl WorkerCache {
                     }
                 })
                 .filter_map(|(_, id)| workspaces.get_mut(&id).unwrap().worker.take())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            if let Some(retained) = retained.as_ref() {
+                for (id, workspace) in workspaces.iter_mut() {
+                    if !retained.contains(id) {
+                        workspace.archive();
+                    }
+                }
+            }
+            retired
         };
         // Acquisition/removal share the workspace lock. No borrower can acquire
         // an evicted registry between the idle check and taking its sole Arc.

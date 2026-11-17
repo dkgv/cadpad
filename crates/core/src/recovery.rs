@@ -82,8 +82,9 @@ impl Core {
         revision: &str,
         cancel: watch::Receiver<bool>,
     ) -> Result<crate::worker_cache::WorkerUse> {
+        let _memory = self.pin_workspace(workspace).await?;
         let recovery = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace).await?;
             let ws = workspaces
                 .get(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -101,7 +102,7 @@ impl Core {
         }
         let _recovery = tokio::select! {guard=recovery.lock()=>guard,_=cancel.changed()=>return Err(Error::domain("CANCELLED","Cancelled while waiting for native recovery"))};
         let (inputs, expected) = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(workspace).await?;
             let ws = workspaces.get_mut(workspace).unwrap();
             if ws.stored.current != revision {
                 return Err(Error::domain(
@@ -113,8 +114,8 @@ impl Core {
                 return Ok(worker);
             }
             (
-                ws.stored.revisions[revision].inputs.clone(),
-                ws.stored.revisions[revision].model.clone(),
+                ws.stored.current_revision().inputs.clone(),
+                ws.stored.current_revision().model.clone(),
             )
         };
         if !expected["parts"].as_array().is_some_and(Vec::is_empty) {
@@ -127,7 +128,7 @@ impl Core {
         }
         let (admission, _slot) = self.native_construction(cancel.clone()).await?;
         {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(workspace).await?;
             let ws = workspaces.get_mut(workspace).unwrap();
             if ws.stored.current != revision {
                 return Err(Error::domain(
@@ -172,7 +173,7 @@ impl Core {
             let _ = worker.stop().await;
             return Err(error);
         }
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(workspace).await?;
         let ws = workspaces.get_mut(workspace).unwrap();
         if ws.stored.current != revision {
             drop(workspaces);
@@ -188,14 +189,15 @@ impl Core {
     /// Reading context never re-executes model code. Explicit repair is an
     /// actor-owned cancellable job, including when native recovery is required.
     pub(crate) async fn ensure_display_cache(&self, workspace: &str) -> Result<DisplayCheck> {
+        let _memory = self.pin_workspace(workspace).await?;
         let (revision, expected, epoch) = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace).await?;
             let ws = workspaces
                 .get(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
             (
                 ws.stored.current.clone(),
-                ws.stored.revisions[&ws.stored.current].model.clone(),
+                ws.stored.current_revision().model.clone(),
                 ws.display_epoch.clone(),
             )
         };
@@ -220,13 +222,14 @@ impl Core {
         mut cancel: watch::Receiver<bool>,
         attempted: &mut bool,
     ) -> Result<()> {
+        let _memory = self.pin_workspace(workspace).await?;
         let expected = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace).await?;
             let ws = &workspaces[workspace];
             if ws.stored.current != revision {
                 return Err(Error::domain("STALE_ENTITY", "Display revision changed"));
             }
-            ws.stored.revisions[revision].model.clone()
+            ws.stored.current_revision().model.clone()
         };
         if *cancel.borrow() {
             return Err(Error::domain("CANCELLED", "Display repair cancelled"));
@@ -257,7 +260,7 @@ impl Core {
         if *cancel.borrow() {
             return Err(Error::domain("CANCELLED", "Display repair cancelled"));
         }
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(workspace).await?;
         let ws = workspaces.get_mut(workspace).unwrap();
         if ws.stored.current != revision {
             return Err(Error::domain(
@@ -265,9 +268,9 @@ impl Core {
                 "Revision changed during display cache repair",
             ));
         }
-        verify(&ws.stored.revisions[revision].model, &repaired["data"])?;
+        verify(&ws.stored.current_revision().model, &repaired["data"])?;
         let mut next = ws.stored.clone();
-        next.revisions.get_mut(revision).unwrap().model = repaired["data"].clone();
+        next.revisions.resident_mut(revision).unwrap().model = repaired["data"].clone();
         self.persist(&next).await?;
         ws.stored = next;
         ws.display_epoch = Arc::new(id());
@@ -300,6 +303,7 @@ impl Core {
         draft: crate::Draft,
         cancel: watch::Receiver<bool>,
     ) {
+        let Ok(_memory) = self.pin_workspace(workspace).await else { return; };
         {
             let mut workspaces = self.workspaces.lock().await;
             let ws = workspaces.get_mut(workspace).unwrap();
@@ -308,7 +312,7 @@ impl Core {
         }
         let outcome = async {
             let model = {
-                let workspaces = self.workspaces.lock().await;
+                let workspaces = self.workspace(workspace).await?;
                 let ws = &workspaces[workspace];
                 if ws.stored.current != draft.base_revision {
                     return Err(Error::domain(
@@ -316,7 +320,7 @@ impl Core {
                         "Display repair revision changed",
                     ));
                 }
-                ws.stored.revisions[&draft.base_revision].model.clone()
+                ws.stored.current_revision().model.clone()
             };
             if self
                 .mesh_buffers_valid(workspace, &draft.base_revision, &model)
@@ -338,7 +342,7 @@ impl Core {
                 )
                 .await;
             if result.is_err() && attempted {
-                let mut workspaces = self.workspaces.lock().await;
+                let mut workspaces = self.workspace(workspace).await?;
                 let ws = workspaces.get_mut(workspace).unwrap();
                 if ws
                     .worker

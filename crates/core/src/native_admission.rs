@@ -398,7 +398,7 @@ mod tests {
             if stale {
                 let mut workspaces = core.workspaces.lock().await;
                 let ws = workspaces.get_mut(&ws).unwrap();
-                let mut next = ws.stored.revisions[&rev].clone();
+                let mut next = ws.stored.current_revision().clone();
                 next.id = crate::id();
                 ws.stored.current = next.id.clone();
                 ws.stored.revisions.insert(next.id.clone(), next);

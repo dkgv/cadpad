@@ -834,7 +834,7 @@ fn write_inputs(
 pub(crate) fn save_project(
     directory: &Path,
     expected_disk: Option<&str>,
-    revisions: &[Revision],
+    revisions: &crate::Snapshots<Revision>,
     current: &str,
     blobs: &Path,
     stored: &crate::StoredWorkspace,
@@ -876,10 +876,7 @@ pub(crate) fn save_project(
             "Saved project folder disappeared",
         ));
     }
-    let current_revision = revisions
-        .iter()
-        .find(|r| r.id == current)
-        .ok_or_else(|| Error::domain("REVISION_CONFLICT", "Unknown saved revision"))?;
+    let current_revision = revisions.read(current)?;
     // Every snapshot is assembled in a sibling staging directory then published
     // with one rename. Existing revision directories are never modified.
     fs::create_dir_all(directory)?;
@@ -887,7 +884,8 @@ pub(crate) fn save_project(
     if !folder {
         let history = checked_path(&root, "revisions")?;
         fs::create_dir_all(&history)?;
-        for revision in revisions {
+        for id in revisions.keys() {
+            let revision = revisions.read(id)?;
             if uuid::Uuid::parse_str(&revision.id).is_err() {
                 return Err(Error::domain("INVALID_REQUEST", "Invalid revision ID"));
             }
@@ -910,7 +908,7 @@ pub(crate) fn save_project(
                 }
                 continue;
             }
-            let staging = history.join(format!(".{}.tmp", id()));
+            let staging = history.join(format!(".{}.tmp", crate::id()));
             let result = (|| -> Result<()> {
                 write_inputs(
                     &staging,
@@ -1020,16 +1018,19 @@ pub fn store_blobs(directory: &Path, blobs: &BTreeMap<String, Vec<u8>>) -> Resul
 
 /// Portable history contains source only. Display data is reconstructed after
 /// opening, never mistaken for geometry belonging to another running workspace.
-pub fn read_history(directory: &Path, blob_directory: &Path) -> Result<Vec<Revision>> {
+pub(crate) fn read_history(
+    directory: &Path,
+    blob_directory: &Path,
+) -> Result<crate::Snapshots<Revision>> {
     if metadata_directory(directory)? != directory {
-        return Ok(vec![]);
+        return Ok(crate::Snapshots::default());
     }
     let root = directory.canonicalize()?;
     let history = checked_path(&root, "revisions")?;
     if !history.exists() {
-        return Ok(vec![]);
+        return Ok(crate::Snapshots::default());
     }
-    let mut revisions = Vec::new();
+    let mut revisions = crate::Snapshots::default();
     for entry in fs::read_dir(history)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
@@ -1056,14 +1057,17 @@ pub fn read_history(directory: &Path, blob_directory: &Path) -> Result<Vec<Revis
             ));
         }
         store_blobs(blob_directory, &loaded.blobs)?;
-        revisions.push(Revision {
-            id: snapshot.id,
-            parent: snapshot.parent,
-            inputs: loaded.inputs,
-            model: serde_json::json!({"parts":[],"rebuild_required":true}),
-            actor: snapshot.actor,
-            restored_from: snapshot.restored_from,
-        });
+        revisions.park(
+            snapshot.id.clone(),
+            Revision {
+                id: snapshot.id,
+                parent: snapshot.parent,
+                inputs: loaded.inputs,
+                model: serde_json::json!({"parts":[],"rebuild_required":true}),
+                actor: snapshot.actor,
+                restored_from: snapshot.restored_from,
+            },
+        )?;
         if revisions.len() > 10000 {
             return Err(Error::domain(
                 "INVALID_REQUEST",
@@ -1071,24 +1075,15 @@ pub fn read_history(directory: &Path, blob_directory: &Path) -> Result<Vec<Revis
             ));
         }
     }
-    for revision in &revisions {
-        if let Some(target) = &revision.restored_from {
-            let restored = revisions
-                .iter()
-                .find(|candidate| candidate.id == *target)
-                .ok_or_else(|| {
-                    Error::domain(
-                        "INVALID_REQUEST",
-                        "Undo history has a missing restoration target",
-                    )
-                })?;
+    for (id, summary) in revisions.headers() {
+        if let Some(target) = &summary.restored_from {
+            let restored = revisions.read(target)?;
+            let revision = revisions.read(id)?;
             let mut expected = restored.inputs.clone();
-            // Previously unbuilt empty snapshots acquire the pinned dependency
-            // inventory when their source is reconstructed for the first time.
             if expected.dependencies.is_empty() {
                 expected.dependencies = revision.inputs.dependencies.clone();
             }
-            if target == &revision.id || fingerprint(&expected)? != fingerprint(&revision.inputs)? {
+            if target == id || fingerprint(&expected)? != summary.input_fingerprint {
                 return Err(Error::domain(
                     "INVALID_REQUEST",
                     "Undo restoration does not match its source snapshot",
@@ -1097,13 +1092,13 @@ pub fn read_history(directory: &Path, blob_directory: &Path) -> Result<Vec<Revis
         }
     }
     let parents: std::collections::HashMap<_, _> = revisions
-        .iter()
-        .map(|revision| (revision.id.as_str(), revision.parent.as_deref()))
+        .headers()
+        .map(|(id, h)| (id.as_str(), h.parent.as_deref()))
         .collect();
     let mut complete = std::collections::HashSet::new();
-    for revision in &revisions {
+    for (id, _) in revisions.headers() {
         let mut seen = std::collections::HashSet::new();
-        let mut next = Some(revision.id.as_str());
+        let mut next = Some(id.as_str());
         while let Some(id) = next {
             if complete.contains(id) {
                 break;

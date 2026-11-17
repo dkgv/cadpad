@@ -19,6 +19,14 @@ pub(crate) struct State {
     pub(crate) recorder: Option<crate::playback::Recorder>,
     pub(crate) playback: Option<crate::playback::Playback>,
 }
+/// Pose identity is small enough to retain while geometry/history is unloaded.
+#[derive(Clone)]
+pub(crate) struct IdlePose {
+    revision: String,
+    coordinates: Vec<f64>,
+    validated: Vec<f64>,
+    version: u64,
+}
 impl State {
     pub(crate) fn new(inputs: &crate::Inputs, model: &Value) -> Result<Self> {
         let mechanism = Mechanism::new(kinematics::decode(&inputs.mechanism)?, &model["parts"])?;
@@ -33,6 +41,14 @@ impl State {
             recorder: None,
             playback: None,
         })
+    }
+    pub(crate) fn idle_pose(&self, revision: &str) -> IdlePose {
+        IdlePose {
+            revision: revision.into(),
+            coordinates: self.mechanism.coordinates().to_vec(),
+            validated: self.validated_coordinates.clone(),
+            version: self.version,
+        }
     }
     fn mark_validated(&mut self) {
         self.validated_coordinates = self.mechanism.coordinates().to_vec();
@@ -113,14 +129,23 @@ pub struct CoordinateResult {
 }
 pub(crate) fn state(ws: &mut Workspace) -> Result<&mut State> {
     if ws.motion.is_none() {
-        let revision = &ws.stored.revisions[&ws.stored.current];
-        ws.motion = Some(if revision.model["rebuild_required"] == true {
+        let revision = ws.stored.current_revision();
+        let mut recovered = if revision.model["rebuild_required"] == true {
             // Open stages source history before an explicit native build. There
             // are no reconstructed bodies to attach saved joints to yet.
             State::new(&crate::Inputs::default(), &json!({"parts":[]}))?
         } else {
             State::new(&revision.inputs, &revision.model)?
-        });
+        };
+        if let Some(pose) = &ws.saved_pose {
+            if pose.revision == ws.stored.current {
+                recovered.mechanism = recovered.mechanism.at_coordinates(&pose.coordinates)?;
+                recovered.validated_coordinates = pose.validated.clone();
+                recovered.version = pose.version;
+            }
+        }
+        ws.saved_pose = None;
+        ws.motion = Some(recovered);
     }
     Ok(ws.motion.as_mut().unwrap())
 }
@@ -288,7 +313,8 @@ impl Core {
         self.motion_events.subscribe()
     }
     pub async fn get_motion(&self, workspace: &str, revision: &str) -> Result<Snapshot> {
-        let mut workspaces = self.workspaces.lock().await;
+        let _memory = self.pin_workspace(workspace).await?;
+        let mut workspaces = self.workspace(workspace).await?;
         let ws = workspaces
             .get_mut(workspace)
             .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -305,10 +331,11 @@ impl Core {
         actor: &str,
         args: SetCoordinate,
     ) -> Result<CoordinateResult> {
+        let _memory = self.pin_workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let check_collision = args.check_collision;
         let (mechanism, validated, world) = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(&args.workspace_id).await?;
             self.ensure_actor_active(actor)?;
             let ws = workspaces
                 .get_mut(&args.workspace_id)
@@ -369,7 +396,7 @@ impl Core {
                     "Motion calculation failed; pose preserved",
                 )
             })??;
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let ws = workspaces
             .get_mut(&args.workspace_id)
@@ -424,8 +451,9 @@ impl Core {
         joint: crate::kinematics::Joint,
         actor: &str,
     ) -> Result<Job> {
+        let _memory = self.pin_workspace(workspace).await?;
         let mut definition = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace).await?;
             let ws = workspaces
                 .get(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -435,7 +463,7 @@ impl Core {
                     "Expected revision no longer current",
                 ));
             }
-            crate::kinematics::decode(&ws.stored.revisions[base].inputs.mechanism)?
+            crate::kinematics::decode(&ws.stored.current_revision().inputs.mechanism)?
         };
         definition.joints.push(joint);
         let draft = self
@@ -451,9 +479,10 @@ impl Core {
         definition: Definition,
         actor: &str,
     ) -> Result<Draft> {
+        let _memory = self.pin_workspace(workspace).await?;
         definition.validate()?;
         self.ensure_actor_active(actor)?;
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(workspace).await?;
         self.ensure_actor_active(actor)?;
         let ws = workspaces
             .get_mut(workspace)
@@ -465,20 +494,16 @@ impl Core {
             ));
         }
         let mut draft = if let Some(draft_id) = draft_id {
-            let draft = ws
-                .stored
-                .drafts
-                .get(draft_id)
-                .ok_or_else(|| Error::domain("INVALID_REQUEST", "Unknown draft"))?;
+            let draft = ws.stored.drafts.load(draft_id).await?;
             if draft.actor != actor || draft.base_revision != base {
                 return Err(Error::domain(
                     "REVISION_CONFLICT",
                     "Draft ownership or base mismatch",
                 ));
             }
-            draft.clone()
+            draft.as_ref().clone()
         } else {
-            let inputs = ws.stored.revisions[base].inputs.clone();
+            let inputs = ws.stored.current_revision().inputs.clone();
             Draft {
                 id: id(),
                 base_revision: base.into(),
@@ -567,6 +592,7 @@ pub struct CheckInterference {
 }
 impl Core {
     pub async fn check_interference(&self, actor: &str, args: CheckInterference) -> Result<Value> {
+        let _memory = self.pin_workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let snapshot = self.get_motion(&args.workspace_id, &args.revision).await?;
         if snapshot.pose_version != args.pose_version {
@@ -595,7 +621,7 @@ impl Core {
             }
         }
         let world = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(&args.workspace_id).await?;
             let ws = workspaces.get_mut(&args.workspace_id).unwrap();
             if ws.stored.current != args.revision {
                 return Err(Error::domain(

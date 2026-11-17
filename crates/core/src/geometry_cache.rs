@@ -179,6 +179,7 @@ impl Core {
         draft: &crate::Draft,
         cancel: watch::Receiver<bool>,
     ) -> Result<Option<AuthoritativeReuse>> {
+        let _memory = self.pin_workspace(workspace).await?;
         if *cancel.borrow() {
             return Err(Error::domain(
                 "CANCELLED",
@@ -186,7 +187,7 @@ impl Core {
             ));
         }
         let (source_revision, mut model) = {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             let ws = all
                 .get(workspace)
                 .ok_or_else(|| Error::domain("NOT_FOUND", "Workspace not found"))?;
@@ -196,7 +197,7 @@ impl Core {
                     "Revision changed before annotation-only reuse",
                 ));
             }
-            let Some(prior) = ws.stored.revisions.get(base) else {
+            let Some(prior) = ws.stored.revisions.resident(base) else {
                 return Ok(None);
             };
             if !annotations::same_geometry_inputs(&prior.inputs, &draft.inputs)
@@ -293,7 +294,7 @@ impl Core {
             ));
         }
         {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             if all[workspace].stored.current != base {
                 return Err(Error::domain(
                     "REVISION_CONFLICT",
@@ -309,7 +310,7 @@ impl Core {
                 .map_err(|_| Error::domain("INVALID_MECHANISM", "Motion validation failed"))??;
         let recording_publication = self.blob_publication.read().await;
         let (recordings, imports) = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace).await?;
             let ws = &workspaces[workspace];
             (
                 ws.stored.recordings.clone(),
@@ -376,6 +377,7 @@ impl Core {
         draft: &crate::Draft,
         cancel: watch::Receiver<bool>,
     ) -> Result<Option<AuthoritativeReuse>> {
+        let _memory = self.pin_workspace(workspace).await?;
         if *cancel.borrow() {
             return Err(Error::domain(
                 "CANCELLED",
@@ -384,7 +386,7 @@ impl Core {
         }
         let digest = portable::fingerprint(&draft.inputs)?;
         let matched = {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             let ws = all
                 .get(workspace)
                 .ok_or_else(|| Error::domain("NOT_FOUND", "Workspace not found"))?;
@@ -394,41 +396,12 @@ impl Core {
                     "Revision changed before authoritative reuse",
                 ));
             }
-            let mut candidates = Vec::new();
-            for (id, prior) in &ws.stored.revisions {
-                let prior_digest = match portable::fingerprint(&prior.inputs) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                };
-                if prior_digest != digest {
-                    continue;
-                }
-                if recovery::validate_publication(&prior.model).is_err()
-                    || recovery::validate_display_publication(&prior.model).is_err()
-                    || !prior.model["parts"]
-                        .as_array()
-                        .is_some_and(|parts| !parts.is_empty())
-                {
-                    continue;
-                }
-                candidates.push((id.clone(), prior.model.clone()));
-            }
-            // Prefer a publication whose display buffers are still on disk.
-            // UUID map order is not chronological; skip revisions that soft
-            // collection has already stripped of mesh bytes.
-            candidates.into_iter().find(|(id, model)| {
-                mesh_buffers(model).ok().is_some_and(|buffers| {
-                    !buffers.is_empty()
-                        && buffers.iter().all(|(handle, _, _)| {
-                            self.root
-                                .join("artifacts")
-                                .join(workspace)
-                                .join(id)
-                                .join(handle)
-                                .is_file()
-                        })
-                })
-            })
+            let candidate=ws.stored.revisions.headers().find(|(id,prior)| {
+                prior.input_fingerprint==digest && !prior.protected && prior.part_count>0 && !prior.mesh_handles.is_empty()
+                    && prior.mesh_handles.iter().all(|handle|self.root.join("artifacts").join(workspace).join(id).join(handle).is_file())
+            }).map(|(id,_)|id.clone());
+            if let Some(id)=candidate {Some((id.clone(),ws.stored.revisions.load(&id).await?.model.clone()))} else {None}
+
         };
         let Some((source_revision, mut model)) = matched else {
             return Ok(None);
@@ -505,7 +478,7 @@ impl Core {
             .await
             .unwrap_or(Value::Null);
         {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             if all[workspace].stored.current != base {
                 return Err(Error::domain(
                     "REVISION_CONFLICT",
@@ -521,7 +494,7 @@ impl Core {
                 .map_err(|_| Error::domain("INVALID_MECHANISM", "Motion validation failed"))??;
         let recording_publication = self.blob_publication.read().await;
         let (recordings, imports) = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace).await?;
             let ws = &workspaces[workspace];
             (
                 ws.stored.recordings.clone(),
@@ -582,11 +555,12 @@ impl Core {
         digest: &str,
         cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace).await?;
         if *cancel.borrow() {
             return Err(Error::domain("CANCELLED", "Geometry reuse cancelled"));
         }
         let offered = {
-            let all = self.workspaces.lock().await;
+            let all = self.workspace(workspace).await?;
             let ws = &all[workspace];
             if ws.stored.current != base {
                 return Err(Error::domain(

@@ -60,10 +60,7 @@ impl Core {
         let blob_directory = self.root.join("blobs");
         let history =
             blocking(move || portable::read_history(&history_directory, &blob_directory)).await?;
-        let revisions: BTreeMap<_, _> = history
-            .into_iter()
-            .map(|revision| (revision.id.clone(), revision))
-            .collect();
+        let revisions = history;
         let recordings_directory = portable::metadata_directory(&directory)?;
         let recordings_manifest = manifest.clone();
         let (history, imported) = blocking(move || {
@@ -76,7 +73,7 @@ impl Core {
         })
         .await?;
         let mut revisions = history;
-        revisions.extend(imported.revisions.clone());
+        revisions.append(imported.revisions.clone());
         let recording_fingerprint = crate::playback::metadata_fingerprint(&imported.recordings)?;
         let blob_directory = self.root.join("blobs");
         let recording_blobs = imported.blobs;
@@ -86,28 +83,24 @@ impl Core {
             if manifest.saved_revision.is_empty() {
                 let loaded = self.load_portable(directory.clone()).await?;
                 let base = revisions
-                    .values()
-                    .find(|revision| {
-                        portable::fingerprint(&revision.inputs).ok().as_ref()
-                            == Some(&loaded.fingerprint)
-                    })
-                    .map(|revision| revision.id.clone())
+                    .headers()
+                    .find(|(_, summary)| summary.input_fingerprint == loaded.fingerprint)
+                    .map(|(id, _)| id.clone())
                     .unwrap_or_else(id);
-                // Seed the current revision with the folder's real sources. Using
-                // Inputs::default() here made Open look like an empty scratchpad
-                // (and Import/Save act on model.py) while the draft alone held the
-                // opened files — so STL work could land in the wrong tree.
                 let opened_inputs = loaded.inputs.clone();
-                revisions
-                    .entry(base.clone())
-                    .or_insert_with(|| crate::Revision {
-                        id: base.clone(),
-                        parent: None,
-                        inputs: opened_inputs.clone(),
-                        model: json!({"parts":[]}),
-                        actor: actor.into(),
-                        restored_from: None,
-                    });
+                if !revisions.contains_key(&base) {
+                    revisions.insert(
+                        base.clone(),
+                        crate::Revision {
+                            id: base.clone(),
+                            parent: None,
+                            inputs: opened_inputs.clone(),
+                            model: json!({"parts":[]}),
+                            actor: actor.into(),
+                            restored_from: None,
+                        },
+                    );
+                }
                 /* baseline source is loaded from the folder, not from project revisions */
                 (
                     base,
@@ -116,12 +109,7 @@ impl Core {
                     Some(loaded.fingerprint),
                 )
             } else {
-                let baseline = revisions.get(&manifest.saved_revision).ok_or_else(|| {
-                    Error::domain(
-                        "INVALID_REQUEST",
-                        "Saved project revision snapshot is missing",
-                    )
-                })?;
+                let baseline = revisions.load(&manifest.saved_revision).await?;
                 let fingerprint = portable::fingerprint(&baseline.inputs)?;
                 // Editable root files may be half-written or invalid. They never
                 // prevent reconstruction of the immutable successful checkpoint.
@@ -134,25 +122,26 @@ impl Core {
                 )
             };
         let mut draft = Self::input_draft(inputs, &base_revision, actor);
-        draft.source_hashes = revisions[&base_revision]
-            .inputs
-            .files
+        draft.source_hashes = revisions
+            .header(&base_revision)
+            .unwrap()
+            .source_hashes
             .iter()
-            .map(|(path, source)| (path.clone(), hash(source)))
+            .map(|(name, hash)| (name.clone(), hash.clone()))
             .collect();
         draft.external_fingerprint = external_fingerprint;
         let stored = StoredWorkspace {
             model_parent: None,
             geometry_cache: Value::Null,
             motion_tests: motion_tests.clone(),
-            job_snapshots: BTreeMap::new(),
+            job_snapshots: crate::Snapshots::default(),
             recordings: imported.recordings,
             recording_imports: imported.imports,
             schema_version: 1,
             id: workspace_id.clone(),
             current: base_revision.clone(),
-            revisions,
-            drafts: BTreeMap::from([(draft.id.clone(), draft.clone())]),
+            revisions: revisions.into(),
+            drafts: BTreeMap::from([(draft.id.clone(), draft.clone())]).into(),
             jobs: BTreeMap::new(),
             title: directory
                 .file_name()
@@ -172,6 +161,9 @@ impl Core {
         self.workspaces.lock().await.insert(
             workspace_id.clone(),
             Workspace {
+                archived: None,
+                memory: std::sync::Arc::new(()),
+                saved_pose: None,
                 display_epoch: std::sync::Arc::new(id()),
                 recovery: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 motion: None,
@@ -216,9 +208,10 @@ impl Core {
         destination: Option<PathBuf>,
         folder: bool,
     ) -> Result<portable::Binding> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         let _publication = self.blob_publication.read().await;
         let (stored, directory, expected_disk) = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces
                 .get(workspace_id)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -266,7 +259,7 @@ impl Core {
         if let Some(origin) = stored.python_origin.clone() {
             blocking(move || crate::origins::unchanged(&origin, None)).await?;
         }
-        let revisions = stored.revisions.values().cloned().collect::<Vec<_>>();
+        let revisions = stored.revisions.clone();
         let current = stored.current.clone();
         let blobs = self.root.join("blobs");
         let saved_stored = stored.clone();
@@ -287,7 +280,7 @@ impl Core {
             let exclude = saved_directory.clone();
             blocking(move||crate::origins::unchanged(&origin,Some(&exclude))).await.map_err(|error|Error::domain("EXTERNAL_CHANGES",format!("Original files changed while saving. The reviewed copy exists at {}. Review the original files before retrying: {error}",saved_directory.display())))?;
         }
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(workspace_id).await?;
         let ws = workspaces.get_mut(workspace_id).unwrap();
         if ws.stored.python_origin != stored.python_origin {
             return Err(Error::domain(
@@ -305,11 +298,12 @@ impl Core {
         Ok(binding)
     }
     pub async fn scan_external_changes(&self, workspace_id: &str) -> Result<Value> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         if let Some(result) = self.scan_python_origin(workspace_id).await? {
             return Ok(result);
         }
         let (binding, revision, inputs) = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces
                 .get(workspace_id)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -319,7 +313,7 @@ impl Core {
             (
                 binding,
                 ws.stored.current.clone(),
-                ws.stored.revisions[&ws.stored.current].inputs.clone(),
+                ws.stored.current_revision().inputs.clone(),
             )
         };
         let directory = binding.directory.clone();
@@ -397,6 +391,7 @@ impl Core {
         actor: &str,
         resolutions: BTreeMap<String, crate::origins::Resolution>,
     ) -> Result<Draft> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         let _publication = self.blob_publication.read().await;
         self.ensure_actor_active(actor)?;
         if let Some(draft) = self
@@ -418,7 +413,7 @@ impl Core {
             ));
         }
         let directory = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces
                 .get(workspace_id)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -444,7 +439,7 @@ impl Core {
                 "Project files changed again; review the latest external changes",
             ));
         }
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let ws = workspaces.get_mut(workspace_id).unwrap();
         if ws.stored.current != base {
@@ -457,7 +452,9 @@ impl Core {
         crate::project_entry::reset_missing_model_entry(&mut inputs);
         let mut draft = Self::input_draft(inputs, base, actor);
         draft.external_fingerprint = Some(loaded.fingerprint);
-        draft.source_hashes = ws.stored.revisions[base]
+        draft.source_hashes = ws
+            .stored
+            .current_revision()
             .inputs
             .files
             .iter()
@@ -479,6 +476,7 @@ impl Core {
         bytes: Vec<u8>,
         actor: &str,
     ) -> Result<Draft> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         let _publication = self.blob_publication.read().await;
         portable::relative(name)?;
         if bytes.len() > portable::ASSET_LIMIT {
@@ -488,7 +486,7 @@ impl Core {
         let blobs = BTreeMap::from([(digest.clone(), bytes)]);
         let blob_directory = self.root.join("blobs");
         blocking(move || portable::store_blobs(&blob_directory, &blobs)).await?;
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(workspace_id).await?;
         let ws = workspaces
             .get_mut(workspace_id)
             .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -499,20 +497,16 @@ impl Core {
             ));
         }
         let mut draft = if let Some(draft_id) = draft_id {
-            let draft = ws
-                .stored
-                .drafts
-                .get(draft_id)
-                .ok_or_else(|| Error::domain("INVALID_REQUEST", "Unknown draft"))?;
+            let draft = ws.stored.drafts.load(draft_id).await?;
             if draft.actor != actor || draft.base_revision != base {
                 return Err(Error::domain(
                     "REVISION_CONFLICT",
                     "Draft ownership or base mismatch",
                 ));
             }
-            draft.clone()
+            draft.as_ref().clone()
         } else {
-            Self::input_draft(ws.stored.revisions[base].inputs.clone(), base, actor)
+            Self::input_draft(ws.stored.current_revision().inputs.clone(), base, actor)
         };
         draft.restore_revision = None;
         draft.inputs.assets.insert(name.into(), digest);
@@ -541,7 +535,7 @@ impl Core {
         let workspace_id = self.create_workspace(actor).await?;
         let project = self.get_project(&workspace_id).await?;
         let base_revision = project["revision"].as_str().unwrap().to_string();
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(&workspace_id).await?;
         let ws = workspaces.get_mut(&workspace_id).unwrap();
         let mut draft = Self::input_draft(inputs, &base_revision, actor);
         draft.python_origin = Some(origin.clone());
@@ -561,14 +555,14 @@ impl Core {
 
 impl Core {
     pub async fn model_history(&self, workspace: &str) -> Result<Value> {
-        let all = self.workspaces.lock().await;
+        let all = self.workspace_metadata(workspace).await?;
         let ws = all
             .get(workspace)
             .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
         let mut entries = Vec::new();
         let mut cursor = Some(ws.stored.current.as_str());
         while let Some(id) = cursor {
-            let Some(revision) = ws.stored.revisions.get(id) else {
+            let Some(revision) = ws.stored.revisions.header(id) else {
                 break;
             };
             let job = ws
@@ -581,52 +575,41 @@ impl Core {
             } else if let Some(parent) = revision
                 .parent
                 .as_ref()
-                .and_then(|id| ws.stored.revisions.get(id))
+                .and_then(|id| ws.stored.revisions.header(id))
             {
                 let added_assets = revision
-                    .inputs
                     .assets
                     .keys()
-                    .filter(|name| !parent.inputs.assets.contains_key(*name))
+                    .filter(|name| !parent.assets.contains_key(*name))
                     .collect::<Vec<_>>();
                 let parameters = revision
-                    .inputs
                     .parameters
                     .as_object()
                     .map(|parameters| {
                         parameters
                             .iter()
-                            .filter(|(name, value)| {
-                                parent.inputs.parameters.get(*name) != Some(*value)
-                            })
+                            .filter(|(name, value)| parent.parameters.get(*name) != Some(*value))
                             .map(|(name, _)| name.replace('_', " "))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
                 let changed_files = revision
-                    .inputs
-                    .files
+                    .source_hashes
                     .iter()
-                    .filter(|(name, source)| parent.inputs.files.get(*name) != Some(*source))
+                    .filter(|(name, source)| parent.source_hashes.get(*name) != Some(*source))
                     .map(|(name, _)| name.clone())
                     .collect::<Vec<_>>();
-                let old_parts = parent.model["parts"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                let parts = revision.model["parts"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                let added = parts
+                let added = revision
+                    .part_names
                     .iter()
-                    .filter(|part| !old_parts.iter().any(|old| old["name"] == part["name"]))
-                    .filter_map(|part| part["name"].as_str())
+                    .filter(|name| !parent.part_names.contains(name))
+                    .cloned()
                     .collect::<Vec<_>>();
-                let removed = old_parts
+                let removed = parent
+                    .part_names
                     .iter()
-                    .filter(|part| !parts.iter().any(|new| new["name"] == part["name"]))
-                    .filter_map(|part| part["name"].as_str())
+                    .filter(|name| !revision.part_names.contains(name))
+                    .cloned()
                     .collect::<Vec<_>>();
                 if !added_assets.is_empty() {
                     format!(
@@ -644,10 +627,7 @@ impl Core {
                 } else if !parameters.is_empty() {
                     format!("Adjusted {}", parameters.join(", "))
                 } else if !changed_files.is_empty() {
-                    let names = parts
-                        .iter()
-                        .filter_map(|part| part["name"].as_str())
-                        .collect::<Vec<_>>();
+                    let names = &revision.part_names;
                     if names.len() == 1 {
                         format!("Updated {}", names[0].replace('_', " "))
                     } else {
@@ -659,7 +639,7 @@ impl Core {
             } else {
                 "Initial model".into()
             };
-            entries.push(json!({"label":label,"revision":id,"restored":revision.restored_from.is_some(),"initial":revision.parent.is_none(),"actor":revision.actor,"parts":revision.model["parts"].as_array().map_or(0,Vec::len),"created_at":job.map(|job|job.created_at)}));
+            entries.push(json!({"label":label,"revision":id,"restored":revision.restored_from.is_some(),"initial":revision.parent.is_none(),"actor":revision.actor,"parts":revision.part_count,"created_at":job.map(|job|job.created_at)}));
             cursor = revision.parent.as_deref();
             if entries.len() >= 100 {
                 break;
@@ -673,12 +653,13 @@ impl Core {
         candidates.sort_by(|a, b| b.stored.id.cmp(&a.stored.id));
         let mut seen = std::collections::HashSet::new();
         let mut summaries=candidates.into_iter().filter(|ws| {
-            let revision = &ws.stored.revisions[&ws.stored.current];
-            let has_parts = revision.model["parts"].as_array().is_some_and(|parts| !parts.is_empty());
-            let has_inputs = serde_json::to_value(&revision.inputs).ok() != serde_json::to_value(crate::Inputs::default()).ok();
-            if !has_parts && !has_inputs && ws.stored.jobs.is_empty() && ws.stored.recordings.is_empty() && ws.stored.motion_tests.is_empty() {
-                return false;
-            }
+            let has_content = ws.archived.as_ref().map_or_else(|| {
+                let revision = ws.stored.current_revision();
+                revision.model["parts"].as_array().is_some_and(|parts| !parts.is_empty())
+                    || revision.inputs != crate::Inputs::default()
+                    || !ws.stored.jobs.is_empty() || !ws.stored.recordings.is_empty() || !ws.stored.motion_tests.is_empty()
+            }, |catalog| catalog.has_content);
+            if !has_content { return false; }
 
             // Model-view tabs share the project folder with the root workspace. Keep every
             // view so dock restore can remount them; only collapse duplicate roots.

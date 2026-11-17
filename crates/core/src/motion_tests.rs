@@ -554,12 +554,13 @@ pub(crate) fn load(root: &std::path::Path, digest: Option<&str>) -> Result<Catal
 
 impl Core {
     pub async fn control_motion_tests(&self, actor: &str, args: Control) -> Result<Reply> {
+        let _memory = self.pin_workspace(&args.workspace_id).await?;
         use crate::motion_test_runs::{CancelOnDrop, Lease};
         self.ensure_actor_active(actor)?;
         if let Command::CancelRun { run_id } = &args.command {
             // Serialize Stop with the result's final commit, but allow it after
             // a design revision/catalog change: the operation ID is explicit.
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(&args.workspace_id).await?;
             let ws = workspaces
                 .get(&args.workspace_id)
                 .ok_or_else(|| invalid("Unknown workspace"))?;
@@ -580,7 +581,7 @@ impl Core {
             return self.control_motion_tests_inner(actor, args, None).await;
         };
         let (lease, accepted) = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(&args.workspace_id).await?;
             let ws = workspaces
                 .get(&args.workspace_id)
                 .ok_or_else(|| invalid("Unknown workspace"))?;
@@ -599,7 +600,7 @@ impl Core {
                 .get(&test_id)
                 .ok_or_else(|| invalid("Unknown test"))?;
             saved.definition.validate()?;
-            if ws.stored.revisions[&args.revision].model["rebuild_required"] == true {
+            if ws.stored.current_revision().model["rebuild_required"] == true {
                 return Err(invalid("Build the design before running tests"));
             }
             let lease: Lease =
@@ -681,9 +682,10 @@ impl Core {
         args: Control,
         lease: Option<crate::motion_test_runs::Lease>,
     ) -> Result<Reply> {
+        let _memory = self.pin_workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let (mut next, revision) = {
-            let workspaces = self.workspaces.lock().await;
+            let workspaces = self.workspace(&args.workspace_id).await?;
             let ws = workspaces
                 .get(&args.workspace_id)
                 .ok_or_else(|| invalid("Unknown workspace"))?;
@@ -714,7 +716,7 @@ impl Core {
                     ws.stored.motion_tests.clone()
                 },
                 matches!(args.command, Command::Run { .. })
-                    .then(|| ws.stored.revisions[&args.revision].clone()),
+                    .then(|| ws.stored.current_revision().clone()),
             )
         };
         let changed = matches!(
@@ -757,7 +759,7 @@ impl Core {
                 // superseded while it waited for construction admission.
                 self.ensure_actor_active(actor)?;
                 {
-                    let workspaces = self.workspaces.lock().await;
+                    let workspaces = self.workspace(&args.workspace_id).await?;
                     let ws = workspaces
                         .get(&args.workspace_id)
                         .ok_or_else(|| invalid("Unknown workspace"))?;
@@ -799,7 +801,7 @@ impl Core {
             }
             encode(&next)?;
         }
-        let mut workspaces = self.workspaces.lock().await;
+        let mut workspaces = self.workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
         let ws = workspaces
             .get_mut(&args.workspace_id)
@@ -1190,7 +1192,7 @@ mod run_control_tests {
             let mut all = core.workspaces.lock().await;
             let w = all.get_mut(&ws).unwrap();
             let rev = w.stored.current.clone();
-            let revision = w.stored.revisions.get_mut(&rev).unwrap();
+            let mut revision = w.stored.revisions.resident_mut(&rev).unwrap();
             revision.inputs.mechanism = json!({"joints":[{"id":"slide","parent":null,"child":"block","kind":{"type":"prismatic","axis":[1,0,0]},"initial":0,"limits":[0,0.02]}],"collision":{"bodies":{"block":[{"shape":{"type":"bounds"}}]},"clearance_m":0,"backoff_m":1e-6}});
             revision.model = json!({"parts":[{"instance_id":"block","position":[0,0,0],"bounds":{"min":[-5,-5,-5],"max":[5,5,5]},"volume":1000}],"collision_validation":{"method":"brep_boolean_coverage","covered_instances":["block"]}});
             rev

@@ -21,10 +21,11 @@ async fn published(root: &Path, mut model: Value, mechanism: Value) -> (Core, St
         let mut all = core.workspaces.lock().await;
         let workspace = all.get_mut(&ws).unwrap();
         let rev = workspace.stored.current.clone();
-        let revision = workspace.stored.revisions.get_mut(&rev).unwrap();
+        let mut revision = workspace.stored.revisions.resident_mut(&rev).unwrap();
         revision.inputs.mechanism = mechanism;
         model["revision"] = json!(rev);
         revision.model = model;
+        drop(revision);
         core.persist(&workspace.stored).await.unwrap();
         rev
     };

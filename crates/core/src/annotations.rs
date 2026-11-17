@@ -691,6 +691,7 @@ impl Core {
         record: Option<Annotation>,
         actor: &str,
     ) -> Result<Job> {
+        let _memory = self.pin_workspace(workspace).await?;
         self.ensure_actor_active(actor)?;
         identifier(annotation_id)?;
         if let Some(record) = &record {
@@ -703,7 +704,7 @@ impl Core {
             }
         }
         let draft = {
-            let mut workspaces = self.workspaces.lock().await;
+            let mut workspaces = self.workspace(workspace).await?;
             let ws = workspaces
                 .get_mut(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
@@ -713,7 +714,7 @@ impl Core {
                     "Expected revision no longer current",
                 ));
             }
-            let mut inputs = ws.stored.revisions[base].inputs.clone();
+            let mut inputs = ws.stored.current_revision().inputs.clone();
             let mut records = decode(&inputs.annotations)?;
             let index = records.iter().position(|item| item.id == annotation_id);
             match (index, record) {
