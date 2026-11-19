@@ -9,8 +9,8 @@ import {MeshInspect} from './mesh-inspect';
 import {createPortal} from 'react-dom';
 import type {DockTab} from './dock-layout';
 
-export function ProjectExplorer({workspace,revision,projectName,catalogWorkspace=workspace,catalogRevision=revision,activeModel,openingModel,selectionPanel,builderDisabled,onChooseBuilder,onBrowseLibrary,parts,assets,parameters,selected,hidden,onSelect,onToggleVisibility,onShowAll}:{
-  workspace:string;revision:string;projectName?:string;catalogWorkspace?:string;catalogRevision?:string;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};selectionPanel?:React.ReactNode;builderDisabled?:boolean;onBrowseLibrary?:()=>void;onChooseBuilder:(path:string,builder:string)=>void;parameters?:React.ReactNode;parts:SceneModel['parts'];assets:Record<string,string>;selected?:string;
+export function ProjectExplorer({workspace,revision,projectName,catalogWorkspace=workspace,catalogRevision=revision,activeModel,openingModel,selectionPanel,builderDisabled,onChooseBuilder,parts,assets,parameters,selected,hidden,onSelect,onToggleVisibility,onShowAll}:{
+  workspace:string;revision:string;projectName?:string;catalogWorkspace?:string;catalogRevision?:string;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};selectionPanel?:React.ReactNode;builderDisabled?:boolean;onChooseBuilder:(path:string,builder:string)=>void;parameters?:React.ReactNode;parts:SceneModel['parts'];assets:Record<string,string>;selected?:string;
   hidden:Set<string>;onSelect:(id:string)=>void;onToggleVisibility:(id:string)=>void;onShowAll:()=>void;
 }){
   const [query,setQuery]=useState('');
@@ -55,7 +55,7 @@ export function ProjectExplorer({workspace,revision,projectName,catalogWorkspace
   const contents:Record<string,React.ReactNode>={};
   const tabs:Record<string,DockTab>={};
   const section=(name:string,title:string,content:React.ReactNode)=>{tabs[ids[name]]={id:ids[name],title};contents[ids[name]]=content;};
-  section('components','Models',<SourceCatalog compact visible={!!search||expanded.includes(ids.components)} activeModel={activeModel} openingModel={openingModel} onLoadingChange={loading=>setIndexing(values=>values[ids.components]===loading?values:{...values,[ids.components]:loading})} filterQuery={query} onNavigate={onBrowseLibrary} disabled={builderDisabled} workspace={catalogWorkspace} revision={catalogRevision} onChoose={onChooseBuilder}/>);
+  section('components','Models',<SourceCatalog compact visible={!!search||expanded.includes(ids.components)} activeModel={activeModel} openingModel={openingModel} onLoadingChange={loading=>setIndexing(values=>values[ids.components]===loading?values:{...values,[ids.components]:loading})} filterQuery={query} disabled={builderDisabled} workspace={catalogWorkspace} revision={catalogRevision} onChoose={onChooseBuilder}/>);
   section('files','Files',<SourceCatalog compact visible={!!search||expanded.includes(ids.files)} activeModel={activeModel} onLoadingChange={loading=>setIndexing(values=>values[ids.files]===loading?values:{...values,[ids.files]:loading})} compactView="files" filterQuery={query} workspace={catalogWorkspace} revision={catalogRevision} onChoose={onChooseBuilder}/>);
   section('objects','Objects',parts.length?<div className="explorer-loaded-model">
     {!!search&&!visibleParts.length&&<p className="muted" role="status">No matching objects.</p>}

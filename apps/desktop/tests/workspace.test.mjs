@@ -18,6 +18,15 @@ const fixture=()=>({workspace_id:'workspace-1',revision:'r1',name:'Rail assembly
 const active=element=>!element.closest('[hidden],dialog:not([open])')&&!element.closest('details:not([open])');
 const button=text=>[...document.querySelectorAll('button')].find(b=>(b.querySelector('.explorer-part-caption>span')?.textContent||b.textContent).trim()===text&&active(b));
 async function click(element){assert.ok(element,'Expected control to exist');await act(async()=>{element.click();await new Promise(resolve=>setTimeout(resolve,5));});}
+async function expandModelFolders(...names){
+  let parent=document.querySelector('[aria-label="Indexed models"]');
+  for(const name of names){
+    const summary=[...parent.querySelectorAll(':scope > ul > li > details > summary')].find(item=>item.textContent===name);
+    assert.ok(summary,`Expected model folder ${name}`);
+    parent=summary.parentElement;
+    if(!parent.open)await click(summary);
+  }
+}
 const motionIcon={Move:'tab-motion',Physics:'tab-physics',Requirements:'tab-tests'};
 async function chooseMotionTask(title){const icon=document.getElementById(motionIcon[title]);if(icon.getAttribute('aria-expanded')!=='true')await click(icon);}
 async function openMotion(){const panel=document.getElementById('panel-motion');if(panel.hidden)await chooseMotionTask(panel.getAttribute('aria-label'));}
@@ -43,6 +52,7 @@ before(async()=>{
          export {recordedFrameAt,partMotion} from ${JSON.stringify(path.join(repo,'packages/viewer/src/motion.ts'))};
          export {dimensionText} from ${JSON.stringify(path.join(repo,'packages/viewer/src/dimension-display.ts'))};
          export const modelDimensions=model=>model.annotations||[];
+         export function showStlPreview(container, bytes){const canvas=container.appendChild(document.createElement('canvas'));return ()=>canvas.remove();}
          export class CadViewport{constructor(container,onSelect,onAnnotation,onGraphics){const host=globalThis.__cadpadUiHarness;host.constructions=(host.constructions||0)+1;(host.viewports??=[]).push(this);if(host.startupFailures){host.startupFailures--;throw new Error('Synthetic WebGL initialization failure');}globalThis.__cadpadUiHarness.graphics=state=>{if(state==='lost'){this.presented=null;this.cancelLoad();}onGraphics(state);};this.onSelect=onSelect;this.hidden=new Set();this.selection=null;globalThis.__cadpadUiHarness.viewport=this;globalThis.__cadpadUiHarness.select=entity=>{this.selection=entity;onSelect(entity);};globalThis.__cadpadUiHarness.annotation=onAnnotation;}
            async load(...args){const sequence=this.sequence=(this.sequence||0)+1;this.call('load',...args);await globalThis.__cadpadUiHarness.load?.(...args);if(sequence===this.sequence){if(!args[0].parts.length||!this.sceneState(args[3],args[1])){this.hidden.clear();this.selection=null;this.onSelect(null,'replacement');}this.logical=args[0].parts.length?{workspace:args[3],revision:args[1]}:null;this.presented=this.logical;}}
            hasScene(workspace,revision){return this.presented?.workspace===workspace&&this.presented?.revision===revision;} sceneState(workspace,revision){return this.logical?.workspace===workspace&&this.logical?.revision===revision?{hidden:[...this.hidden],selection:this.selection}:null;} cancelLoad(){this.sequence=(this.sequence||0)+1;} suspend(){this.cancelLoad();this.presented=null;this.call('suspend');} call(name,...args){globalThis.__cadpadUiHarness.viewer.push([name,...args]);}
@@ -2368,6 +2378,7 @@ test('activity rail and assistant stay mounted when switching model canvas tabs'
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
+  await expandModelFolders('cad');
   const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent===name));await flush(25);};
   const explorer=document.getElementById('panel-model');
   const models=document.querySelector('[aria-label="Indexed models"]');
@@ -2433,6 +2444,7 @@ test('focused canvas selections attach to the shared Assistant and send the mode
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
+  await expandModelFolders('cad');
   const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent===name));await flush(25);};
   const chips=()=>[...document.querySelectorAll('.composer-references .reference-chip')];
   await choose('Wheel');const wheel=harness.viewports.at(-1);
@@ -2506,14 +2518,16 @@ test('boot keeps a generated project adapter out of the canvas and Explorer sele
 test('sidebar models open independent project tabs and clicking again focuses the existing tab',async()=>{
   const original=harness.invoke.bind(harness),views=new Map();
   harness.project.external_tracking=true;
+  const scanned=[];
   const files=[{path:'cad/widgets.py',description:'Widgets',diagnostic:null,builders:['wheel','pin','stringer'].map(id=>({id,label:id+'()',kind:'geometry_candidate',available:true,reason:'',line:1}))}];
   harness.invoke=async(command,args)=>{
-    if(command==='check_external')return {changed:true,fingerprint:'model-tab-change',changes:{'cad/widgets.py':'modified'},conflicts:['cad/widgets.py']};
+    if(command==='check_external'){scanned.push(args.workspace);return {changed:true,fingerprint:'model-tab-change',changes:{'cad/widgets.py':'modified'},conflicts:['cad/widgets.py']};}
     if(command==='project_source_index')return {files};
     if(command==='workspaces')return [{workspace_id:'workspace-1',name:'Rail assembly',running:0},...[...views.values()].map(project=>({workspace_id:project.workspace_id,name:project.name,running:0,model_parent:'workspace-1'}))];
     if(command==='open_project_model'){
       harness.calls.push([command,args]);
       const project=fixture();project.workspace_id='view-'+args.builder;project.revision=args.builder+'-r';project.saved_revision='r1';project.model_parent='workspace-1';project.model_source_dirty=false;
+      project.external_tracking=true;
       project.motion={...project.motion,workspace_id:project.workspace_id,revision:project.revision};
       // Adapters publish a root object named "model"; the tab should keep the selected entry name.
       const partName=args.builder==='stringer'?'model':args.builder;
@@ -2526,6 +2540,7 @@ test('sidebar models open independent project tabs and clicking again focuses th
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
+  await expandModelFolders('cad');
   const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent===name));await flush(25);};
   const rootView=harness.viewports.at(-1);
   await choose('Wheel');
@@ -2549,6 +2564,14 @@ test('sidebar models open independent project tabs and clicking again focuses th
   await choose('Pin');
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Wheel','Pin']);
   assert.match(document.querySelector('#panel-model .explorer-parts').textContent,/pin/);
+  scanned.length=0;
+  await act(async()=>window.dispatchEvent(new window.Event('focus')));
+  assert.ok(scanned.includes('workspace-1'),'the project keeps watching for external changes');
+  assert.ok(scanned.includes('view-pin'),'the visible model keeps watching for external changes');
+  assert.ok(!scanned.includes('view-wheel'),'a hidden model does not scan the project again');
+  scanned.length=0;
+  await choose('Wheel');
+  assert.ok(scanned.includes('view-wheel'),'refocusing a model refreshes its external changes');
   await choose('Stringer');
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Wheel','Pin','Stringer'],'tab title keeps the selected model identity even when geometry is named model');
   assert.match(document.querySelector('#panel-model .explorer-parts').textContent,/model/);
@@ -2605,6 +2628,7 @@ test('boot resolves a focused model-view workspace back to the project and resto
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
+  await expandModelFolders('alpha','hook_rack');
   await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent==='Axle carrier'));await flush(25);
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Model','Axle carrier']);
   await flush(500);
@@ -2658,6 +2682,7 @@ test('opening an Explorer model shows progress until its geometry finishes build
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
+  await expandModelFolders('cad');
   const row=[...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent==='Stringer');
   await click(row);
   assert.equal(row.disabled,false,'the Explorer row stays clickable while the model opens');
@@ -2698,6 +2723,47 @@ test('opening an Explorer model shows progress until its geometry finishes build
 
 });
 
+test('project STL shows a preview before its selectable model finishes building',async()=>{
+  const original=harness.invoke.bind(harness);
+  let accept;
+  const project=fixture();
+  project.workspace_id='view-bracket';
+  project.revision='bracket-r';
+  project.model_parent='workspace-1';
+  project.model.parts=[];
+  project.activity=[{id:'build-bracket',state:'queued',diagnostics:{}}];
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files:[{path:'cad/bracket.stl',builders:[{id:'$file',label:'bracket.stl',kind:'model_file',available:true,line:1}]}]};
+    if(command==='open_project_model')return new Promise(resolve=>{accept=resolve;});
+    if(command==='project_stl_preview'){
+      assert.deepEqual(args,{workspace:'workspace-1',path:'cad/bracket.stl'});
+      return new ArrayBuffer(36);
+    }
+    if(command==='project'&&args.workspace===project.workspace_id)return structuredClone(project);
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(20);
+  await expandModelFolders('cad');
+  await click(document.querySelector('#panel-model .library-part-link'));await flush();
+  assert.ok(document.querySelector('.stl-preview canvas'),'display starts before the native workspace is allocated');
+  await act(async()=>accept({project:structuredClone(project),job:project.activity[0]}));await flush(20);
+  assert.ok(document.querySelector('.stl-preview canvas'),'preview stays visible while the worker builds');
+  project.model.parts=fixture().model.parts;
+  project.activity[0].state='succeeded';
+  await act(async()=>harness.activity.onmessage({workspace_id:project.workspace_id,kind:'job_finished',job:project.activity[0]}));await flush(25);
+  assert.equal(document.querySelector('.stl-preview'),null);
+  assert.ok(harness.viewer.some(([name,model])=>name==='load'&&model.parts.length));
+  const viewport=harness.viewports.at(-1);
+  const face={revision:project.revision,instance_id:project.model.parts[0].instance_id,entity_id:'face:0'};
+  viewport.capture=()=>({image:'iVBORw0KGgo='});
+  await act(async()=>viewport.onSelect(face));
+  assert.ok(document.querySelector('.composer-references .reference-chip'));
+  await submitPrompt('Use this surface as a reference');await flush();
+  const start=harness.calls.filter(([command])=>command==='agent_start').at(-1)[1];
+  assert.equal(start.modelWorkspace,project.workspace_id);
+  assert.deepEqual(start.references,[face]);
+});
+
 test('selecting another Explorer model preserves loading tabs and the latest selection',async()=>{
   const original=harness.invoke.bind(harness);
   const resolvers=new Map();
@@ -2714,6 +2780,7 @@ test('selecting another Explorer model preserves loading tabs and the latest sel
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
+  await expandModelFolders('cad');
   const row=name=>[...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('span')?.textContent===name);
   await click(row('Stringer'));
   assert.equal(row('Stringer').disabled,false);

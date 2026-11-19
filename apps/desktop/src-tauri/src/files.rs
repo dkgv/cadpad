@@ -232,9 +232,17 @@ pub async fn open_project_model(
     revision: String,
     entry: String,
     builder: String,
+    cached_view: Option<String>,
 ) -> Result<Value, Value> {
     let (workspace, job) = core
-        .open_project_model(&workspace, &revision, &entry, &builder, "local-user")
+        .open_project_model_reusing(
+            &workspace,
+            &revision,
+            &entry,
+            &builder,
+            "local-user",
+            cached_view.as_deref(),
+        )
         .await
         .map_err(error_value_owned)?;
     let project = project_with_imports(&core, &workspace).await?;
@@ -303,6 +311,17 @@ pub async fn project_git_status(core: State<'_, Core>, workspace: String) -> Res
 pub async fn project_meshes(core: State<'_, Core>, workspace: String) -> Result<Value, Value> {
     core.project_meshes(&workspace)
         .await
+        .map_err(error_value_owned)
+}
+#[tauri::command]
+pub async fn project_stl_preview(
+    core: State<'_, Core>,
+    workspace: String,
+    path: String,
+) -> Result<tauri::ipc::Response, Value> {
+    core.project_stl_preview(&workspace, &path)
+        .await
+        .map(tauri::ipc::Response::new)
         .map_err(error_value_owned)
 }
 #[tauri::command]

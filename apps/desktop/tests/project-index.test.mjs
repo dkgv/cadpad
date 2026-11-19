@@ -123,7 +123,16 @@ test('source candidates use generic labels and shared Explorer sections',async()
   await enter('missing');
   assert.match(document.body.textContent,/No matching models/);
   await act(async()=>document.querySelector('[aria-label="Clear Explorer search"]').click());
-  assert.deepEqual([...document.querySelectorAll('[aria-label="Indexed models"] .library-part-link')].map(button=>[...button.querySelectorAll('span,small')].map(node=>node.textContent).join('')),['Axle','Brake body','Pin','Yoke'],'Explorer models sort alphabetically');
+  const modelsTree=document.querySelector('[aria-label="Indexed models"]');
+  assert.ok(![...modelsTree.querySelectorAll('.library-part-link')].some(row=>row.textContent==='Yoke'),'collapsed model folders do not mount their rows');
+  const expandModelFolder=async name=>act(async()=>{
+    const summary=[...modelsTree.querySelectorAll('summary')].find(summary=>summary.textContent===name);
+    if(!summary.parentElement.open)summary.click();
+  });
+  await expandModelFolder('cad');
+  await expandModelFolder('zoo');
+  await expandModelFolder('nested');
+  assert.deepEqual([...modelsTree.querySelectorAll('.library-part-link')].map(button=>[...button.querySelectorAll('span,small')].map(node=>node.textContent).join('')),['Axle','Brake body','Pin','Yoke'],'Explorer models sort alphabetically');
   assert.equal(calls.filter(call=>call[0]==='project_source_index').length,1,'typing filters the existing index without another worker request');
   const filesSection=[...document.querySelectorAll('.sidebar-content-sections>.sidebar-section')].find(section=>section.querySelector('.sidebar-section-heading button').textContent==='Files');
   assert.equal(filesSection.querySelector(':scope > div[id]').hidden,true,'source files are secondary to models');
@@ -223,6 +232,7 @@ test('source candidates use generic labels and shared Explorer sections',async()
     await act(async()=>root.render(React.createElement(ProjectExplorer,explorer)));
     await act(async()=>window.dispatchEvent(new window.Event('focus')));
     assert.deepEqual([...document.querySelectorAll('[aria-label="Project source files"] .library-file-link')].map(row=>row.title),['new/nested/added.py']);
+    await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:diskFile.path,builder:'added'}})));
     assert.deepEqual([...document.querySelectorAll('[aria-label="Indexed models"] .library-part-link')].map(row=>row.textContent),['Added']);
     assert.equal(diskCalls.filter(([command])=>command==='project_source_index').length,1,'Models and Files share an in-flight refresh');
     await act(async()=>document.querySelector('.library-file-link').click());

@@ -8,11 +8,15 @@ import {Icon} from './ui';
 import {ProjectEntry,type EntrySelection} from './project-entry';
 import {SidebarSections} from './sidebar-sections';
 import {AppAlert} from './app-alert';
+import {StlPreview} from './stl-preview';
 import './workbench.css';
 
 type Area='canvas'|'left'|'right';
 type DocumentTab={kind?:'changes';id:string;workspace:string;name:string;dirty:boolean;pending?:boolean;modelEntry?:{entry:string;builder:string;project:string}};
-type ModelOpen={identity:string;cancelled:boolean;done:boolean;dropped:boolean;docClosed:boolean;workspace:string;jobId:string;docId:string;promise:Promise<void>};
+function isStlEntry(model?: DocumentTab['modelEntry']) {
+  return model?.builder==='$file'&&/\.stl$/i.test(model.entry);
+}
+type ModelOpen={identity:string;cancelled:boolean;done:boolean;dropped:boolean;reused:boolean;docClosed:boolean;workspace:string;jobId:string;docId:string;promise:Promise<void>};
 function modelJob(job:unknown):{id:string;state:string}|undefined{
   if(!job||typeof job!=='object')return;
   const record=job as {id?:unknown;state?:unknown};
@@ -31,7 +35,9 @@ const titleCase=(name:string)=>name.replace(/_/g,' ').replace(/^./,letter=>lette
 function modelTabTitle(project:Project|undefined,fallback:string,entry?:{builder:string;entry?:string}){
   if(entry){
     const builder=entry.builder.split(':')[0];
-    const filename=entry.entry?.split(/[\\/]/).pop()?.replace(/\.[^.]+$/,'');
+    const basename=entry.entry?.split(/[\\/]/).pop();
+    if(builder==='$file'&&basename)return basename;
+    const filename=basename?.replace(/\.[^.]+$/,'');
     return titleCase(builder==='model'&&filename?filename:builder);
   }
   // A generated view left on the project root is not a model the user opened.
@@ -224,7 +230,7 @@ export function Workbench(){
     open.cancelled=true;
     if(activeOpen.current===open)activeOpen.current=null;
     if(open.docId&&!open.docClosed){open.docClosed=true;closeDocument(open.docId);}
-    if(!open.workspace||open.dropped)return;
+    if(!open.workspace||open.dropped||open.reused)return;
     open.dropped=true;
     modelViews.current.delete(open.identity);
     projects.current.delete(open.workspace);
@@ -236,7 +242,8 @@ export function Workbench(){
     const open=activeOpen.current;
     if(!open||open.cancelled||open.workspace!==project.workspace_id)return;
     if(!modelPending(project))open.done=true;
-    setCanvasOpening(false);
+    const document=state.current?.documents.find(doc=>doc.id===open.docId);
+    if(open.done||!isStlEntry(document?.modelEntry))setCanvasOpening(false);
     if(open.done)activeOpen.current=null;
   }
   async function openModel(document:string,entry:string,builder:string){
@@ -268,7 +275,7 @@ export function Workbench(){
     if(!sourceProject)return;
     setCanvasOpening(true);
     setOpeningModel({entry,builder});
-    const open:ModelOpen={identity,cancelled:false,done:false,dropped:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
+    const open:ModelOpen={identity,cancelled:false,done:false,dropped:false,reused:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
     openingModels.current.set(identity,open);
     activeOpen.current=open;
     const placeholder:DocumentTab={id:dockId(),workspace:project,name:modelTabTitle(undefined,entry,{entry,builder}),dirty:false,pending:true,modelEntry:{entry,builder,project}};
@@ -285,9 +292,10 @@ export function Workbench(){
           try{result={project:await invoke<Project>('project',{workspace:cached.workspace})};}
           catch{modelViews.current.delete(identity);}
         }
-        result??=await invoke<{project:Project;job:unknown}>('open_project_model',{workspace:sourceProject.workspace_id,revision:sourceProject.revision,entry,builder});
+        result??=await invoke<{project:Project;job:unknown}>('open_project_model',{workspace:sourceProject.workspace_id,revision:sourceProject.revision,entry,builder,cachedView:cached?.sourceRevision===sourceProject.revision?cached.workspace:undefined});
         const job=modelJob(result.job)??modelJob(result.project.activity.find(item=>['queued','running'].includes(item.state))??result.project.activity.at(-1));
         open.workspace=result.project.workspace_id;
+        open.reused=open.workspace===cached?.workspace;
         open.jobId=job?.id??'';
         if(open.cancelled||state.current?.projectWorkspace!==project||!state.current.documents.some(doc=>doc.id===open.docId)){
           const active=activeOpen.current===open;
@@ -575,9 +583,13 @@ export function Workbench(){
     {!layout.documents.length&&<header className="app-header workbench-empty-header" data-tauri-drag-region/>}
     <div className="docked-main">{!groups(layout.left).some(g=>g.tabs.length)&&<DockOuterTarget area="left" group={groups(layout.left)[0].id}/>} {!groups(layout.right).some(g=>g.tabs.length)&&<DockOuterTarget area="right" group={groups(layout.right)[0].id}/>}<Slot host={rail} className="workbench-rail-slot"/>
       {!!layout.documents.length&&groups(layout.left).some(g=>g.tabs.length)&&<><div className="docked-sidebar left" style={{width:layout.leftWidth}}>{area('left')}</div><WidthDivider side="left" value={layout.leftWidth} onChange={width=>update(current=>({...current,leftWidth:width}))}/></>}
-      <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<AppAlert message={failure} onDismiss={()=>setFailure('')}/>}{!!layout.documents.length&&area('canvas')}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Create a project, open a project folder, or continue a recent project.</p><div className="dock-welcome-actions"><button onClick={()=>void action('new-project')}><Icon name="plus" size={15}/>New project…</button><button className="primary-button" onClick={()=>void action('open')}><Icon name="folder" size={15}/>Open project…</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.filter(ws=>!ws.model_parent).slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span>{ws.name||'Untitled'}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}{canvasOpening&&<div className="canvas-model-opening"><div className="empty model-opening" role="status"><span className="model-opening-spinner" aria-hidden="true"/><h1>Opening model…</h1><p>Building geometry for this tab.</p></div></div>}</div>
+      <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<AppAlert message={failure} onDismiss={()=>setFailure('')}/>}{!!layout.documents.length&&area('canvas')}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Create a project, open a project folder, or continue a recent project.</p><div className="dock-welcome-actions"><button onClick={()=>void action('new-project')}><Icon name="plus" size={15}/>New project…</button><button className="primary-button" onClick={()=>void action('open')}><Icon name="folder" size={15}/>Open project…</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.filter(ws=>!ws.model_parent).slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span>{ws.name||'Untitled'}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}{canvasOpening&&!isStlEntry(focusDoc?.modelEntry)&&<div className="canvas-model-opening"><div className="empty model-opening" role="status"><span className="model-opening-spinner" aria-hidden="true"/><h1>Opening model…</h1><p>Building geometry for this tab.</p></div></div>}</div>
       {!!layout.documents.length&&groups(layout.right).some(g=>g.tabs.length)&&<><WidthDivider side="right" value={layout.rightWidth} onChange={width=>update(current=>({...current,rightWidth:width}))}/><div className="docked-sidebar right" style={{width:layout.rightWidth}}>{area('right')}</div></>}
     </div>
+    {canvasOpening&&focusDoc?.modelEntry&&isStlEntry(focusDoc.modelEntry)&&
+      <DockContent key={focusDoc.id+':preview'} host={host(focusDoc.id)}>
+        <StlPreview workspace={focusDoc.modelEntry.project} entry={focusDoc.modelEntry.entry}/>
+      </DockContent>}
     {[...layout.documents,...(chromeDocument.current&&!layout.documents.some(doc=>doc.id===chromeId.current)?[chromeDocument.current.document]:[])].filter(doc=>{
       if(doc.pending||doc.kind==='changes')return false;
       if(visible.has(doc.id)||doc.id===chromeId.current)mounted.current.add(doc.id);

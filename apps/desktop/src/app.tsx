@@ -21,7 +21,7 @@ import {ModelHistory} from './model-history';
 import {ExternalChangesPanel} from './external-changes';
 import {AppAlert} from './app-alert';
 import {ProjectExplorer} from './explorer';
-import {resetSourceCatalogCache,SourceCatalog} from './source-catalog';
+import {resetSourceCatalogCache} from './source-catalog';
 import {QuickModelSelector} from './quick-model';
 import {LiveReply,FinishedReply,Markdown,type AgentStep} from './agent-steps';
 import {useDockDrag} from './dock-drag';
@@ -936,7 +936,6 @@ export function App({host}:{host?:SessionHost}={}) {
     } catch(e){setError(message(e));}finally{mutationBusy.current=false;setBusy(false);}
   }
   async function openModelEntry(entry:string,builder:string){
-    setLibraryOpen(false);
     if(!hostRef.current?.onOpenModel){await run('work_on_project_builder',{entry,builder});return;}
     // Leave the Explorer row clickable. The canvas shows loading immediately, and a later click cancels this open.
     await hostRef.current.onOpenModel(entry,builder);
@@ -949,9 +948,7 @@ export function App({host}:{host?:SessionHost}={}) {
       if(!result.cancelled && activeWorkspace.current===workspace)setNotice(`${result.name} exported from the committed model.`);
     } catch(e){if(activeWorkspace.current===workspace)setError(message(e));}
   }
-  const [libraryOpen,setLibraryOpen]=useState(false);
   const [quickModelOpen,setQuickModelOpen]=useState(false);
-  useEffect(()=>setLibraryOpen(false),[project?.workspace_id]);
   useEffect(()=>{if(!project)setQuickModelOpen(false);},[project?.workspace_id]);
   useEffect(()=>{
     if(host&&!host.active)return;
@@ -1040,8 +1037,9 @@ export function App({host}:{host?:SessionHost}={}) {
     autoSaveTimer.current=window.setTimeout(()=>void autoSaveBound(),450);
     return()=>{if(autoSaveTimer.current!==null)window.clearTimeout(autoSaveTimer.current);};
   },[project?.dirty,project?.unsaved_changes,project?.model_source_dirty,project?.revision,project?.saved_revision,project?.workspace_id,job?.state,agentTurn?.state,external?.changed]);
+  const trackExternal=!host||!host.modelEntry||host.visible;
   useEffect(() => {
-    if(!project || !project.external_tracking){setExternal(null);return;}
+    if(!trackExternal||!project?.external_tracking){setExternal(null);return;}
     let active=true;
     let pending=false,again=false;reviewFingerprint.current='';
     const workspace=project.workspace_id;
@@ -1060,7 +1058,7 @@ export function App({host}:{host?:SessionHost}={}) {
     const close=watchProjectFiles(workspace,()=>{void check();},error=>{if(active)setError(message(error));});
     void check();
     return()=>{active=false;close();};
-  },[project?.workspace_id,project?.revision,project?.saved_revision,project?.external_tracking]);
+  },[project?.workspace_id,project?.revision,project?.saved_revision,project?.external_tracking,trackExternal]);
   async function reloadExternal(automatic=false){
     const current=currentProject.current,observed=externalNow.current;
     if(!current||!observed?.changed||mutationBusy.current)return;
@@ -1082,13 +1080,13 @@ export function App({host}:{host?:SessionHost}={}) {
     finally{mutationBusy.current=false;if(activeWorkspace.current===workspace)setBusy(false);}
   }
   useEffect(()=>{
-    if(!project||!external?.changed||external.conflicts?.length||working)return;
+    if(!trackExternal||!project||!external?.changed||external.conflicts?.length||working)return;
     const key=JSON.stringify([project.workspace_id,project.revision,external.fingerprint]);
     if(externalReloadAttempt.current===key)return;
     // Coalesce editor saves and wait until any Cadpad mutation has finished.
     const timer=window.setTimeout(()=>void reloadExternal(true),350);
     return()=>window.clearTimeout(timer);
-  },[project?.workspace_id,project?.revision,external,working]);
+  },[project?.workspace_id,project?.revision,external,working,trackExternal]);
   useEffect(()=>{if(job?.state==='failed'&&external?.changed)setExternalReloadFailed(true);},[job?.state,external?.changed]);
   function prepareMotionTest(intent:string,id?:string){
     const request=(id?`Edit the saved CAD requirement with ID ${id}. List saved requirements and inspect its existing definition first.\n`:'Create a saved CAD requirement from this free-text requirement:\n')+intent+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';
@@ -1163,7 +1161,7 @@ export function App({host}:{host?:SessionHost}={}) {
   const projectBound=!!project&&(project.saved_revision!=null||project.external_tracking);
   const retainedView=!!project&&!!viewer.current?.hasScene(project.workspace_id,project.revision);
   const generatedProjectView=!host?.modelEntry&&!!project?.model_entry;
-  const modelInCanvas=!!project?.model.parts.length&&!generatedProjectView&&!project.display_error&&!libraryOpen&&(scenePhase==='ready'||retainedView);
+  const modelInCanvas=!!project?.model.parts.length&&!generatedProjectView&&!project.display_error&&(scenePhase==='ready'||retainedView);
   const [modelHistory,setModelHistory]=useState<{label?:string;revision:string;restored:boolean;initial:boolean;actor:string;parts:number;created_at?:number}[]>([]);
   useEffect(()=>{
     if(!project)return;
@@ -1200,7 +1198,7 @@ export function App({host}:{host?:SessionHost}={}) {
             {!host&&<PanelResizeHandle panel="model" value={panelSizes.model} onChange={value=>resizePanel('model',value)}/>}
             {!host&&<header className="dock-heading"><strong>Explorer</strong><button className="icon-button" aria-label="Close Explorer" onClick={()=>{setModelOpen(false);requestAnimationFrame(()=>document.getElementById('tab-model')?.focus());}}><Icon name="close" size={16}/></button></header>}
             <div className="model-browser-content">
-          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">Measured on the current model.</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} projectName={explorer.name||undefined} onBrowseLibrary={()=>setLibraryOpen(true)} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={host?busy||agentSending||agentWorking:working} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} assets={explorer.assets||{}} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its source and geometry.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
+          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">Measured on the current model.</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} projectName={explorer.name||undefined} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={host?busy||agentSending||agentWorking:working} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} assets={explorer.assets||{}} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its source and geometry.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
 
         </div>
           </aside>);
@@ -1244,7 +1242,13 @@ export function App({host}:{host?:SessionHost}={}) {
       {!!importCandidates.length&&<div className="import-setup-backdrop"><section className="import-setup" role="dialog" aria-modal="true" aria-labelledby="import-setup-title"><header><h2 id="import-setup-title">Import model</h2><button className="icon-button" aria-label="Close import setup" onClick={()=>setImportCandidates([])}><Icon name="close" size={15}/></button></header><div className="import-setup-body"><p>Choose a model from this project folder.</p><div className="import-file-list" role="radiogroup" aria-label="Model file">{importCandidates.map(path=><button key={path} role="radio" aria-checked={importChoice===path} className={importChoice===path?'selected':''} onClick={()=>setImportChoice(path)}><Icon name="file" size={18}/><span>{path.split('/').at(-1)}</span><small>{path.split('.').at(-1)?.toUpperCase()}</small></button>)}</div><p className="import-setup-hint">The original file stays in your folder.</p></div><footer><button disabled={working} onClick={()=>setImportCandidates([])}>Skip for now</button><button className="primary-button" disabled={working||!importChoice} onClick={()=>{const path=importChoice;setImportCandidates([]);void run('import_model',{selectedPath:path});}}><Icon name="import" size={14}/>Import</button></footer></section></div>}
 
       {host?.modelEntry&&!project?.model.parts.length&&job&&['queued','running'].includes(job.state)&&<div className="empty model-opening" role="status"><span className="model-opening-spinner" aria-hidden="true"/><h1>Opening model…</h1><p>Building geometry for this tab.</p></div>}
-      {(!host?.modelEntry||libraryOpen)&&(generatedProjectView||!project?.model.parts.length||libraryOpen)&&(job?.state!=='failed'||libraryOpen)&&(project?.external_tracking&&(project.files?.length??0)>1?<div className="project-library">{!!project.model.parts.length&&!generatedProjectView&&<button type="button" className="library-back" onClick={()=>setLibraryOpen(false)}>Back to model</button>}<h1>{project.name||'Project library'}</h1>{job&&['queued','running'].includes(job.state)&&<p className="library-load-status" role="status">Building selected entry…</p>}<p>Browse source entries to build geometry, or ask the assistant for a change.</p><SourceCatalog workspace={project.workspace_id} revision={project.revision} disabled={host?busy||agentSending||agentWorking:working} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/></div>:<div className="empty"><h1>Start a model</h1><p>Import a model or ask the assistant to create one.</p><div className="start-actions"><div className="start-file-actions"><button className="primary-button" disabled={working||!project} aria-label="Import model" onClick={()=>void run('import_model')}><Icon name="import" size={15}/>Import model…</button></div></div></div>)}
+      {!host?.modelEntry&&(generatedProjectView||!project?.model.parts.length)&&job?.state!=='failed'&&(project?.external_tracking&&(project.files?.length??0)>1?<div className="empty">
+        <h1>No model open</h1>
+        {job&&['queued','running'].includes(job.state)?<p role="status">Building selected model…</p>:<>
+          <p>Choose a model in Explorer to open it here.</p>
+          <button type="button" className="primary-button" onClick={()=>setPanel('model')}>Open Explorer</button>
+        </>}
+      </div>:<div className="empty"><h1>Start a model</h1><p>Import a model or ask the assistant to create one.</p><div className="start-actions"><div className="start-file-actions"><button className="primary-button" disabled={working||!project} aria-label="Import model" onClick={()=>void run('import_model')}><Icon name="import" size={15}/>Import model…</button></div></div></div>)}
       {!advancedView&&modelInCanvas&&<nav className="camera-controls" aria-label="Camera views">
         <ViewCube getQuaternion={()=>viewer.current?.cameraQuaternion()??null} onView={chooseCamera}/>
         <button className="camera-fit" aria-label="Fit model in view" title="Fit model" onClick={()=>chooseCamera('fit')}><Icon name="fit" size={18}/><small>Fit</small></button>

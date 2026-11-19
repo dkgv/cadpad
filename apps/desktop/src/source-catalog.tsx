@@ -4,7 +4,7 @@ import {Icon,errorSummary} from './ui';
 import {SourcePreview} from './source-preview';
 import {watchProjectFiles} from './project-files';
 
-export type Builder={id:string;label:string;available:boolean;reason:string;line:number;kind?:'geometry_candidate'|'part'|'assembly'|'function'};
+export type Builder={id:string;label:string;available:boolean;reason:string;line:number;kind?:'geometry_candidate'|'part'|'assembly'|'function'|'model_file'};
 export type SourceFile={path:string;description:string;builders:Builder[];diagnostic:string|null;recommended?:string|null;source?:string};
 export type IndexedModel={file:SourceFile;builder:Builder};
 type SourceIndex={files:SourceFile[];fingerprint?:string};
@@ -57,16 +57,17 @@ export function refreshSourceIndex(requestId?:string,workspace?:string,revision?
   refreshing.set(key,state);return state.promise;
 }
 export function modelCaption(builder:Builder){
+  if(builder.kind==='model_file')return builder.label;
   return builder.id.split(':')[0].replace(/_/g,' ').replace(/^./,letter=>letter.toUpperCase());
 }
 export function indexedModels(files:SourceFile[]):IndexedModel[]{
   return files.flatMap(file=>file.builders
-    .filter(builder=>builder.available&&(builder.kind==='geometry_candidate'||builder.kind==='part'||builder.kind==='assembly'))
+    .filter(builder=>builder.available&&(builder.kind==='geometry_candidate'||builder.kind==='part'||builder.kind==='assembly'||builder.kind==='model_file'))
     .filter(builder=>!file.builders.some(other=>other.id.startsWith(builder.id+':')&&other.available))
     .map(builder=>({file,builder})));
 }
 const title=(name:string)=>name.replace(/\.py$/,'').replace(/_/g,' ').replace(/^./,letter=>letter.toUpperCase());
-const byName=(a:string,b:string)=>a.localeCompare(b,undefined,{sensitivity:'base'});
+const byName=new Intl.Collator(undefined,{sensitivity:'base'}).compare;
 const GIT_CHANGES=['modified','added','untracked','deleted','conflict'] as const;
 export type GitChange=(typeof GIT_CHANGES)[number];
 export type GitEntry={path:string;change:GitChange;directory:boolean};
@@ -111,7 +112,7 @@ export function fileGit(path:string,git:ReturnType<typeof indexGit>){
 }
 export function folderGit(path:string,git:ReturnType<typeof indexGit>){return git.folders.get(path);}
 function gitMark(change?:GitChange){if(!change)return '';return change==='added'||change==='untracked'?'git-new':`git-${change}`;}
-export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,compact=false,onNavigate,filterQuery,compactView='models',onLoadingChange,activeModel,openingModel,visible=true}:{requestId?:string;workspace?:string;revision?:string;disabled?:boolean;onChoose:(path:string,builder:string)=>void;compact?:boolean;onNavigate?:()=>void;filterQuery?:string;compactView?:'models'|'files';onLoadingChange?:(loading:boolean)=>void;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};visible?:boolean}){
+export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,compact=false,filterQuery,compactView='models',onLoadingChange,activeModel,openingModel,visible=true}:{requestId?:string;workspace?:string;revision?:string;disabled?:boolean;onChoose:(path:string,builder:string)=>void;compact?:boolean;filterQuery?:string;compactView?:'models'|'files';onLoadingChange?:(loading:boolean)=>void;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};visible?:boolean}){
   const [sourcePath,setSourcePath]=useState<string|null>(null);
   const catalog=useRef<HTMLDivElement>(null);
   const [files,setFiles]=useState<SourceFile[]>([]),[loading,setLoading]=useState(true),[error,setError]=useState('');
@@ -121,11 +122,14 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const [query,setQuery]=useState(''),[limit,setLimit]=useState(60),[attempt,setAttempt]=useState(0),[view,setView]=useState<'parts'|'files'>('parts');
   const [gitEntries,setGitEntries]=useState<GitEntry[]>([]);
   const gitProject=useRef(''),git=useMemo(()=>indexGit(gitEntries),[gitEntries]);
+  const lazyModels=compact&&compactView==='models';
   const showGit=compact?compactView==='files':view==='files';
+  const [branches,setBranches]=useState<Record<string,{context:string;open:boolean}>>({});
+  useEffect(()=>setBranches({}),[requestId,workspace]);
   const key=requestId||workspace||'';
   const catalogEpoch=useSourceCatalogEpoch();
   const location=useSyncExternalStore(subscribe,()=>locations.get(key)||'');
-  const go=(path:string)=>{locations.set(key,path);setQuery('');for(const listener of listeners)listener();onNavigate?.();};
+  const go=(path:string)=>{locations.set(key,path);setQuery('');for(const listener of listeners)listener();};
   useEffect(()=>{setQuery('');setLimit(60);},[location]);
   useEffect(()=>{hasFiles.current=false;},[requestId,workspace,revision]);
   useEffect(()=>{
@@ -165,7 +169,6 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   useEffect(()=>{
     if(!compact||!highlighted)return;
     const row=catalog.current?.querySelector<HTMLElement>('[aria-current="true"]');
-    // Reopen ancestors even when a user collapsed an already active folder.
     for(let parent=row?.parentElement;parent&&parent!==catalog.current;parent=parent.parentElement){
       if(parent.tagName==='DETAILS')(parent as HTMLDetailsElement).open=true;
     }
@@ -178,20 +181,29 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
     else if(entry.bottom>bottom)pane.scrollTop+=entry.bottom-bottom;
   },[compact,compactView,highlighted?.entry,highlighted?.builder,files,filterQuery,visible]);
   const search=(filterQuery??query).trim().toLowerCase();
-  const matching=files.map(file=>({...file,builders:file.builders.filter(builder=>`${file.path} ${builder.label} ${file.description}`.toLowerCase().includes(search))}))
-    .filter(file=>file.builders.length||file.path.toLowerCase().includes(search));
-  const groups=matching.map(file=>({...file,builders:indexedModels([file]).map(item=>item.builder)})).filter(file=>file.builders.length);
+  const matching=useMemo(()=>search?files.map(file=>({...file,builders:file.builders.filter(builder=>`${file.path} ${builder.label} ${file.description}`.toLowerCase().includes(search))}))
+    .filter(file=>file.builders.length||file.path.toLowerCase().includes(search)):files,[files,search]);
+  const groups=useMemo(()=>compact&&showGit?[]:matching.map(file=>({...file,builders:indexedModels([file]).map(item=>item.builder)})).filter(file=>file.builders.length),[matching,compact,showGit]);
   const selected=groups.find(file=>'file:'+file.path===location||location.startsWith('entry:'+file.path+'#'));
   const activeFolder=compact&&highlighted?highlighted.entry.split('/').slice(0,-1).join('/'):'';
   const folder=selected?selected.path.split('/').slice(0,-1).join('/'):location.startsWith('folder:')?location.slice(7):'';
   const parts=(search?groups:selected?[selected]:[]).flatMap(file=>file.builders.map(builder=>({file,builder})));
   type Tree={folders:Map<string,Tree>;files:SourceFile[];count:number};
-  const tree:Tree={folders:new Map(),files:[],count:0};
-  for(const file of (compact?compactView==='files'?matching:groups:view==='files'?matching:groups)){
-    const segments=file.path.split('/');segments.pop();let node=tree;node.count+=file.builders.length;
-    for(const segment of segments){if(!node.folders.has(segment))node.folders.set(segment,{folders:new Map(),files:[],count:0});node=node.folders.get(segment)!;node.count+=file.builders.length;}
-    node.files.push(file);
-  }
+  const tree=useMemo(()=>{
+    const root:Tree={folders:new Map(),files:[],count:0};
+    for(const file of showGit?matching:groups){
+      const segments=file.path.split('/');segments.pop();
+      let node=root;
+      node.count+=file.builders.length;
+      for(const segment of segments){
+        let child=node.folders.get(segment);
+        if(!child){child={folders:new Map(),files:[],count:0};node.folders.set(segment,child);}
+        node=child;node.count+=file.builders.length;
+      }
+      node.files.push(file);
+    }
+    return root;
+  },[groups,matching,showGit]);
   const caption=modelCaption;
   const openEntry=(file:SourceFile,builder:Builder)=>{
     locations.set(key,'entry:'+file.path+'#'+builder.id);for(const listener of listeners)listener();
@@ -201,12 +213,49 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const sortedFolders=(node:Tree)=>[...node.folders].sort(([a],[b])=>byName(a,b));
   const sortedFiles=(node:Tree)=>[...node.files].sort((a,b)=>byName(a.path,b.path));
   const sortedModels=(node:Tree)=>sortedFiles(node).flatMap(file=>file.builders.map(builder=>({file,builder}))).sort((a,b)=>byName(caption(a.builder),caption(b.builder))||byName(a.file.path,b.file.path)||byName(a.builder.id,b.builder.id));
+  const branchContext=search||JSON.stringify([highlighted?.entry,highlighted?.builder,location]);
+  const branch=(id:string,automatic:boolean,summary:React.ReactNode,render:()=>React.ReactNode)=>{
+    const override=branches[id];
+    const open=override?.context===branchContext?override.open:automatic||!!override?.open;
+    return <details open={open}>
+      <summary onClick={event=>{event.preventDefault();setBranches(current=>({...current,[id]:{context:branchContext,open:!open}}));}}>{summary}</summary>
+      {open&&render()}
+    </details>;
+  };
+  const modelTree=(node:Tree,prefix:string)=>{
+    const entries=sortedModels(node);
+    const groups=new Map<string,IndexedModel[]>(),namePaths=new Map<string,Set<string>>();
+    for(const model of entries){
+      const name=caption(model.builder);
+      const paths=namePaths.get(name)??new Set<string>();
+      paths.add(model.file.path);namePaths.set(name,paths);
+      if(model.builder.kind!=='model_file')continue;
+      const stem=model.builder.label.replace(/\.[^.]+$/,'');
+      const group=groups.get(stem)??[];
+      group.push(model);groups.set(stem,group);
+    }
+    const row=({file,builder}:IndexedModel)=><li key={`${file.path}:${builder.id}`}><button type="button" className="library-part-link" aria-busy={openingModel?.entry===file.path&&openingModel.builder===builder.id||undefined} title={builder.kind==='model_file'?file.path:`${file.path}:${builder.line} · ${builder.label}`} aria-current={highlighted?.entry===file.path&&highlighted.builder===builder.id?'true':undefined} disabled={disabled} onClick={()=>openEntry(file,builder)}><Icon name="cube" size={13}/><span>{caption(builder)}</span>{openingModel?.entry===file.path&&openingModel.builder===builder.id&&<small className="library-opening-status" role="status" aria-label={`Opening ${caption(builder)}`}>Opening…</small>}{(namePaths.get(caption(builder))?.size??0)>1&&<small>{file.path.split('/').at(-1)}</small>}</button></li>;
+    return entries.map(model=>{
+      if(model.builder.kind!=='model_file')return row(model);
+      const stem=model.builder.label.replace(/\.[^.]+$/,'');
+      const group=groups.get(stem)!;
+      if(group.length===1)return row(model);
+      if(group[0]!==model)return null;
+      const selected=group.some(({file,builder})=>highlighted?.entry===file.path&&highlighted.builder===builder.id);
+      return <li key={`formats:${stem}`}>{branch(`formats:${prefix}${stem}`,!!search||selected,
+        <><Icon name="cube" size={13}/><span className="tree-label">{stem}</span></>,()=> <ul>{group.map(row)}</ul>)}</li>;
+    });
+  };
   const fileTree=(node:Tree,prefix=''):React.ReactNode=><ul>{sortedFolders(node).map(([name,child])=>{
     const path=prefix+name,change=showGit?folderGit(path,git):undefined,mark=gitMark(change);
-    return <li key={name}><details open={!!search||activeFolder===path||activeFolder.startsWith(path+'/')||folder===path||folder.startsWith(path+'/')}><summary className={mark||undefined} title={change?GIT_LABEL[change]:undefined} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}><Icon name="folder" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</summary>{fileTree(child,path+'/')}</details></li>;
-  })}{compact&&compactView==='models'?sortedModels(node).map(({file,builder})=><li key={`${file.path}:${builder.id}`}><button type="button" className="library-part-link" aria-busy={openingModel?.entry===file.path&&openingModel.builder===builder.id||undefined} title={`${file.path}:${builder.line} · ${builder.label}`} aria-current={highlighted?.entry===file.path&&highlighted.builder===builder.id?'true':undefined} disabled={disabled} onClick={()=>openEntry(file,builder)}><Icon name="cube" size={13}/><span>{caption(builder)}</span>{openingModel?.entry===file.path&&openingModel.builder===builder.id&&<small className="library-opening-status" role="status" aria-label={`Opening ${caption(builder)}`}>Opening…</small>}{node.files.some(other=>other.path!==file.path&&other.builders.some(candidate=>caption(candidate)===caption(builder)))&&<small>{file.path.split('/').at(-1)}</small>}</button></li>):sortedFiles(node).map(file=>{
+    const automatic=!!search||activeFolder===path||activeFolder.startsWith(path+'/')||folder===path||folder.startsWith(path+'/');
+    const summary=<><Icon name="folder" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</>;
+    return <li key={name}>{lazyModels?branch(`folder:${path}`,automatic,summary,()=>fileTree(child,path+'/')):
+      <details open={automatic}><summary className={mark||undefined} title={change?GIT_LABEL[change]:undefined}
+        aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}>{summary}</summary>{fileTree(child,path+'/')}</details>}</li>;
+  })}{lazyModels?modelTree(node,prefix):sortedFiles(node).map(file=>{
     const name=file.path.split('/').at(-1)!,change=showGit?fileGit(file.path,git):undefined,mark=gitMark(change);
-    return <li key={file.path}>{compact?<button type="button" className={`library-file-link${mark?` ${mark}`:''}`} aria-current={activeModel?.entry===file.path?'true':undefined} title={file.path} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined} onClick={()=>setSourcePath(file.path)}><Icon name="file" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</button>:<details open={!!search}><summary className={mark||undefined} title={change?`${file.description} · ${GIT_LABEL[change]}`:file.description} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</summary>{file.diagnostic&&<p role="status">{file.diagnostic}</p>}<ul>{[...file.builders].sort((a,b)=>byName(a.label,b.label)||byName(a.id,b.id)).map(builder=><li key={builder.id}><button type="button" disabled={disabled||!builder.available} title={builder.reason||`Line ${builder.line}`} onClick={()=>onChoose(file.path,builder.id)}>{builder.label}</button></li>)}</ul></details>}</li>;
+    return <li key={file.path}>{compact?<button type="button" className={`library-file-link${mark?` ${mark}`:''}`} aria-current={activeModel?.entry===file.path?'true':undefined} title={file.path} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined} disabled={file.builders[0]?.kind==='model_file'&&disabled} onClick={()=>{const builder=file.builders[0];if(builder?.kind==='model_file')openEntry(file,builder);else setSourcePath(file.path);}}><Icon name="file" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</button>:<details open={!!search}><summary className={mark||undefined} title={change?`${file.description} · ${GIT_LABEL[change]}`:file.description} aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</summary>{file.diagnostic&&<p role="status">{file.diagnostic}</p>}<ul>{[...file.builders].sort((a,b)=>byName(a.label,b.label)||byName(a.id,b.id)).map(builder=><li key={builder.id}><button type="button" disabled={disabled||!builder.available} title={builder.reason||`Line ${builder.line}`} onClick={()=>onChoose(file.path,builder.id)}>{builder.label}</button></li>)}</ul></details>}</li>;
   })}</ul>;
   if(compact)return <div ref={catalog} className="source-catalog catalog-compact" aria-busy={loading}>{error?<p role="alert">{error}</p>:<nav aria-label={compactView==='models'?'Indexed models':'Project source files'}>{fileTree(tree)}{!!search&&!(compactView==='models'?groups.length:matching.length)&&<p className="muted" role="status">{compactView==='models'?'No matching models.':'No matching files.'}</p>}</nav>}{sourcePath&&workspace&&revision&&<SourcePreview workspace={workspace} revision={revision} path={sourcePath} source={files.find(file=>file.path===sourcePath)?.source} onClose={()=>setSourcePath(null)}/>}</div>;
   return <div className="source-catalog">

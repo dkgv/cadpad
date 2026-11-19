@@ -303,6 +303,7 @@ fn main() {
             files::project_git_status,
             files::project_meshes,
             files::inspect_project_mesh,
+            files::project_stl_preview,
             files::work_on_project_builder,
             files::open_project_model,
             save_project,
