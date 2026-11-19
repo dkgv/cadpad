@@ -560,7 +560,7 @@ export function Workbench(){
     // Closed model views can hold large scene metadata; reopening fetches a fresh project.
     for(const workspace of projects.current.keys())if(!workspaces.has(workspace)&&workspace!==layout?.projectWorkspace)projects.current.delete(workspace);
   },[layout?.documents]);
-  if(!layout)return <div className="cadpad-startup" role="status">{failure||'Opening workspace…'}</div>;
+  if(!layout)return <div className="cadpad-startup" role="status">{failure||<div className="cadpad-loading"><span className="cadpad-loading-mark" aria-hidden="true"/><span>Cadpad</span></div>}</div>;
   const activeGroups=groups(layout.canvas),visible=new Set(activeGroups.map(g=>g.active));
   const visibleTools=layout.expanded.filter(id=>groups(layout.left).concat(groups(layout.right)).some(g=>g.tabs.includes(id)));
   const docs=Object.fromEntries(layout.documents.map(doc=>[doc.id,{id:doc.id,title:doc.name,dirty:doc.dirty,icon:doc.kind==='changes'?'file' as const:'cube' as const}]));
