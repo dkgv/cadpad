@@ -2,6 +2,7 @@ import { Display, Viewer, type Shape, type Shapes } from 'three-cad-viewer';
 import 'three-cad-viewer/css';
 import * as THREE from 'three';
 import {dimensionStroke,moveDimensionStroke,placeDimensionLabels,angleGeometry,dimensionText,placeAnnotation} from './dimension-display';
+export {showStlPreview} from './stl-preview';
 export {dimensionText} from './dimension-display';
 import {setRenderedVisibility} from './visibility';
 import {useCadpadHover} from './render-policy';
