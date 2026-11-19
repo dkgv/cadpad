@@ -419,6 +419,23 @@ impl Core {
     }
 }
 
+/// Capture the fields used by cache verification, without copying topology IDs.
+pub(crate) fn mesh_buffer_manifest(model: &Value) -> Value {
+    let Some(parts) = model["parts"].as_array() else {
+        return Value::Null;
+    };
+    let parts: Vec<_> = parts
+        .iter()
+        .map(|part| {
+            serde_json::json!({"mesh": {
+                "format": part["mesh"]["format"],
+                "buffers": part["mesh"]["buffers"],
+            }})
+        })
+        .collect();
+    serde_json::json!({"parts": parts})
+}
+
 impl Core {
     /// Validate cached display bytes once per unique handle, with bounded read
     /// buffers. Missing/corrupt bytes request regeneration; symlink/scope errors
@@ -429,12 +446,21 @@ impl Core {
         revision: &str,
         model: &Value,
     ) -> Result<bool> {
+        self.verify_mesh_buffer_manifest(workspace, revision, mesh_buffer_manifest(model))
+            .await
+    }
+
+    pub(crate) async fn verify_mesh_buffer_manifest(
+        &self,
+        workspace: &str,
+        revision: &str,
+        manifest: Value,
+    ) -> Result<bool> {
         let root = self.root.clone();
         let workspace = workspace.to_string();
         let revision = revision.to_string();
-        let model = model.clone();
         tokio::task::spawn_blocking(move || -> Result<_> {
-            let parts = model["parts"]
+            let parts = manifest["parts"]
                 .as_array()
                 .ok_or_else(|| invalid("Model parts are missing"))?;
             if parts.is_empty() {

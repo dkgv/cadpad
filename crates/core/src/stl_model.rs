@@ -2,7 +2,7 @@
 use crate::{Core, Error, Inputs, Result, portable};
 use glam::DVec3;
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::Path};
+use std::{path::Path, sync::Arc};
 use tokio::sync::watch;
 
 pub(crate) const FORMAT: &str = "cadpad-stl-surfaces-v2";
@@ -15,7 +15,36 @@ pub(crate) fn is_mesh(model: &Value) -> bool {
     )
 }
 
-type EdgeKey = [[u32; 3]; 2];
+/// Receives little-endian vertex triples for batches of preview triangles.
+pub type StlPreviewSink = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
+
+pub(crate) struct Source {
+    pub digest: String,
+    pub bytes: Option<Vec<u8>>,
+    pub preview: Option<StlPreviewSink>,
+}
+
+impl Source {
+    pub(crate) fn stored(digest: String) -> Self {
+        Self {
+            digest,
+            bytes: None,
+            preview: None,
+        }
+    }
+}
+
+/// Pack the endpoint bits in lexicographic order so sorting preserves edge IDs.
+type EdgeKey = [u64; 3];
+
+fn edge_key(a: [u32; 3], b: [u32; 3]) -> EdgeKey {
+    let (a, b) = if a <= b { (a, b) } else { (b, a) };
+    [
+        (u64::from(a[0]) << 32) | u64::from(a[1]),
+        (u64::from(a[2]) << 32) | u64::from(b[0]),
+        (u64::from(b[1]) << 32) | u64::from(b[2]),
+    ]
+}
 type Triangle = [[f32; 3]; 3];
 
 fn points(triangle: Triangle) -> [DVec3; 3] {
@@ -82,15 +111,17 @@ fn topology(
     }
     const CREASE_NORMAL_DOT: f64 = 0.906307787; // cos(25 degrees)
     let mut parents: Vec<_> = (0..triangles.len()).collect();
-    let mut edges = HashMap::<EdgeKey, Adjacent>::new();
+    // A closed manifold has three facet edges for every two unique edges.
+    let edge_capacity = triangles.len() + triangles.len() / 2;
+    let mut edges = ahash::AHashMap::<EdgeKey, Adjacent>::with_capacity(edge_capacity);
     for (index, triangle) in triangles.iter().enumerate() {
         if index % 4096 == 0 {
             check_cancel(cancel)?;
         }
         let keys = triangle.map(vertex_key);
+        let lhs = DVec3::from_array(normals[index].map(f64::from));
         for (a, b) in [(0, 1), (1, 2), (2, 0)] {
-            let mut edge = [keys[a], keys[b]];
-            edge.sort_unstable();
+            let edge = edge_key(keys[a], keys[b]);
             let adjacent = edges.entry(edge).or_insert(Adjacent {
                 first: index as u32,
                 count: 0,
@@ -103,7 +134,6 @@ fn topology(
             }
             // Shared endpoints supply the plane offset. Keep gently curved
             // surfaces tessellated rather than smoothing across their bends.
-            let lhs = DVec3::from_array(normals[index].map(f64::from));
             let rhs = DVec3::from_array(normals[previous].map(f64::from));
             // Suppress tessellation seams on smooth facets and tolerate
             // inconsistent STL winding along a common plane.
@@ -175,6 +205,7 @@ fn publish(
     inputs: &Inputs,
     with_edges: bool,
     cancel: &watch::Receiver<bool>,
+    preview: Option<&StlPreviewSink>,
 ) -> Result<Value> {
     let mut triangles = Vec::new();
     let mut normals = Vec::new();
@@ -182,6 +213,27 @@ fn publish(
     let mut triangle = [[0.; 3]; 3];
     let mut corner = 0;
     let mut seen = 0usize;
+    // Bound IPC and preview memory even when the source has millions of facets.
+    const FIRST_BATCH: usize = 1024;
+    const BATCH: usize = 16384;
+    const PREVIEW_LIMIT: usize = FIRST_BATCH + BATCH * 8;
+    let mut sent = 0;
+    let mut send_preview = |triangles: &[Triangle], finished: bool| {
+        let Some(send) = preview else { return };
+        let end = triangles.len().min(PREVIEW_LIMIT);
+        let batch = if sent == 0 { FIRST_BATCH } else { BATCH };
+        if end == sent || (!finished && end - sent < batch) {
+            return;
+        }
+        let mut bytes = Vec::with_capacity((end - sent) * 36);
+        for triangle in &triangles[sent..end] {
+            for &coordinate in triangle.iter().flatten() {
+                bytes.extend_from_slice(&coordinate.to_le_bytes());
+            }
+        }
+        sent = end;
+        send(bytes);
+    };
     portable::visit_stl(bytes, |point| {
         let point = point.map(|axis| axis as f32);
         if point.iter().any(|axis| !axis.is_finite()) {
@@ -202,6 +254,7 @@ fn publish(
             if magnitude > 0. {
                 stats.add(triangle, magnitude / 2.);
                 triangles.push(triangle);
+                send_preview(&triangles, false);
                 normals.push((cross / magnitude).to_array().map(|axis| axis as f32));
             }
         }
@@ -213,6 +266,7 @@ fn publish(
             "STL has no nondegenerate triangles",
         ));
     }
+    send_preview(&triangles, true);
     let (surfaces, segments) = topology(&triangles, &normals, with_edges, cancel)?;
     let mut counts = vec![0u32; triangles.len()];
     for &surface in &surfaces {
@@ -234,31 +288,29 @@ fn publish(
     }
     counts.retain(|&count| count > 0);
 
-    let positions: Vec<_> = order
-        .iter()
-        .flat_map(|&index| {
-            triangles[index]
-                .into_iter()
-                .flatten()
-                .flat_map(f32::to_le_bytes)
-        })
-        .collect();
+    let mut positions = Vec::with_capacity(order.len() * 36);
+    for &index in &order {
+        for coordinate in triangles[index].into_iter().flatten() {
+            positions.extend_from_slice(&coordinate.to_le_bytes());
+        }
+    }
     let vertices = buffer(cache, &positions)?;
     drop(positions);
-    let normals: Vec<_> = order
-        .iter()
-        .flat_map(|&index| {
-            [normals[index]; 3]
-                .into_iter()
-                .flatten()
-                .flat_map(f32::to_le_bytes)
-        })
-        .collect();
-    let normal_buffer = buffer(cache, &normals)?;
-    drop(normals);
-    let indices: Vec<_> = (0..(triangles.len() as u32 * 3))
-        .flat_map(u32::to_le_bytes)
-        .collect();
+    let mut normal_bytes = Vec::with_capacity(order.len() * 36);
+    for &index in &order {
+        let normal = normals[index].map(f32::to_le_bytes);
+        for _ in 0..3 {
+            for coordinate in normal {
+                normal_bytes.extend_from_slice(&coordinate);
+            }
+        }
+    }
+    let normal_buffer = buffer(cache, &normal_bytes)?;
+    drop(normal_bytes);
+    let mut indices = Vec::with_capacity(triangles.len() * 12);
+    for index in 0..(triangles.len() as u32 * 3) {
+        indices.extend_from_slice(&index.to_le_bytes());
+    }
     let indices = buffer(cache, &indices)?;
     let spans: Vec<_> = counts.iter().copied().flat_map(u32::to_le_bytes).collect();
     let empty = buffer(cache, &[])?;
@@ -266,15 +318,16 @@ fn publish(
     let edges = if edge_count == 0 {
         empty.clone()
     } else {
-        let points: Vec<_> = segments
-            .into_iter()
-            .flatten()
-            .flatten()
-            .flat_map(u32::to_le_bytes)
-            .collect();
+        let mut points = Vec::with_capacity(edge_count * 24);
+        for edge in segments {
+            for pair in edge {
+                points.extend_from_slice(&((pair >> 32) as u32).to_le_bytes());
+                points.extend_from_slice(&(pair as u32).to_le_bytes());
+            }
+        }
         buffer(cache, &points)?
     };
-    let edge_spans: Vec<_> = (0..edge_count).flat_map(|_| 1u32.to_le_bytes()).collect();
+    let edge_spans = 1u32.to_le_bytes().repeat(edge_count);
     let bounds = stats.bounds();
     let name = entry.rsplit('/').next().unwrap_or(entry);
     let dimensions: Vec<_> = ["x", "y", "z"].into_iter().enumerate().map(|(i, axis)| {
@@ -287,14 +340,23 @@ fn publish(
         "geometry_fingerprint":{"format":if with_edges { FORMAT } else { LEGACY_FORMAT },"sha256":digest},"dimensions":dimensions,
         "source":{"file":entry,"line":1},
         "mesh":{"format":crate::artifacts::MESH_FORMAT,"tolerance_mm":if with_edges { json!(1e-5) } else { json!(0) },
-            "face_ids":(0..counts.len()).map(|index|format!("face:{index}")).collect::<Vec<_>>(),
-            "edge_ids":(0..edge_count).map(|index|format!("edge:{index}")).collect::<Vec<_>>(),
             "buffers":{"vertices":vertices,"obj_vertices":vertices,"normals":normal_buffer,
                 "triangles":indices,"edges":edges,"triangles_per_face":buffer(cache,&spans)?,
                 "segments_per_edge":if edge_count == 0 { empty.clone() } else { buffer(cache,&edge_spans)? },
                 "edge_types":if edge_count == 0 { empty } else { buffer(cache,&vec![0;edge_spans.len()])? },
                 "face_types":buffer(cache,&vec![0;spans.len()])?}}
     }],"parameters":{},"annotations":[],"units":"mm","revision":revision,"dependencies":inputs.dependencies});
+    let mesh = &mut model["parts"][0]["mesh"];
+    mesh["face_ids"] = Value::Array(
+        (0..counts.len())
+            .map(|index| Value::String(format!("face:{index}")))
+            .collect(),
+    );
+    mesh["edge_ids"] = Value::Array(
+        (0..edge_count)
+            .map(|index| Value::String(format!("edge:{index}")))
+            .collect(),
+    );
     let records = crate::annotations::decode(&inputs.annotations)?;
     model["annotations"] = crate::annotations::reproject(&records, &model)?.ok_or_else(|| {
         Error::domain(
@@ -312,7 +374,7 @@ impl Core {
         revision: &str,
         inputs: Inputs,
         entry: String,
-        digest: String,
+        source: Source,
         with_edges: bool,
         cancel: watch::Receiver<bool>,
     ) -> Result<Value> {
@@ -323,9 +385,25 @@ impl Core {
             check_cancel(&cancel)?;
             std::fs::create_dir_all(&cache)?;
             let _lease = crate::cache::Lease::shared(&cache)?;
-            let bytes = read_mesh(&blobs, &digest)?;
+            let Source {
+                digest,
+                bytes,
+                preview,
+            } = source;
+            let bytes = match bytes {
+                Some(bytes) => bytes,
+                None => read_mesh(&blobs, &digest)?,
+            };
             publish(
-                &bytes, &cache, &entry, &digest, &revision, &inputs, with_edges, &cancel,
+                &bytes,
+                &cache,
+                &entry,
+                &digest,
+                &revision,
+                &inputs,
+                with_edges,
+                &cancel,
+                preview.as_ref(),
             )
         })
         .await

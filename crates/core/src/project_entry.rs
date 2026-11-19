@@ -48,17 +48,23 @@ fn set_builder_entry(inputs: &mut crate::Inputs, adapter: String) {
     inputs.entry_point = name;
 }
 
-pub(crate) fn stl_model_asset(inputs: &crate::Inputs) -> Option<(String, String)> {
+pub(crate) fn model_entry_asset(inputs: &crate::Inputs) -> Option<(String, String, &'static str)> {
     let source = inputs.files.get(&inputs.entry_point)?;
     let (entry, builder) = generated_model_entry(source)?;
-    if builder != MODEL_FILE_BUILDER || portable::model_file_format(&entry) != Some("stl") {
+    let format = portable::model_file_format(&entry)?;
+    if builder != MODEL_FILE_BUILDER {
         return None;
     }
     let asset = model_file_asset(&entry);
-    if model_file_adapter(&entry, &asset, "stl").ok()?.as_str() != source {
+    if model_file_adapter(&entry, &asset, format).ok()?.as_str() != source {
         return None;
     }
-    Some((entry, inputs.assets.get(&asset)?.clone()))
+    Some((entry, inputs.assets.get(&asset)?.clone(), format))
+}
+
+pub(crate) fn stl_model_asset(inputs: &crate::Inputs) -> Option<(String, String)> {
+    let (entry, digest, format) = model_entry_asset(inputs)?;
+    (format == "stl").then_some((entry, digest))
 }
 
 async fn read_project_model_file(directory: PathBuf, entry: &str) -> Result<Vec<u8>> {
@@ -141,15 +147,8 @@ impl Core {
             .get(workspace)
             .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
         ws.stored
-            .project
-            .as_ref()
-            .map(|binding| binding.directory.clone())
-            .or_else(|| {
-                ws.stored
-                    .python_origin
-                    .as_ref()
-                    .and_then(|origin| origin.entry.parent().map(Path::to_path_buf))
-            })
+            .project_directory()
+            .map(Path::to_path_buf)
             .ok_or_else(|| {
                 Error::domain(
                     "INVALID_REQUEST",
@@ -308,6 +307,28 @@ impl Core {
         actor: &str,
         cached_view: Option<&str>,
     ) -> Result<(String, crate::Job)> {
+        self.open_project_model_streaming(
+            workspace,
+            revision,
+            entry,
+            builder,
+            actor,
+            cached_view,
+            None,
+        )
+        .await
+    }
+
+    pub async fn open_project_model_streaming(
+        &self,
+        workspace: &str,
+        revision: &str,
+        entry: &str,
+        builder: &str,
+        actor: &str,
+        cached_view: Option<&str>,
+        preview: Option<crate::StlPreviewSink>,
+    ) -> Result<(String, crate::Job)> {
         let _memory = self.pin_workspace(workspace).await?;
         let standalone_stl =
             builder == MODEL_FILE_BUILDER && portable::model_file_format(entry) == Some("stl");
@@ -379,7 +400,7 @@ impl Core {
                         || asset_hash.as_ref().is_some_and(|hash| {
                             current.inputs.assets.get(&model_file_asset(entry)) == Some(hash)
                         });
-                    let original_mesh_build = candidate.model_source_revision.as_deref()
+                    let original_branch_build = candidate.model_source_revision.as_deref()
                         == Some(revision)
                         && current.parent.as_deref().is_some_and(|base| {
                             candidate
@@ -397,7 +418,7 @@ impl Core {
                         && candidate.project.as_ref().is_some_and(|binding| {
                             binding.directory == directory
                                 && &binding.fingerprint == fingerprint
-                                && (original_mesh_build
+                                && (original_branch_build
                                     || (current.parent.as_deref()
                                         == Some(binding.saved_revision.as_str())
                                         && candidate
@@ -446,9 +467,9 @@ impl Core {
             construction = Some(self.construction_slot(receive.clone()).await?);
             publication = Some(self.blob_publication.read().await);
             display_publication = Some(self.display_publication.read().await);
-            // The parent snapshot supplies project context. The selected mesh is
-            // read directly and the finished tab is published in one transaction.
-            self.publish_asset_blob(digest.clone(), bytes).await?;
+            // Reuse the selected file's bytes to build the display buffers
+            // after storing the source blob.
+            let bytes = self.publish_asset_blob(digest.clone(), bytes).await?;
             let mut draft = Self::input_draft(inputs, &base, actor);
             let asset = model_file_asset(entry);
             let adapter = model_file_adapter(entry, &asset, "stl")?;
@@ -463,7 +484,11 @@ impl Core {
                     &model_revision,
                     draft.inputs.clone(),
                     entry.into(),
-                    digest,
+                    crate::stl_model::Source {
+                        digest,
+                        bytes: Some(bytes),
+                        preview,
+                    },
                     true,
                     receive,
                 )
@@ -487,35 +512,49 @@ impl Core {
                     "Project changed while opening a model",
                 ));
             }
-            let mut stored = parent.stored.clone();
-            stored.model_parent = Some(
-                stored
-                    .model_parent
-                    .clone()
-                    .unwrap_or_else(|| workspace.into()),
-            );
-            stored.id = workspace_id.clone();
-            let mut initial = stored.current_revision().clone();
-            stored.current = base.clone();
-            initial.id = base.clone();
-            initial.parent = Some(revision.into());
-            initial.model = json!({"parts":[]});
+            // A model tab owns its checkpoints from this branch point onward.
+            // The source revision identifies the parent project snapshot for reuse.
+            let source = &parent.stored;
+            let mut stored = crate::StoredWorkspace {
+                model_parent: Some(
+                    source
+                        .model_parent
+                        .clone()
+                        .unwrap_or_else(|| workspace.into()),
+                ),
+                model_source_revision: Some(revision.into()),
+                schema_version: source.schema_version,
+                id: workspace_id.clone(),
+                current: base.clone(),
+                revisions: Default::default(),
+                drafts: Default::default(),
+                jobs: Default::default(),
+                job_snapshots: Default::default(),
+                project: source.project.clone(),
+                python_origin: source.python_origin.clone(),
+                title: source.title.clone(),
+                recordings: Default::default(),
+                recording_imports: Default::default(),
+                motion_tests: source.motion_tests.clone(),
+                geometry_cache: serde_json::Value::Null,
+            };
+            let (inputs, disk_fingerprint) = match disk {
+                Some(disk) => (disk.inputs, Some(disk.fingerprint)),
+                None => (source.current_revision().inputs.clone(), None),
+            };
+            let initial = crate::Revision {
+                id: base.clone(),
+                parent: None,
+                inputs,
+                model: json!({"parts":[]}),
+                actor: source.current_revision().actor.clone(),
+                restored_from: None,
+            };
             if let Some(binding) = &mut stored.project {
                 binding.saved_revision = base.clone();
-            }
-            if let Some(disk) = disk {
-                initial.inputs = disk.inputs;
-                if let Some(binding) = &mut stored.project {
-                    binding.fingerprint = disk.fingerprint;
+                if let Some(fingerprint) = disk_fingerprint {
+                    binding.fingerprint = fingerprint;
                 }
-            }
-            if standalone_stl {
-                // The mesh tab branches from the current inputs. The
-                // project's own workspace retains its full undo history.
-                stored.revisions.clear();
-                stored.model_source_revision = Some(revision.into());
-                initial.parent = None;
-                initial.restored_from = None;
             }
             if mesh.is_some() {
                 let summary = parent.stored.revisions.header(revision).unwrap().clone();
@@ -525,12 +564,6 @@ impl Core {
             } else {
                 stored.revisions.insert(base.clone(), initial);
             }
-            stored.drafts.clear();
-            stored.jobs.clear();
-            stored.job_snapshots.clear();
-            stored.geometry_cache = serde_json::Value::Null;
-            stored.recordings.clear();
-            stored.recording_imports.clear();
             let (completed, motion) = if let Some((draft, model_revision, model, motion)) = mesh {
                 crate::construction::check_job_capacity(&all, &workspace_id, actor)?;
                 stored.drafts.insert(draft.id.clone(), draft.clone());

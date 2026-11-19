@@ -528,11 +528,16 @@ impl Core {
         self.publish_asset_blob(digest.clone(), bytes).await?;
         Ok(digest)
     }
-    pub(crate) async fn publish_asset_blob(&self, digest: String, bytes: Vec<u8>) -> Result<()> {
+    pub(crate) async fn publish_asset_blob(
+        &self,
+        digest: String,
+        bytes: Vec<u8>,
+    ) -> Result<Vec<u8>> {
         let blob_directory = self.root.join("blobs");
         blocking(move || {
             std::fs::create_dir_all(&blob_directory)?;
-            portable::store_verified_blob(&blob_directory, &digest, &bytes)
+            portable::store_verified_blob(&blob_directory, &digest, &bytes)?;
+            Ok(bytes)
         })
         .await
     }
@@ -690,6 +695,7 @@ impl Core {
         }).map(|ws|json!({
             "workspace_id":ws.stored.id,
             "name":ws.stored.project.as_ref().and_then(|binding|binding.directory.file_name()).map(|name|name.to_string_lossy().to_string()).or_else(||ws.stored.title.clone()).unwrap_or_else(||"Untitled".into()),
+            "project_directory":ws.stored.project_directory().map(|directory|directory.to_string_lossy()),
             "running":ws.stored.jobs.values().filter(|job|matches!(job.state,crate::JobState::Queued|crate::JobState::Running)).count()
         })).collect::<Vec<_>>();
         summaries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));

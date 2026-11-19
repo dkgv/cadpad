@@ -298,6 +298,11 @@ export class CadViewport {
         if (data.byteLength !== info.bytes || data.byteLength % 4) throw new Error('Invalid mesh artifact');
         return [key, ['triangles', 'triangles_per_face', 'segments_per_edge', 'face_types', 'edge_types'].includes(key) ? new Uint32Array(data) : new Float32Array(data)];
       })));
+      // An STL aliases its triangle vertices as object vertices. Cadpad has
+      // no vertex selection mode, so skip the vendor's hidden point cloud.
+      if(part.accuracy==='mesh'&&part.mesh.buffers.obj_vertices?.handle===part.mesh.buffers.vertices?.handle){
+        delete buffers.obj_vertices;
+      }
       const path = `/model/${part.id}`;
       rawBuffers.set(part.instance_id,buffers as MeshBuffers);
       paths.set(path, part);

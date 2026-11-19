@@ -13,6 +13,7 @@ thiserror.workspace = true
 
 schemars = { version = "1", features = ["derive"] }
 
+ahash = "0.8"
 base64 = "0.22"
 glam = "0.33"
 parry3d-f64 = "0.31"
@@ -25,3 +26,7 @@ jsonschema.workspace = true
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "macos"))'.dependencies]
+# Use runtime-detected SHA instructions for content-addressed mesh buffers.
+sha2 = { workspace = true, features = ["asm"] }

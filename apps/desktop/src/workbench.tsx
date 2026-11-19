@@ -6,6 +6,7 @@ import {DockDragProvider,DockOuterTarget,type DockDragPayload} from './dock-drag
 import type {SessionHost,ToolTab,MessageSink,SelectionContext} from './session-host';
 import {Icon,ModelOpening} from './ui';
 import {measureModelOpen} from './model-open-timing';
+import {StlPreview,StlPreviewStream} from './stl-preview';
 import {ProjectEntry,type EntrySelection} from './project-entry';
 import {SidebarSections} from './sidebar-sections';
 import {AppAlert} from './app-alert';
@@ -128,6 +129,7 @@ export function Workbench(){
   const mounted=useRef(new Set<string>());
   const chromeId=useRef<string|null>(null);
   const chromeDocument=useRef<{project:string;document:DocumentTab}|null>(null);
+  const previews=useRef(new Map<string,{stream:StlPreviewStream;onFrame:()=>void}>());
   const openTimings=useRef(new Map<string,ReturnType<typeof measureModelOpen>>());
   const openingModels=useRef(new Map<string,ModelOpen>());
   const memoryPolicy=useRef(Promise.resolve());
@@ -175,6 +177,8 @@ export function Workbench(){
     if(!layout)return;
     const live=new Set(layout.documents.map(doc=>doc.id));
     for(const id of openTimings.current.keys())if(!live.has(id))openTimings.current.delete(id);
+    const loading=new Set(layout.documents.filter(doc=>doc.opening).map(doc=>doc.id));
+    for(const id of previews.current.keys())if(!loading.has(id))previews.current.delete(id);
   },[layout?.documents]);
   const focusedWorkspace=layout?.documents.find(doc=>doc.id===layout.focus&&!doc.pending)?.workspace;
   useEffect(()=>{
@@ -268,6 +272,15 @@ export function Workbench(){
     const placeholder:DocumentTab=existing??{id:dockId(),workspace:project,name:modelTabTitle(undefined,entry,{entry,builder}),dirty:false,pending:true,opening:true,modelEntry:{entry,builder,project}};
     open.docId=placeholder.id;
     if(!existing)openTimings.current.set(placeholder.id,timing);
+    let preview:Channel<ArrayBuffer>|undefined;
+    if(!existing&&builder==='$file'&&/\.stl$/i.test(entry)){
+      const stream=new StlPreviewStream();
+      previews.current.set(placeholder.id,{stream,onFrame:()=>timing('preview')});
+      preview=new Channel<ArrayBuffer>();
+      preview.onmessage=chunk=>{
+        if(!open.cancelled&&state.current?.documents.some(doc=>doc.id===open.docId&&doc.opening))stream.push(chunk);
+      };
+    }
     if(!existing)update(layout=>{
       const target=groups(layout.canvas).find(pane=>pane.tabs.includes(layout.focus))||groups(layout.canvas)[0];
       return {...layout,documents:[...layout.documents,placeholder],canvas:placeTab(layout.canvas,placeholder.id,target.id),focus:placeholder.id};
@@ -281,7 +294,7 @@ export function Workbench(){
           try{result={project:await invoke<Project>('project',{workspace:cached.workspace})};}
           catch{modelViews.current.delete(identity);}
         }
-        result??=await invoke<{project:Project;job:unknown}>('open_project_model',{workspace:sourceProject.workspace_id,revision:sourceProject.revision,entry,builder,cachedView:cachedWorkspace});
+        result??=await invoke<{project:Project;job:unknown}>('open_project_model',{workspace:sourceProject.workspace_id,revision:sourceProject.revision,entry,builder,cachedView:cachedWorkspace,preview});
         timing('backend');
         const job=modelJob(result.job)??modelJob(result.project.activity.find(item=>['queued','running'].includes(item.state))??result.project.activity.at(-1));
         open.workspace=result.project.workspace_id;
@@ -575,9 +588,12 @@ export function Workbench(){
       <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<AppAlert message={failure} onDismiss={()=>setFailure('')}/>}{!!layout.documents.length&&area('canvas')}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Create a project, open a project folder, or continue a recent project.</p><div className="dock-welcome-actions"><button onClick={()=>void action('new-project')}><Icon name="plus" size={15}/>New project…</button><button className="primary-button" onClick={()=>void action('open')}><Icon name="folder" size={15}/>Open project…</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.filter(ws=>!ws.model_parent).slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span>{ws.name||'Untitled'}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}</div>
       {!!layout.documents.length&&groups(layout.right).some(g=>g.tabs.length)&&<><WidthDivider side="right" value={layout.rightWidth} onChange={width=>update(current=>({...current,rightWidth:width}))}/><div className="docked-sidebar right" style={{width:layout.rightWidth}}>{area('right')}</div></>}
     </div>
-    {layout.documents.filter(doc=>doc.opening).map(doc=>
-      <DockContent key={`opening:${doc.id}`} host={host(doc.id)}><ModelOpening/></DockContent>
-    )}
+    {layout.documents.filter(doc=>doc.opening).map(doc=>{
+      const preview=previews.current.get(doc.id);
+      return <DockContent key={`opening:${doc.id}`} host={host(doc.id)}>
+        <ModelOpening/>{preview&&visible.has(doc.id)&&<StlPreview {...preview}/>}
+      </DockContent>;
+    })}
     {[...layout.documents,...(chromeDocument.current&&!layout.documents.some(doc=>doc.id===chromeId.current)?[chromeDocument.current.document]:[])].filter(doc=>{
       if(doc.pending||doc.kind==='changes')return false;
       if(visible.has(doc.id)||doc.id===chromeId.current)mounted.current.add(doc.id);

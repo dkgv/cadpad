@@ -233,20 +233,33 @@ pub async fn open_project_model(
     entry: String,
     builder: String,
     cached_view: Option<String>,
+    preview: Option<String>,
+    webview: tauri::Webview,
 ) -> Result<Value, Value> {
+    let preview = preview
+        .and_then(|id| id.parse::<tauri::ipc::JavaScriptChannelId>().ok())
+        .map(|id| {
+            let channel = id.channel_on(webview);
+            std::sync::Arc::new(move |bytes| {
+                let _ = channel.send(tauri::ipc::InvokeResponseBody::Raw(bytes));
+            }) as cadpad_core::StlPreviewSink
+        });
     let (workspace, job) = core
-        .open_project_model_reusing(
+        .open_project_model_streaming(
             &workspace,
             &revision,
             &entry,
             &builder,
             "local-user",
             cached_view.as_deref(),
+            preview,
         )
         .await
         .map_err(error_value_owned)?;
     let project = project_with_imports(&core, &workspace).await?;
-    Ok(json!({"project":project,"job":job}))
+    let mut reply = json!({"job":job});
+    reply["project"] = project;
+    Ok(reply)
 }
 #[tauri::command]
 pub async fn work_on_project_builder(

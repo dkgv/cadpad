@@ -1,6 +1,6 @@
-export type OpenStage = 'renderer'|'backend'|'buffers'|'draw'|'frame'|'pick';
+export type OpenStage = 'renderer'|'preview'|'backend'|'buffers'|'draw'|'frame'|'pick';
 
-export type ModelOpenFrame = {ms: number; reusedWorkspace: boolean};
+export type ModelOpenFrame = {ms: number; previewMs?: number; reusedWorkspace: boolean};
 
 export function measureModelOpen(entry: string, builder: string, started: number, reused: () => boolean) {
   const prefix = builder === '$file' && /\.stl$/i.test(entry) ? 'cadpad.stl' : 'cadpad.model';
@@ -15,7 +15,7 @@ export function measureModelOpen(entry: string, builder: string, started: number
     performance.measure(name, {start: started, end});
     if (stage === 'frame') {
       const rounded = Object.fromEntries(Object.entries(timings).map(([key, ms]) => [key, Math.round(ms)]));
-      frame = {ms: rounded.frame, reusedWorkspace: reused()};
+      frame = {ms: rounded.frame, previewMs: rounded.preview, reusedWorkspace: reused()};
       console.info('[cadpad:model-open]', JSON.stringify({entry, builder, reusedWorkspace: frame.reusedWorkspace, elapsedMs: rounded}));
       return frame;
     }

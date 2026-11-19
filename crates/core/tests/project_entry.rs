@@ -390,7 +390,37 @@ async fn model_tabs_keep_independent_geometry_inside_one_project_without_writing
         )
         .await
         .unwrap();
-    assert_eq!(done(&core, &plate, job).await.state, JobState::Succeeded);
+    let built = done(&core, &plate, job).await;
+    assert_eq!(built.state, JobState::Succeeded);
+    let (reused, cached) = core
+        .open_project_model_reusing(
+            &project.workspace_id,
+            &project.base_revision,
+            "geometry.py",
+            "plate",
+            "user",
+            Some(&plate),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reused, plate);
+    assert_eq!(cached.id, built.id);
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(
+            temp.path()
+                .join("app/workspaces")
+                .join(&plate)
+                .join("workspace.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let revisions = state["revisions"].as_object().unwrap();
+    assert_eq!(revisions.len(), 2);
+    assert!(!revisions.contains_key(&project.base_revision));
+    assert_eq!(state["model_source_revision"], project.base_revision);
+    let current = &revisions[state["current"].as_str().unwrap()];
+    assert!(revisions[current["parent"].as_str().unwrap()]["parent"].is_null());
     let (pin, job) = core
         .open_project_model(
             &project.workspace_id,
@@ -652,6 +682,20 @@ async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
     let current = core.get_project(&source).await.unwrap();
     let revision = current["revision"].as_str().unwrap();
 
+    let context = cadpad_core::tools::ToolContext { actor: "user".into() };
+    let native_part = &current["model"]["parts"][0];
+    let source_trace = core
+        .dispatch(
+            &context,
+            "trace_part_source",
+            serde_json::json!({"workspace_id":source,"revision":revision,"instance_id":native_part["instance_id"]}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(source_trace["publication"], native_part["source"]);
+    assert!(source_trace["publication"]["line"].is_u64());
+    assert!(source_trace["asset_path"].is_null());
+
     for (format, extension) in [("STEP", "step"), ("STL", "STL")] {
         let export = core
             .query(
@@ -691,6 +735,16 @@ async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
         let model = core.get_project(&tab).await.unwrap();
         assert_eq!(model["model_entry"]["entry"], entry);
         assert_eq!(model["model"]["parts"].as_array().unwrap().len(), 1);
+        let trace = core
+            .dispatch(
+                &context,
+                "trace_part_source",
+                serde_json::json!({"workspace_id":tab,"revision":model["revision"],"instance_id":"model"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(trace["asset_path"], entry);
+        assert!(trace["publication"].is_null());
         if extension == "STL" {
             let state: Value = serde_json::from_slice(
                 &std::fs::read(
@@ -715,6 +769,18 @@ async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
             let revision = model["revision"].as_str().unwrap();
             let edge =
                 serde_json::json!({"revision":revision,"instance_id":"model","entity_id":"edge:0"});
+            let trace_args = serde_json::json!({"workspace_id":tab,"revision":revision,"entities":[edge]});
+            let trace = core.dispatch(&context, "trace_mesh_edges", trace_args.clone()).await.unwrap();
+            assert_eq!(trace["accuracy"], "mesh");
+            let details = &trace["edges"][0];
+            assert_eq!(details["reference"], edge);
+            assert_eq!(details["classification"], "crease");
+            assert_eq!(details["plane_angle_degrees"], 90.);
+            assert_eq!(details["incident_triangle_count"], 2);
+            assert_ne!(details["incident_triangles"][0]["face_id"], details["incident_triangles"][1]["face_id"]);
+            let mut stale = trace_args;
+            stale["entities"][0]["revision"] = serde_json::json!("old");
+            assert_eq!(core.dispatch(&context, "trace_mesh_edges", stale).await.unwrap_err().code(), "STALE_ENTITY");
             let inspected_edge = core
                 .query(
                     &tab,
@@ -902,10 +968,29 @@ async fn standalone_stl_uses_project_snapshot_and_checks_the_selected_file_on_re
     assert_eq!(cached_job.id, job.id);
 
     std::fs::write(root.join(entry), mesh(3)).unwrap();
+    let preview = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let received = preview.clone();
     let (updated, job) = core
-        .open_project_model_reusing(parent, base, entry, "$file", "user", Some(&tab))
+        .open_project_model_streaming(
+            parent,
+            base,
+            entry,
+            "$file",
+            "user",
+            Some(&tab),
+            Some(std::sync::Arc::new(move |chunk| {
+                received.lock().unwrap().push(chunk)
+            })),
+        )
         .await
         .unwrap();
+    let preview = preview.lock().unwrap();
+    let expected: Vec<_> = [0.0f32, 0., 0., 3., 0., 0., 0., 1., 0.]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect();
+    assert_eq!(preview.as_slice(), &[expected]);
+    drop(preview);
     assert_ne!(updated, tab);
     assert_eq!(done(&core, &updated, job).await.state, JobState::Succeeded);
     assert_eq!(
@@ -924,7 +1009,11 @@ async fn standalone_stl_uses_project_snapshot_and_checks_the_selected_file_on_re
 #[ignore = "explicit real-file benchmark"]
 async fn benchmark_stl_open() {
     use serde_json::json;
-    use std::{collections::BTreeMap, time::Instant};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, OnceLock},
+        time::Instant,
+    };
     use tokio::task::JoinSet;
 
     let root = PathBuf::from(std::env::var_os("CADPAD_BENCH_PROJECT").expect("project directory"));
@@ -950,14 +1039,19 @@ async fn benchmark_stl_open() {
         let mut cached = None;
         for mode in ["new_workspace", "reused_workspace"] {
             let started = Instant::now();
+            let first_batch = Arc::new(OnceLock::new());
+            let received = first_batch.clone();
             let (view, job) = core
-                .open_project_model_reusing(
+                .open_project_model_streaming(
                     &parent.workspace_id,
                     &parent.base_revision,
                     &entry,
                     "$file",
                     "benchmark",
                     cached.as_deref(),
+                    Some(Arc::new(move |_| {
+                        received.get_or_init(|| started.elapsed().as_secs_f64() * 1000.0);
+                    })),
                 )
                 .await
                 .unwrap();
@@ -1006,6 +1100,7 @@ async fn benchmark_stl_open() {
             println!(
                 "{}",
                 json!({"entry":entry,"run":run,"mode":mode,"bufferBytes":bytes,
+                       "openToFirstPreviewBatchMs":first_batch.get(),
                        "openToMetadataMs":metadata_ms,"openToBuffersMs":buffers_ms})
             );
             cached = Some(view);

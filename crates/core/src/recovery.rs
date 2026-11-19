@@ -197,12 +197,12 @@ impl Core {
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
             (
                 ws.stored.current.clone(),
-                ws.stored.current_revision().model.clone(),
+                crate::artifacts::mesh_buffer_manifest(&ws.stored.current_revision().model),
                 ws.display_epoch.clone(),
             )
         };
         let result = self
-            .mesh_buffers_valid(workspace, &revision, &expected)
+            .verify_mesh_buffer_manifest(workspace, &revision, expected)
             .await
             .and_then(|valid| if valid { Ok(()) } else { Err(Error::domain(
                 "DISPLAY_CACHE_MISSING",
@@ -341,7 +341,7 @@ impl Core {
                         &draft.base_revision,
                         draft.inputs.clone(),
                         entry,
-                        digest,
+                        crate::stl_model::Source::stored(digest),
                         model["parts"][0]["geometry_fingerprint"]["format"]
                             == crate::stl_model::FORMAT,
                         cancel.clone(),

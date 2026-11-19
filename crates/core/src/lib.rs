@@ -31,6 +31,7 @@ pub mod runtime;
 mod snapshots;
 mod source_files;
 mod stl_model;
+pub use stl_model::StlPreviewSink;
 pub mod tools;
 pub mod views;
 pub mod worker;
@@ -197,6 +198,13 @@ struct StoredWorkspace {
     geometry_cache: Value,
 }
 impl StoredWorkspace {
+    fn project_directory(&self) -> Option<&std::path::Path> {
+        self.project
+            .as_ref()
+            .map(|binding| binding.directory.as_path())
+            .or_else(|| self.python_origin.as_ref()?.entry.parent())
+    }
+
     fn current_revision(&self) -> &Revision {
         self.revisions
             .resident(&self.current)
@@ -517,15 +525,16 @@ impl Core {
             }
             let model_entry = project_entry::inputs_model_entry(&revision.inputs)
                 .map(|(entry, builder)| json!({"entry": entry, "builder": builder}));
-            return Ok(
-                json!({"workspace_id":workspace_id,"revision":revision.id,"display_generation":ws.display_epoch.as_str(),"display_error":display_error,"files":revision.inputs.files.keys().collect::<Vec<_>>(),
-            "parameters":revision.inputs.parameters,"entry_point":revision.inputs.entry_point,"model_entry":model_entry,"model":revision.model,"activity":activity,"total_jobs":ws.stored.jobs.len(),"protocol_version":1,
+            let mut project = json!({"workspace_id":workspace_id,"revision":revision.id,"display_generation":ws.display_epoch.as_str(),"display_error":display_error,"files":revision.inputs.files.keys().collect::<Vec<_>>(),
+            "parameters":revision.inputs.parameters,"entry_point":revision.inputs.entry_point,"model_entry":model_entry,"activity":activity,"total_jobs":ws.stored.jobs.len(),"protocol_version":1,
             "assets":revision.inputs.assets,"dependencies":revision.inputs.dependencies,"annotations":revision.inputs.annotations,"mechanism":revision.inputs.mechanism,"motion":motion,"external_tracking":ws.stored.project.is_some()||ws.stored.python_origin.is_some(),"recordings":ws.stored.recordings.values().collect::<Vec<_>>(),
             "name":ws.stored.project.as_ref().and_then(|binding|binding.directory.file_name()).map(|name|name.to_string_lossy().to_string()).or_else(||ws.stored.title.clone()),
+            "project_directory":ws.stored.project_directory().map(|directory|directory.to_string_lossy()),
             "saved_revision":ws.stored.project.as_ref().map(|binding|&binding.saved_revision),
             "unsaved_changes":unsaved_changes,
-            "dirty":ws.stored.project.as_ref().is_none_or(|binding|binding.saved_revision!=revision.id||binding.recording_fingerprint!=recording_fingerprint||binding.motion_test_fingerprint!=tests_fingerprint)}),
-            );
+            "dirty":ws.stored.project.as_ref().is_none_or(|binding|binding.saved_revision!=revision.id||binding.recording_fingerprint!=recording_fingerprint||binding.motion_test_fingerprint!=tests_fingerprint)});
+            project["model"] = revision.model.clone();
+            return Ok(project);
         }
         Err(Error::domain(
             "REVISION_CONFLICT",
@@ -841,7 +850,7 @@ impl Core {
                 slot = Some(self.construction_slot(cancel.clone()).await?);
                 stl_publication = Some(self.display_publication.read().await);
                 let model = self.publish_stl(workspace_id, &revision_id, draft.inputs.clone(),
-                    entry, digest, true, cancel.clone()).await?;
+                    entry, stl_model::Source::stored(digest), true, cancel.clone()).await?;
                 project_result::validate_publication(&model)?;
                 let motion = motion::State::new(&draft.inputs, &model)?;
                 return Ok((None, json!({"data":model}), motion, Vec::new()));
