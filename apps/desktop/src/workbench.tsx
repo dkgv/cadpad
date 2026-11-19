@@ -228,7 +228,7 @@ export function Workbench(){
     if(open.docId&&!open.docClosed){open.docClosed=true;closeDocument(open.docId);}
     if(!open.workspace||open.dropped||open.reused)return;
     open.dropped=true;
-    modelViews.current.delete(open.identity);
+    if(modelViews.current.get(open.identity)?.workspace===open.workspace)modelViews.current.delete(open.identity);
     projects.current.delete(open.workspace);
     const workspace=open.workspace,jobId=open.jobId;
     if(jobId)void invoke('stop',{workspace,jobId}).catch(()=>{});
@@ -243,55 +243,67 @@ export function Workbench(){
     const root=current.documents.find(doc=>doc.workspace===project&&!doc.modelEntry)||source;
     const identity=JSON.stringify([project,entry,builder]);
     const existing=current.documents.find(doc=>!doc.pending&&doc.modelEntry?.project===project&&doc.modelEntry.entry===entry&&doc.modelEntry.builder===builder);
-    if(existing){
-      focusDocument(existing.id);
-      return;
-    }
     const pending=openingModels.current.get(identity);
     if(pending&&!pending.cancelled){
-      if(pending.docId)focusDocument(pending.docId);
-      return pending.promise;
+      if(current.documents.some(doc=>doc.id===pending.docId)){
+        focusDocument(pending.docId);
+        return pending.promise;
+      }
+      pending.cancelled=true;
+      pending.docClosed=true;
     }
     const allocating=[...openingModels.current.values()].filter(open=>!open.cancelled&&!open.docId).length;
-    if(current.documents.length+allocating>=32){setFailure('Close a model tab before opening another.');return;}
+    if(!existing&&current.documents.length+allocating>=32){setFailure('Close a model tab before opening another.');return;}
     const sourceProject=projects.current.get(project)||projects.current.get(root.workspace)||projects.current.get(source.workspace);
     if(!sourceProject)return;
+    if(existing){
+      focusDocument(existing.id);
+      const view=projects.current.get(existing.workspace);
+      if(builder!=='$file'||!/\.stl$/i.test(entry)||!sourceProject.external_tracking||
+        existing.opening||existing.dirty||!view||view.activity.some(job=>job.state==='queued'||job.state==='running'))return;
+    }
     const open:ModelOpen={identity,cancelled:false,dropped:false,reused:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
     const timing=measureModelOpen(entry,builder,started,()=>open.reused);
     openingModels.current.set(identity,open);
-    const placeholder:DocumentTab={id:dockId(),workspace:project,name:modelTabTitle(undefined,entry,{entry,builder}),dirty:false,pending:true,opening:true,modelEntry:{entry,builder,project}};
+    const placeholder:DocumentTab=existing??{id:dockId(),workspace:project,name:modelTabTitle(undefined,entry,{entry,builder}),dirty:false,pending:true,opening:true,modelEntry:{entry,builder,project}};
     open.docId=placeholder.id;
-    openTimings.current.set(placeholder.id,timing);
-    update(layout=>{
+    if(!existing)openTimings.current.set(placeholder.id,timing);
+    if(!existing)update(layout=>{
       const target=groups(layout.canvas).find(pane=>pane.tabs.includes(layout.focus))||groups(layout.canvas)[0];
       return {...layout,documents:[...layout.documents,placeholder],canvas:placeTab(layout.canvas,placeholder.id,target.id),focus:placeholder.id};
     });
     const task=(async()=>{
       try{
         const cached=modelViews.current.get(identity);
+        const cachedWorkspace=existing?.workspace??(cached?.sourceRevision===sourceProject.revision?cached.workspace:undefined);
         let result:{project:Project;job?:unknown}|undefined;
         if(cached?.sourceRevision===sourceProject.revision&&!sourceProject.external_tracking){
           try{result={project:await invoke<Project>('project',{workspace:cached.workspace})};}
           catch{modelViews.current.delete(identity);}
         }
-        result??=await invoke<{project:Project;job:unknown}>('open_project_model',{workspace:sourceProject.workspace_id,revision:sourceProject.revision,entry,builder,cachedView:cached?.sourceRevision===sourceProject.revision?cached.workspace:undefined});
+        result??=await invoke<{project:Project;job:unknown}>('open_project_model',{workspace:sourceProject.workspace_id,revision:sourceProject.revision,entry,builder,cachedView:cachedWorkspace});
         timing('backend');
         const job=modelJob(result.job)??modelJob(result.project.activity.find(item=>['queued','running'].includes(item.state))??result.project.activity.at(-1));
         open.workspace=result.project.workspace_id;
-        open.reused=open.workspace===cached?.workspace;
+        open.reused=open.workspace===cachedWorkspace;
         open.jobId=job?.id??'';
-        if(open.cancelled||state.current?.projectWorkspace!==project||!state.current.documents.some(doc=>doc.id===open.docId)){
+        const live=state.current?.documents.find(doc=>doc.id===open.docId);
+        if(open.cancelled||state.current?.projectWorkspace!==project||!live||
+          (existing&&(live.workspace!==existing.workspace||live.dirty))){
+          if(existing)open.docClosed=true;
           releaseOpen(open);
           return;
         }
+        if(existing&&open.reused)return;
+        if(existing)openTimings.current.set(existing.id,timing);
         if(modelViews.current.size>=128&&!modelViews.current.has(identity))modelViews.current.delete(modelViews.current.keys().next().value!);
         modelViews.current.set(identity,{workspace:result.project.workspace_id,sourceRevision:sourceProject.revision});
         projects.current.set(result.project.workspace_id,result.project);
-        update(layout=>({...layout,documents:layout.documents.map(doc=>doc.id===open.docId?{...doc,workspace:result.project.workspace_id,pending:false,dirty:hasUnsavedChanges(result.project)}:doc)}));
+        update(layout=>({...layout,documents:layout.documents.map(doc=>doc.id===open.docId?{...doc,workspace:result.project.workspace_id,pending:false,opening:true,dirty:hasUnsavedChanges(result.project)}:doc)}));
         if(open.cancelled)releaseOpen(open);
       }catch(error){
         if(!open.cancelled&&state.current?.projectWorkspace===project)setFailure(describeError(error));
-        closeDocument(open.docId);
+        if(!existing)closeDocument(open.docId);
       }finally{
         if(openingModels.current.get(identity)===open)openingModels.current.delete(identity);
       }
@@ -585,7 +597,7 @@ export function Workbench(){
         onProject:project=>{projects.current.set(project.workspace_id,project);update(current=>{const prior=current.documents.find(item=>item.id===doc.id);const fallback=prior?.modelEntry?prior.name:project.name||'Untitled';const name=modelTabTitle(project,fallback,prior?.modelEntry);if(prior&&prior.name===name&&prior.dirty===hasUnsavedChanges(project))return current;return {...current,documents:current.documents.map(item=>item.kind!=='changes'&&item.workspace===project.workspace_id?{...item,name:modelTabTitle(project,item.modelEntry?item.name:project.name||'Untitled',item.modelEntry),dirty:hasUnsavedChanges(project)}:item)};});},
         connectMenu:channel=>connectMenu(doc.id,channel),connectView:channel=>connectView(doc.id,channel),
       };
-      return <DockContent key={doc.id} host={host(doc.id)}><App host={sessionHost}/></DockContent>;
+      return <DockContent key={doc.id} host={host(doc.id)}><App key={doc.workspace} host={sessionHost}/></DockContent>;
     })}
   </div></DockDragProvider>;
 }

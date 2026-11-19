@@ -2791,6 +2791,49 @@ test('project STL opens in one selectable viewer and attaches a surface to the A
   assert.deepEqual(start.references,[face]);
 });
 
+test('reselecting or reopening a project STL checks the disk-backed cache',async()=>{
+  harness.project.external_tracking=true;
+  const original=harness.invoke.bind(harness);
+  const opens=[];
+  const view=(version)=>({
+    ...fixture(),workspace_id:`bracket-${version}`,revision:`r-${version}`,model_parent:'workspace-1',
+    activity:[{id:`job-${version}`,state:'succeeded',diagnostics:{}}],
+  });
+  let current=view(1);
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files:[{path:'cad/bracket.stl',builders:[{id:'$file',label:'bracket.stl',kind:'model_file',available:true,line:1}]}]};
+    if(command==='open_project_model'){
+      opens.push(args.cachedView);
+      return {project:structuredClone(current),job:current.activity[0]};
+    }
+    if(command==='project'&&args.workspace===current.workspace_id)return structuredClone(current);
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(20);
+  await expandModelFolders('cad');
+  const select=async()=>{
+    await click(document.querySelector('#panel-model .library-part-link'));
+    await flush(30);
+  };
+  await select();
+  const constructions=harness.constructions;
+  await select();
+  assert.equal(harness.constructions,constructions,'unchanged STL keeps its viewport');
+  current=view(2);
+  await select();
+  assert.deepEqual(opens,[undefined,'bracket-1','bracket-1']);
+  assert.equal(canvasTabs().filter(tab=>tab.textContent==='bracket.stl').length,1);
+  assert.ok(harness.viewports.some(viewport=>viewport.hasScene('bracket-2','r-2')));
+
+  await act(async()=>harness.menu.onmessage('close-tab'));await flush(20);
+  assert.ok(!canvasTabs().some(tab=>tab.textContent==='bracket.stl'));
+  current=view(3);
+  await select();
+  assert.equal(opens.at(-1),'bracket-2','a closed tab still revalidates its cached workspace');
+  assert.ok(harness.viewports.some(viewport=>viewport.hasScene('bracket-3','r-3')));
+
+});
+
 test('selecting another Explorer model preserves loading tabs and the latest selection',async()=>{
   const original=harness.invoke.bind(harness);
   const resolvers=new Map();
