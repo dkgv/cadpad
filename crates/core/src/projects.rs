@@ -24,10 +24,16 @@ async fn blocking<T: Send + 'static>(
 impl Core {
     pub(crate) async fn load_portable(&self, directory: PathBuf) -> Result<portable::Loaded> {
         let mut loaded = blocking(move || portable::read_project(&directory)).await?;
+        self.publish_portable_assets(&mut loaded).await?;
+        Ok(loaded)
+    }
+    pub(crate) async fn publish_portable_assets(
+        &self,
+        loaded: &mut portable::Loaded,
+    ) -> Result<()> {
         let blobs = std::mem::take(&mut loaded.blobs);
         let directory = self.root.join("blobs");
-        blocking(move || portable::store_blobs(&directory, &blobs)).await?;
-        Ok(loaded)
+        blocking(move || portable::store_blobs(&directory, &blobs)).await
     }
     pub(crate) fn input_draft(inputs: Inputs, base: &str, actor: &str) -> Draft {
         Draft {
@@ -317,7 +323,7 @@ impl Core {
             )
         };
         let directory = binding.directory.clone();
-        let loaded = blocking(move || portable::read_project(&directory)).await?;
+        let loaded = blocking(move || portable::read_project_metadata(&directory)).await?;
         let changed = loaded.fingerprint != binding.fingerprint;
         let mut changes = BTreeMap::new();
         for path in inputs.files.keys().chain(loaded.inputs.files.keys()) {

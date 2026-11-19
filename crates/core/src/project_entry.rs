@@ -6,11 +6,49 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const MODEL_FILE_BUILDER: &str = "$file";
+const MODEL_FILE_COMMENT: &str = "# Project model file: ";
+
+fn model_file_asset(entry: &str) -> String {
+    if let Some(asset) = entry.strip_prefix("assets/") {
+        return asset.into();
+    }
+    let digest = crate::hash(entry);
+    let extension = portable::model_file_format(entry).unwrap();
+    format!("imports/project/{digest}.{extension}")
+}
+
+async fn read_project_model_file(directory: PathBuf, entry: &str) -> Result<Vec<u8>> {
+    let relative = entry.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let root = directory.canonicalize()?;
+        let path = portable::checked_path(&root, &relative)?.canonicalize()?;
+        if !path.starts_with(&root) {
+            return Err(Error::domain(
+                "INVALID_REQUEST",
+                "Choose a file inside this project",
+            ));
+        }
+        portable::read_bounded(&path, portable::ASSET_LIMIT)
+    })
+    .await
+    .map_err(|_| Error::domain("IO_ERROR", "Could not read project model"))?
+}
+
 /// Recover the source file + builder a generated Cadpad adapter wraps.
 /// Used so Explorer can select the real entry even when the canvas is the project root.
 pub fn generated_model_entry(source: &str) -> Option<(String, String)> {
     if !source.starts_with("# Generated Cadpad entry point.") {
         return None;
+    }
+    if let Some(path) = source
+        .lines()
+        .nth(1)
+        .and_then(|line| line.strip_prefix(MODEL_FILE_COMMENT))
+    {
+        let entry: String = serde_json::from_str(path).ok()?;
+        portable::model_file_format(&entry)?;
+        return Some((entry, MODEL_FILE_BUILDER.into()));
     }
     let entry = source.lines().find_map(|line| {
         let line = line.trim();
@@ -38,8 +76,13 @@ pub(crate) fn inputs_model_entry(inputs: &crate::Inputs) -> Option<(String, Stri
 /// A generated entry can outlive its source after a project is reorganized on disk.
 /// Keep the imported files browsable instead of executing a dangling adapter.
 pub(crate) fn reset_missing_model_entry(inputs: &mut crate::Inputs) {
-    if let Some((entry, _)) = inputs_model_entry(inputs) {
-        if !inputs.files.contains_key(&entry) {
+    if let Some((entry, builder)) = inputs_model_entry(inputs) {
+        let present = if builder == MODEL_FILE_BUILDER {
+            inputs.assets.contains_key(&model_file_asset(&entry))
+        } else {
+            inputs.files.contains_key(&entry)
+        };
+        if !present {
             inputs.files.insert(
                 inputs.entry_point.clone(),
                 portable::PROJECT_BROWSER_SOURCE.into(),
@@ -47,7 +90,6 @@ pub(crate) fn reset_missing_model_entry(inputs: &mut crate::Inputs) {
         }
     }
 }
-
 
 impl Core {
     pub async fn project_directory(&self, workspace: &str) -> Result<PathBuf> {
@@ -131,6 +173,18 @@ impl Core {
         self.entry_analysis_request("index_sources", json!({"sources": sources}))
             .await
     }
+    /// Decode the project STL without starting a CAD worker.
+    pub async fn project_stl_preview(&self, workspace: &str, entry: &str) -> Result<Vec<u8>> {
+        if portable::model_file_format(entry) != Some("stl") {
+            return Err(Error::domain("INVALID_REQUEST", "Choose a project STL file"));
+        }
+        let directory = self.project_directory(workspace).await?;
+        let bytes = read_project_model_file(directory, entry).await?;
+        tokio::task::spawn_blocking(move || portable::stl_preview(&bytes))
+            .await
+            .map_err(|_| Error::domain("IO_ERROR", "Could not preview the STL file"))?
+    }
+
     /// STL files already stored in the project folder. Scratchpads have none.
     pub async fn project_meshes(&self, workspace: &str) -> Result<Value> {
         let directory = match self.project_directory(workspace).await {
@@ -211,6 +265,18 @@ impl Core {
         builder: &str,
         actor: &str,
     ) -> Result<(String, crate::Job)> {
+        self.open_project_model_reusing(workspace, revision, entry, builder, actor, None)
+            .await
+    }
+    pub async fn open_project_model_reusing(
+        &self,
+        workspace: &str,
+        revision: &str,
+        entry: &str,
+        builder: &str,
+        actor: &str,
+        cached_view: Option<&str>,
+    ) -> Result<(String, crate::Job)> {
         let _memory = self.pin_workspace(workspace).await?;
         // Opening a model executes the selected disk sources in a private view.
         // Keep the project's saved checkpoints independent of that live layout.
@@ -232,9 +298,61 @@ impl Core {
                 .map(|binding| binding.directory.clone())
         };
         let publication = self.blob_publication.read().await;
-        let disk = match directory {
-            Some(directory) => Some(self.load_portable(directory).await?),
-            None => None,
+        let disk = if let Some(directory) = directory {
+            let root = directory.clone();
+            let mut disk = tokio::task::spawn_blocking(move || portable::read_project(&root))
+                .await
+                .map_err(|error| Error::domain("IO_ERROR", error.to_string()))??;
+            if let Some(view) = cached_view.filter(|view| *view != workspace) {
+                let out_of_tree_asset =
+                    builder == MODEL_FILE_BUILDER && !entry.starts_with("assets/");
+                let asset_hash =
+                    if out_of_tree_asset && portable::model_file_format(entry).is_some() {
+                        Some(portable::bytes_hash(
+                            &read_project_model_file(directory.clone(), entry).await?,
+                        ))
+                    } else {
+                        None
+                    };
+                if let Ok(all) = self.workspace(view).await {
+                    let candidate = &all[view].stored;
+                    let current = candidate.current_revision();
+                    let matches_asset = !out_of_tree_asset
+                        || asset_hash.as_ref().is_some_and(|hash| {
+                            current.inputs.assets.get(&model_file_asset(entry)) == Some(hash)
+                        });
+                    if all
+                        .get(workspace)
+                        .is_some_and(|parent| parent.stored.current == revision)
+                        && candidate.model_parent.as_deref() == Some(workspace)
+                        && candidate.project.as_ref().is_some_and(|binding| {
+                            binding.directory == directory
+                                && binding.fingerprint == disk.fingerprint
+                                && current.parent.as_deref()
+                                    == Some(binding.saved_revision.as_str())
+                                && candidate
+                                    .revisions
+                                    .header(&binding.saved_revision)
+                                    .is_some_and(|base| base.parent.as_deref() == Some(revision))
+                        })
+                        && inputs_model_entry(&current.inputs)
+                            .as_ref()
+                            .is_some_and(|(path, id)| path == entry && id == builder)
+                        && matches_asset
+                        && let Some(job) = candidate.jobs.values().find(|job| {
+                            job.state == crate::JobState::Succeeded
+                                && job.resulting_revision.as_deref() == Some(current.id.as_str())
+                        })
+                    {
+                        self.ensure_actor_active(actor)?;
+                        return Ok((view.into(), job.clone()));
+                    }
+                }
+            }
+            self.publish_portable_assets(&mut disk).await?;
+            Some(disk)
+        } else {
+            None
         };
         let workspace_id = crate::id();
         let base = crate::id();
@@ -315,6 +433,77 @@ impl Core {
         actor: &str,
     ) -> Result<crate::Job> {
         let _memory = self.pin_workspace(workspace).await?;
+        let (adapter, staged) = if builder == MODEL_FILE_BUILDER {
+            let format = portable::model_file_format(entry)
+                .ok_or_else(|| Error::domain("INVALID_REQUEST", "Choose a STEP or STL file"))?;
+            let directory = self.project_directory(workspace).await?;
+            let bytes = read_project_model_file(directory, entry).await?;
+            let asset = model_file_asset(entry);
+            let draft = self
+                .stage_asset(workspace, revision, None, &asset, bytes, actor)
+                .await?;
+            let path = serde_json::to_string(entry)?;
+            let name = serde_json::to_string(&asset)?;
+            let kind = if format == "stl" {
+                ", kind=\"surface\""
+            } else {
+                ""
+            };
+            let adapter = format!(
+                "# Generated Cadpad entry point.\n{MODEL_FILE_COMMENT}{path}\nshow(import_{format}({name}), name=\"model\"{kind})\n"
+            );
+            (adapter, Some(draft))
+        } else {
+            (
+                self.project_builder_adapter(workspace, revision, entry, builder)
+                    .await?,
+                None,
+            )
+        };
+        let draft = {
+            let mut all = self.workspace(workspace).await?;
+            self.ensure_actor_active(actor)?;
+            let ws = all
+                .get_mut(workspace)
+                .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+            if ws.stored.current != revision {
+                return Err(Error::domain(
+                    "REVISION_CONFLICT",
+                    "Project changed while selecting a builder",
+                ));
+            }
+            let inputs = ws.stored.current_revision().inputs.clone();
+            let mut draft = staged.unwrap_or_else(|| Self::input_draft(inputs, revision, actor));
+            let existing = &draft.inputs.entry_point;
+            let name = if draft.inputs.files.get(existing).is_some_and(|source| {
+                source.starts_with("# Generated Cadpad entry point.")
+                    || source == portable::PROJECT_BROWSER_SOURCE
+            }) {
+                existing.clone()
+            } else {
+                (0..=portable::SOURCE_FILE_LIMIT)
+                    .map(|index| format!("cadpad_view_{index}.py"))
+                    .find(|name| !draft.inputs.files.contains_key(name))
+                    .unwrap()
+            };
+            draft.inputs.files.insert(name.clone(), adapter);
+            draft.inputs.entry_point = name;
+            portable::validate_inputs(&draft.inputs)?;
+            let mut next = ws.stored.clone();
+            next.drafts.insert(draft.id.clone(), draft.clone());
+            self.persist(&next).await?;
+            ws.stored = next;
+            draft
+        };
+        self.build(workspace, revision, &draft.id, actor).await
+    }
+    async fn project_builder_adapter(
+        &self,
+        workspace: &str,
+        revision: &str,
+        entry: &str,
+        builder: &str,
+    ) -> Result<String> {
         let source = self.read_source(workspace, revision, entry).await?;
         let mut group_builders = Vec::new();
         if builder == "$group" {
@@ -360,42 +549,7 @@ impl Core {
                 Error::domain("INVALID_REQUEST", "Choose an available geometry builder")
             })?
             .to_string();
-        let draft = {
-            let mut all = self.workspace(workspace).await?;
-            self.ensure_actor_active(actor)?;
-            let ws = all
-                .get_mut(workspace)
-                .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
-            if ws.stored.current != revision {
-                return Err(Error::domain(
-                    "REVISION_CONFLICT",
-                    "Project changed while selecting a builder",
-                ));
-            }
-            let inputs = ws.stored.current_revision().inputs.clone();
-            let mut draft = Self::input_draft(inputs, revision, actor);
-            let existing = &draft.inputs.entry_point;
-            let name = if draft.inputs.files.get(existing).is_some_and(|source| {
-                source.starts_with("# Generated Cadpad entry point.")
-                    || source == portable::PROJECT_BROWSER_SOURCE
-            }) {
-                existing.clone()
-            } else {
-                (0..=portable::SOURCE_FILE_LIMIT)
-                    .map(|index| format!("cadpad_view_{index}.py"))
-                    .find(|name| !draft.inputs.files.contains_key(name))
-                    .unwrap()
-            };
-            draft.inputs.files.insert(name.clone(), adapter);
-            draft.inputs.entry_point = name;
-            portable::validate_inputs(&draft.inputs)?;
-            let mut next = ws.stored.clone();
-            next.drafts.insert(draft.id.clone(), draft.clone());
-            self.persist(&next).await?;
-            ws.stored = next;
-            draft
-        };
-        self.build(workspace, revision, &draft.id, actor).await
+        Ok(adapter)
     }
     /// The Explorer catalog describes disk, never the saved revision's layout.
     /// Fingerprints only avoid repeating Python analysis; every call reads disk.
@@ -405,23 +559,39 @@ impl Core {
         revision: &str,
         fingerprint: Option<&str>,
     ) -> Result<Value> {
-        let _memory = self.pin_workspace(workspace).await?;
         let directory = {
-            let all = self.workspace(workspace).await?;
+            let all = self.workspaces.lock().await;
             let ws = all
                 .get(workspace)
                 .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
-            if !ws.stored.revisions.contains_key(revision) {
-                return Err(Error::domain("REVISION_CONFLICT", "Unknown revision"));
+            // The archive keeps the current revision and folder binding.
+            // A disk-backed catalog needs neither revision bodies nor native state.
+            if ws.stored.current == revision {
+                ws.stored
+                    .project
+                    .as_ref()
+                    .map(|binding| binding.directory.clone())
+            } else {
+                drop(all);
+                let all = self.workspace_metadata(workspace).await?;
+                let ws = &all[workspace];
+                if !ws.stored.revisions.contains_key(revision) {
+                    return Err(Error::domain("REVISION_CONFLICT", "Unknown revision"));
+                }
+                ws.stored
+                    .project
+                    .as_ref()
+                    .map(|binding| binding.directory.clone())
             }
-            ws.stored
-                .project
-                .as_ref()
-                .map(|binding| binding.directory.clone())
         };
         if let Some(directory) = directory {
-            let sources = Self::catalog_sources(directory).await?;
-            let observed = crate::hash(&serde_json::to_string(&sources)?);
+            let (sources, models) =
+                tokio::try_join!(Self::catalog_sources(directory.clone()), async move {
+                    tokio::task::spawn_blocking(move || portable::list_model_files(&directory))
+                        .await
+                        .map_err(|_| Error::domain("IO_ERROR", "Could not list project models"))?
+                })?;
+            let observed = crate::hash(&serde_json::to_string(&(&sources, &models))?);
             if fingerprint == Some(observed.as_str()) {
                 return Ok(json!({"unchanged":true,"fingerprint":observed}));
             }
@@ -435,6 +605,18 @@ impl Core {
                         file["source"] = json!(source);
                     }
                 }
+            }
+            if let Some(files) = index["files"].as_array_mut() {
+                files.extend(models.into_iter().map(|path| {
+                    let name = path.rsplit('/').next().unwrap();
+                    json!({
+                        "path": path, "description": "CAD file", "diagnostic": null,
+                        "builders": [{
+                            "id": MODEL_FILE_BUILDER, "kind": "model_file", "label": name,
+                            "available": true, "reason": "", "line": 0
+                        }]
+                    })
+                }));
             }
             index["fingerprint"] = json!(observed);
             return Ok(index);

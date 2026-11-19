@@ -151,7 +151,7 @@ pub(crate) fn checked_path(root: &Path, relative: &str) -> Result<PathBuf> {
     }
     Ok(path)
 }
-pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
+fn open_regular_project_file(path: &Path) -> Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -166,15 +166,40 @@ pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
             "Expected a regular project file",
         ));
     }
+    Ok(file)
+}
+pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > limit {
+    open_regular_project_file(path)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    check_file_size(path, bytes.len(), limit)?;
+    Ok(bytes)
+}
+fn check_file_size(path: &Path, bytes: usize, limit: usize) -> Result<()> {
+    if bytes > limit {
         return Err(Error::domain(
             "INVALID_REQUEST",
             format!("{} exceeds the {} byte limit", path.display(), limit),
         ));
     }
-    Ok(bytes)
+    Ok(())
+}
+fn hash_bounded(path: &Path, limit: usize) -> Result<(String, usize)> {
+    let mut reader = open_regular_project_file(path)?.take(limit as u64 + 1);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    let mut size = 0;
+    loop {
+        let len = reader.read(&mut buffer)?;
+        if len == 0 {
+            break;
+        }
+        size += len;
+        hasher.update(&buffer[..len]);
+    }
+    check_file_size(path, size, limit)?;
+    Ok((format!("{:x}", hasher.finalize()), size))
 }
 fn json_file<T: for<'de> Deserialize<'de>>(root: &Path, path: &str) -> Result<T> {
     Ok(serde_json::from_slice(&read_bounded(
@@ -250,12 +275,50 @@ fn scan_files(
 pub fn list_mesh_files(directory: &Path) -> Result<Vec<String>> {
     let root = directory.canonicalize()?;
     let mut files = Vec::new();
-    walk_mesh_files(&root, &root, &mut files)?;
+    walk_model_files(
+        &root,
+        &root,
+        &mut files,
+        |path| mesh_path(path).is_ok(),
+        256,
+    )?;
     files.sort();
     Ok(files)
 }
-fn walk_mesh_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> Result<()> {
-    if files.len() >= 256
+pub(crate) fn model_file_format(path: &str) -> Option<&'static str> {
+    relative(path.strip_prefix("assets/").unwrap_or(path)).ok()?;
+    match Path::new(path)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "step" | "stp" => Some("step"),
+        "stl" => Some("stl"),
+        _ => None,
+    }
+}
+pub(crate) fn list_model_files(directory: &Path) -> Result<Vec<String>> {
+    let root = directory.canonicalize()?;
+    let mut files = Vec::new();
+    walk_model_files(
+        &root,
+        &root,
+        &mut files,
+        |path| model_file_format(path).is_some(),
+        usize::MAX,
+    )?;
+    files.sort();
+    Ok(files)
+}
+fn walk_model_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<String>,
+    accepts: fn(&str) -> bool,
+    limit: usize,
+) -> Result<()> {
+    if files.len() >= limit
         || directory
             .strip_prefix(root)
             .unwrap_or(directory)
@@ -270,7 +333,7 @@ fn walk_mesh_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> Re
         Err(_) => return Ok(()),
     };
     for entry in entries {
-        if files.len() >= 256 {
+        if files.len() >= limit {
             break;
         }
         let Ok(entry) = entry else { continue };
@@ -291,15 +354,15 @@ fn walk_mesh_files(root: &Path, directory: &Path, files: &mut Vec<String>) -> Re
             continue;
         }
         if kind.is_dir() {
-            walk_mesh_files(root, &entry.path(), files)?;
-        } else if kind.is_file() && name.to_ascii_lowercase().ends_with(".stl") {
+            walk_model_files(root, &entry.path(), files, accepts, limit)?;
+        } else if kind.is_file() {
             let relative = entry
                 .path()
                 .strip_prefix(root)
                 .unwrap_or(entry.path().as_path())
                 .to_string_lossy()
                 .replace('\\', "/");
-            if mesh_path(&relative).is_ok() {
+            if accepts(&relative) {
                 files.push(relative);
             }
         }
@@ -325,23 +388,50 @@ fn stl_summary(format: &'static str, triangles: u64, min: [f64; 3], max: [f64; 3
 }
 /// Bounds and triangle count only. The mesh is not stored or imported.
 pub fn summarize_stl(bytes: &[u8]) -> Result<StlSummary> {
+    visit_stl(bytes, |_| Ok(()))
+}
+
+/// Little-endian, non-indexed XYZ float32 positions for the provisional view.
+pub(crate) fn stl_preview(bytes: &[u8]) -> Result<Vec<u8>> {
+    let mut positions = Vec::new();
+    visit_stl(bytes, |point| {
+        for value in point {
+            let value = value as f32;
+            if !value.is_finite() {
+                return Err(Error::domain(
+                    "INVALID_GEOMETRY",
+                    "STL exceeds the preview coordinate range",
+                ));
+            }
+            positions.extend_from_slice(&value.to_le_bytes());
+        }
+        Ok(())
+    })?;
+    Ok(positions)
+}
+
+fn visit_stl(bytes: &[u8], mut vertex: impl FnMut([f64; 3]) -> Result<()>) -> Result<StlSummary> {
     if bytes.len() >= 84 {
         let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as u64;
         let binary_len = 84u64.saturating_add(count.saturating_mul(50));
         if count > 0 && binary_len == bytes.len() as u64 {
-            return summarize_binary_stl(bytes, count);
+            return summarize_binary_stl(bytes, count, vertex);
         }
     }
     let text = String::from_utf8_lossy(bytes);
     if text.to_ascii_lowercase().contains("facet") {
-        return summarize_ascii_stl(&text);
+        return summarize_ascii_stl(&text, &mut vertex);
     }
     Err(Error::domain(
         "INVALID_GEOMETRY",
         "STL is neither a valid binary nor ASCII mesh",
     ))
 }
-fn summarize_binary_stl(bytes: &[u8], count: u64) -> Result<StlSummary> {
+fn summarize_binary_stl(
+    bytes: &[u8],
+    count: u64,
+    mut emit: impl FnMut([f64; 3]) -> Result<()>,
+) -> Result<StlSummary> {
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for index in 0..count {
@@ -360,6 +450,7 @@ fn summarize_binary_stl(bytes: &[u8], count: u64) -> Result<StlSummary> {
                     "STL coordinates are not finite",
                 ));
             }
+            emit(point)?;
             for axis in 0..3 {
                 min[axis] = min[axis].min(point[axis]);
                 max[axis] = max[axis].max(point[axis]);
@@ -368,7 +459,10 @@ fn summarize_binary_stl(bytes: &[u8], count: u64) -> Result<StlSummary> {
     }
     Ok(stl_summary("binary", count, min, max))
 }
-fn summarize_ascii_stl(text: &str) -> Result<StlSummary> {
+fn summarize_ascii_stl(
+    text: &str,
+    mut emit: impl FnMut([f64; 3]) -> Result<()>,
+) -> Result<StlSummary> {
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     let mut vertices = 0u64;
@@ -399,6 +493,7 @@ fn summarize_ascii_stl(text: &str) -> Result<StlSummary> {
                 "STL coordinates are not finite",
             ));
         }
+        emit(point)?;
         vertices += 1;
         for axis in 0..3 {
             min[axis] = min[axis].min(point[axis]);
@@ -528,6 +623,15 @@ pub fn read_manifest(directory: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 pub fn read_project(directory: &Path) -> Result<Loaded> {
+    read_project_with_assets(directory, true)
+}
+
+/// Compare disk inputs without retaining all managed asset bodies at once.
+pub(crate) fn read_project_metadata(directory: &Path) -> Result<Loaded> {
+    read_project_with_assets(directory, false)
+}
+
+fn read_project_with_assets(directory: &Path, retain_blobs: bool) -> Result<Loaded> {
     let root = directory.canonicalize()?;
     let metadata = metadata_directory(&root)?;
     let manifest: Manifest = json_file(&metadata, "project.json")?;
@@ -609,24 +713,27 @@ pub fn read_project(directory: &Path) -> Result<Loaded> {
         if inputs.assets.contains_key(asset) {
             return Err(Error::domain("INVALID_REQUEST", "Duplicate managed asset"));
         }
-        let bytes = read_bounded(
-            &checked_path(&root, &format!("assets/{asset}"))?,
-            ASSET_LIMIT,
-        )?;
-        if !manifest.assets.contains(asset)
-            && manifest.retained_assets.get(asset) == Some(&bytes_hash(&bytes))
-        {
+        let path = checked_path(&root, &format!("assets/{asset}"))?;
+        let (hash, size, bytes) = if retain_blobs {
+            let bytes = read_bounded(&path, ASSET_LIMIT)?;
+            (bytes_hash(&bytes), bytes.len(), Some(bytes))
+        } else {
+            let (hash, size) = hash_bounded(&path, ASSET_LIMIT)?;
+            (hash, size, None)
+        };
+        if !manifest.assets.contains(asset) && manifest.retained_assets.get(asset) == Some(&hash) {
             continue;
         }
-        total += bytes.len();
+        total += size;
         if total > TOTAL_LIMIT {
             return Err(Error::domain(
                 "INVALID_REQUEST",
                 "Project exceeds 256 MiB input limit",
             ));
         }
-        let hash = bytes_hash(&bytes);
-        blobs.insert(hash.clone(), bytes);
+        if let Some(bytes) = bytes {
+            blobs.insert(hash.clone(), bytes);
+        }
         inputs.assets.insert(asset.clone(), hash);
     }
     validate_inputs(&inputs)?;
@@ -1180,7 +1287,7 @@ pub(crate) fn read_python_project_excluding(
 
 #[cfg(test)]
 mod mesh_tests {
-    use super::{list_mesh_files, mesh_path, summarize_stl};
+    use super::{list_mesh_files, mesh_path, stl_preview, summarize_stl};
     use std::fs;
     use std::io::Write;
 
@@ -1210,10 +1317,38 @@ mod mesh_tests {
         assert_eq!(summary.format, "ascii");
         assert_eq!(summary.triangles, 1);
         assert_eq!(summary.size, [4.0, 3.0, 1.0]);
+        let expected = |coords: [f32; 9]| {
+            coords.into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stl_preview(&binary).unwrap(),
+            expected([0., 0., 0., 10., 0., 0., 0., 20., 5.])
+        );
+        assert_eq!(
+            stl_preview(ascii).unwrap(),
+            expected([0., 0., 0., 4., 0., 0., 0., 3., 1.])
+        );
+        assert!(stl_preview(&binary[..binary.len() - 1]).is_err());
         assert!(summarize_stl(b"not a mesh").is_err());
         assert!(mesh_path("../part.stl").is_err());
         assert!(mesh_path("model.py").is_err());
         assert!(mesh_path("assets/part.stl").is_ok());
+    }
+
+    #[test]
+    fn project_metadata_hashes_assets_without_retaining_bodies() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("model.py"), b"# source\n").unwrap();
+        super::initialize_folder(root.path(), "model.py").unwrap();
+        fs::create_dir_all(root.path().join("assets")).unwrap();
+        fs::write(root.path().join("assets/mesh.stl"), vec![7; 128 * 1024 + 1]).unwrap();
+
+        let full = super::read_project(root.path()).unwrap();
+        let metadata = super::read_project_metadata(root.path()).unwrap();
+        assert_eq!(metadata.fingerprint, full.fingerprint);
+        assert_eq!(metadata.inputs.assets, full.inputs.assets);
+        assert_eq!(full.blobs.len(), 1);
+        assert!(metadata.blobs.is_empty());
     }
 
     #[test]

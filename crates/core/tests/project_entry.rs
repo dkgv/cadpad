@@ -624,3 +624,100 @@ async fn opening_a_new_disk_model_uses_disk_sources_without_changing_project_his
         source
     );
 }
+
+#[tokio::test]
+async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("design");
+    let folder = "parts/frame/v4/final/assembled";
+    std::fs::create_dir_all(root.join(folder)).unwrap();
+    std::fs::write(
+        root.join("geometry.py"),
+        "import cadquery as cq\ndef plate(): return cq.Workplane().box(2, 3, 4)\n",
+    )
+    .unwrap();
+    portable::initialize_project_browser(&root).unwrap();
+    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
+    let project = core.open_project(root.clone(), "user").await.unwrap();
+    let (parent, base) = (&project.workspace_id, &project.base_revision);
+    let before = core
+        .project_source_catalog(parent, base, None)
+        .await
+        .unwrap();
+    let (source, job) = core
+        .open_project_model(parent, base, "geometry.py", "plate", "user")
+        .await
+        .unwrap();
+    assert_eq!(done(&core, &source, job).await.state, JobState::Succeeded);
+    let current = core.get_project(&source).await.unwrap();
+    let revision = current["revision"].as_str().unwrap();
+
+    for (format, extension) in [("STEP", "step"), ("STL", "STL")] {
+        let export = core
+            .query(
+                &source,
+                revision,
+                "export",
+                serde_json::json!({"format":format}),
+            )
+            .await
+            .unwrap();
+        let path = root.join(folder).join(format!("plate.{extension}"));
+        core.freeze_export(&source, revision, export["handle"].as_str().unwrap())
+            .await
+            .unwrap()
+            .save_to(&path)
+            .unwrap();
+    }
+    let index = core
+        .project_source_catalog(parent, base, before["fingerprint"].as_str())
+        .await
+        .unwrap();
+    for extension in ["step", "STL"] {
+        let entry = format!("{folder}/plate.{extension}");
+        let file = index["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == entry)
+            .unwrap();
+        let builder = file["builders"][0]["id"].as_str().unwrap();
+        let (tab, job) = core
+            .open_project_model(parent, base, &entry, builder, "user")
+            .await
+            .unwrap();
+        let job = done(&core, &tab, job).await;
+        assert_eq!(job.state, JobState::Succeeded, "{:?}", job.diagnostics);
+        let model = core.get_project(&tab).await.unwrap();
+        assert_eq!(model["model_entry"]["entry"], entry);
+        assert_eq!(model["model"]["parts"].as_array().unwrap().len(), 1);
+        let (reopened, cached_job) = core
+            .open_project_model_reusing(parent, base, &entry, builder, "user", Some(&tab))
+            .await
+            .unwrap();
+        assert_eq!(reopened, tab);
+        assert_eq!(cached_job.id, job.id);
+        if extension == "step" {
+            let file = root.join(&entry);
+            let mut bytes = std::fs::read(&file).unwrap();
+            bytes.push(b'\n');
+            std::fs::write(file, bytes).unwrap();
+            let (updated, new_job) = core
+                .open_project_model_reusing(parent, base, &entry, builder, "user", Some(&tab))
+                .await
+                .unwrap();
+            assert_ne!(updated, tab);
+            assert_eq!(
+                done(&core, &updated, new_job).await.state,
+                JobState::Succeeded
+            );
+        }
+    }
+    assert_eq!(core.get_project(parent).await.unwrap()["revision"], *base);
+    std::fs::remove_file(root.join(folder).join("plate.STL")).unwrap();
+    let updated = core
+        .project_source_catalog(parent, base, index["fingerprint"].as_str())
+        .await
+        .unwrap();
+    assert_eq!(updated["files"].as_array().unwrap().len(), 2);
+}

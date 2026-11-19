@@ -347,6 +347,30 @@ mod tests {
         .await
         .expect("closed workspace should release full history");
     }
+    #[tokio::test]
+    async fn disk_catalog_refresh_does_not_hydrate_archived_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = temp.path().join("project");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("model.py"), "# source\n").unwrap();
+        crate::portable::initialize_folder(&folder, "model.py").unwrap();
+        let core = core(&temp.path().join("app")).await;
+        let project = core.open_project(folder, "test").await.unwrap();
+        let id = &project.workspace_id;
+        core.retain_workspace_memory(vec![]);
+        wait_archived(&core, id).await;
+
+        let sources = BTreeMap::from([("model.py", "# source\n")]);
+        let fingerprint =
+            crate::hash(&serde_json::to_string(&(sources, Vec::<String>::new())).unwrap());
+        let result = core
+            .project_source_catalog(id, &project.base_revision, Some(&fingerprint))
+            .await
+            .unwrap();
+        assert_eq!(result["unchanged"], true);
+        assert!(core.workspaces.lock().await[id].archived.is_some());
+    }
+
     #[test]
     fn desktop_visibility_updates_schedule_cleanup_outside_a_runtime_context() {
         let temp = tempfile::tempdir().unwrap();
