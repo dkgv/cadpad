@@ -2,7 +2,6 @@ import { Display, Viewer, type Shape, type Shapes } from 'three-cad-viewer';
 import 'three-cad-viewer/css';
 import * as THREE from 'three';
 import {dimensionStroke,moveDimensionStroke,placeDimensionLabels,angleGeometry,dimensionText,placeAnnotation} from './dimension-display';
-export {showStlPreview} from './stl-preview';
 export {dimensionText} from './dimension-display';
 import {setRenderedVisibility} from './visibility';
 import {useCadpadHover} from './render-policy';
@@ -150,7 +149,7 @@ export class CadViewport {
   private pressedPointer:number|null=null;
   private contextLost=false;
 
-  constructor(private container: HTMLElement, onSelect: SelectHandler, private onAnnotation: (annotation:Annotation)=>void = ()=>{}, private onGraphics:(state:'lost'|'restored')=>void=()=>{}) {
+  constructor(private container: HTMLElement, onSelect: SelectHandler, private onAnnotation: (annotation:Annotation)=>void = ()=>{}, private onGraphics:(state:'lost'|'restored')=>void=()=>{}, private onPick:()=>void=()=>{}) {
     this.onSelect = onSelect;
     this.host.className='cadpad-viewer-host';
     this.host.style.cssText='position:absolute;inset:0';
@@ -282,7 +281,7 @@ export class CadViewport {
     this.onGraphics('restored');
   };
 
-  async load(model: SceneModel, revision: string, artifact: ArtifactLoader, workspace:string|null=null) {
+  async load(model: SceneModel, revision: string, artifact: ArtifactLoader, workspace:string|null=null, onStage?:(stage:'buffers'|'draw')=>void) {
     if(this.contextLost)throw new Error('The graphics connection is unavailable. Wait for it to return before retrying the view.');
     this.cancelLoad();this.suspended=false;
     const sequence = this.loadSequence;
@@ -308,6 +307,7 @@ export class CadViewport {
         loc: [part.position, [0, 0, 0, 1]] };
     })).catch(error=>{bufferPlan.discard();throw error;});
     if (sequence !== this.loadSequence || this.disposed){bufferPlan.discard();return;}
+    if(shapes.length)onStage?.('buffers');
     try{for(const [instance,buffers] of rawBuffers)picking.set(instance,preparePicking(buffers,topology.get(instance)!));}
     catch(error){for(const item of picking.values())item.dispose();bufferPlan.discard();throw error;}
     // Read interaction state at the replacement boundary, after asynchronous
@@ -362,6 +362,7 @@ export class CadViewport {
     this.drawReferences();
     this.refreshAnnotations();
     this.viewer.update(true);
+    onStage?.('draw');
     bufferPlan.commit();bufferPlan.discard();if(this.cancelBufferPlan===releasePlan)this.cancelBufferPlan=null;
     this.repairCamera=null;
   }
@@ -610,12 +611,13 @@ export class CadViewport {
       // Shift+click without a drag keeps additive multi-select.
       if(!this.parts.length)return;
       const entity=this.pick(event);
-      if(entity)this.onSelect(entity,'additive');
+      if(entity){this.onPick();this.onSelect(entity,'additive');}
       return;
     }
     if(this.drag?.pointer===event.pointerId){event.preventDefault();event.stopPropagation();const drag=this.drag;this.cancelDrag();this.onJointTarget(drag.joint.id,drag.target,drag.joint.unit,true);return;}
     if(Math.hypot(event.clientX-this.pointerStart[0],event.clientY-this.pointerStart[1])>4||event.button!==0||!this.parts.length)return;
     const entity=this.pick(event),additive=event.metaKey||event.ctrlKey;
+    if(entity)this.onPick();
     // Additive clicks only report; the owner decides the new primary and references.
     if(additive){this.onSelect(entity,'additive');return;}
     this.selectEntity(entity);this.onSelect(entity);
@@ -658,6 +660,7 @@ export class CadViewport {
       .map(hit=>({revision:this.revision,...hit}));
     const primary=hits[hits.length-1]??null;
     this.selectEntity(primary);
+    if(primary)this.onPick();
     this.onSelect(primary,marquee.additive?'marquee-add':'marquee',hits);
   }
   setManipulation(enabled:boolean,onTarget:(joint:string,coordinate:number,unit:string,commit:boolean)=>void){this.manipulate=enabled;this.onJointTarget=onTarget;this.cancelHover();this.setHover(null);this.host.dataset.manipulating=String(enabled);this.drawMotionHints();this.updateMotionStatus(null);if(this.presented)this.viewer.update(true);this.manipulationCursor(enabled?'default':'');if(!enabled){this.cancelDrag();if(this.motion)this.applyPoses(this.motion.poses);}}

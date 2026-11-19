@@ -83,6 +83,7 @@ fn stub(stored: &StoredWorkspace) -> StoredWorkspace {
         id: stored.id.clone(),
         current: stored.current.clone(),
         model_parent: stored.model_parent.clone(),
+        model_source_revision: stored.model_source_revision.clone(),
         title: stored.title.clone(),
         project: stored.project.clone(),
         python_origin: stored.python_origin.clone(),

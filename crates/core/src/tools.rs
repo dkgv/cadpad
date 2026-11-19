@@ -234,7 +234,7 @@ fn build_definitions() -> Vec<ToolSpec> {
         ),
         spec::<Inspect>(
             "inspect",
-            "Query exact BRep properties or the distance between two revision-scoped entities. Coordinates and lengths are millimetres; quaternions use xyzw.",
+            "Query CAD or STL mesh properties and distances between revision-scoped entities. The result reports exact CAD or mesh accuracy. Coordinates and lengths are millimetres; quaternions use xyzw.",
         ),
         spec::<SetParameter>(
             "set_parameter",

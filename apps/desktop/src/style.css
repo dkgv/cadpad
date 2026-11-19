@@ -524,7 +524,8 @@ pre,.markdown code{background:var(--soft);border-color:var(--line);color:var(--m
 
 .library-part-link>svg{flex:none}.library-part-link>.library-opening-status{flex:none;margin-left:auto;white-space:nowrap;font-weight:400;color:var(--muted)}
 
-.model-opening-spinner{display:block;flex:none;box-sizing:border-box;width:24px;height:24px;margin:0 auto 16px;border:2px solid var(--line);border-top-color:var(--muted);border-radius:50%;animation:model-opening-spin .85s linear infinite}
+.model-opening{position:absolute;inset:0;z-index:8;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:var(--bg);color:var(--text);font-size:13px}
+.model-opening-spinner{display:block;flex:none;box-sizing:border-box;width:24px;height:24px;border:2px solid var(--line);border-top-color:var(--muted);border-radius:50%;animation:model-opening-spin .85s linear infinite}
 @keyframes model-opening-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.model-opening-spinner{animation:none}}
 

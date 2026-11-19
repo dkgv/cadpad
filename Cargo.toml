@@ -15,3 +15,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 thiserror = "2"
 jsonschema = { version = "=0.30.0", default-features = false }
+
+# Development opens verify the same large source snapshots and meshes as release builds.
+[profile.dev.package.sha2]
+opt-level = 3
+
+# Keep the desktop dev build responsive when publishing meshes and snapshots.
+[profile.dev.package.cadpad-core]
+opt-level = 1

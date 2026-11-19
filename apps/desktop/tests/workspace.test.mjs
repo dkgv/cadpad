@@ -52,7 +52,6 @@ before(async()=>{
          export {recordedFrameAt,partMotion} from ${JSON.stringify(path.join(repo,'packages/viewer/src/motion.ts'))};
          export {dimensionText} from ${JSON.stringify(path.join(repo,'packages/viewer/src/dimension-display.ts'))};
          export const modelDimensions=model=>model.annotations||[];
-         export function showStlPreview(container, bytes){const canvas=container.appendChild(document.createElement('canvas'));return ()=>canvas.remove();}
          export class CadViewport{constructor(container,onSelect,onAnnotation,onGraphics){const host=globalThis.__cadpadUiHarness;host.constructions=(host.constructions||0)+1;(host.viewports??=[]).push(this);if(host.startupFailures){host.startupFailures--;throw new Error('Synthetic WebGL initialization failure');}globalThis.__cadpadUiHarness.graphics=state=>{if(state==='lost'){this.presented=null;this.cancelLoad();}onGraphics(state);};this.onSelect=onSelect;this.hidden=new Set();this.selection=null;globalThis.__cadpadUiHarness.viewport=this;globalThis.__cadpadUiHarness.select=entity=>{this.selection=entity;onSelect(entity);};globalThis.__cadpadUiHarness.annotation=onAnnotation;}
            async load(...args){const sequence=this.sequence=(this.sequence||0)+1;this.call('load',...args);await globalThis.__cadpadUiHarness.load?.(...args);if(sequence===this.sequence){if(!args[0].parts.length||!this.sceneState(args[3],args[1])){this.hidden.clear();this.selection=null;this.onSelect(null,'replacement');}this.logical=args[0].parts.length?{workspace:args[3],revision:args[1]}:null;this.presented=this.logical;}}
            hasScene(workspace,revision){return this.presented?.workspace===workspace&&this.presented?.revision===revision;} sceneState(workspace,revision){return this.logical?.workspace===workspace&&this.logical?.revision===revision?{hidden:[...this.hidden],selection:this.selection}:null;} cancelLoad(){this.sequence=(this.sequence||0)+1;} suspend(){this.cancelLoad();this.presented=null;this.call('suspend');} call(name,...args){globalThis.__cadpadUiHarness.viewer.push([name,...args]);}
@@ -971,7 +970,7 @@ test('missing display cache after graphics loss preserves logical intent until e
   await act(async()=>{harness.menu.onmessage('save');await new Promise(resolve=>setTimeout(resolve,10));});
   await act(async()=>harness.graphics('restored'));await flush();
   assert.equal(harness.viewer.filter(([name])=>name==='load').length,loads,'An empty scene must not erase retained camera and selection intent');assert.ok(button('Restore display'));
-  assert.equal(harness.viewport.presented,null);assert.equal(document.querySelector('.part-select[aria-pressed="true"]').textContent.trim(),'rail');assert.ok(document.querySelector('[aria-label="Show carriage"]'));
+  assert.equal(harness.viewport.presented,null);assert.equal(document.querySelector('.part-select[aria-pressed="true"] .explorer-part-caption > span').textContent.trim(),'rail');assert.ok(document.querySelector('[aria-label="Show carriage"]'));
   await act(async()=>harness.menu.onmessage('front'));
   assert.equal(harness.calls.some(([name])=>name==='repair_display'||name==='rebuild'),false);
   delete harness.project.display_error;harness.project.display_generation='restored-display';
@@ -2688,14 +2687,26 @@ test('opening an Explorer model shows progress until its geometry finishes build
   assert.equal(row.disabled,false,'the Explorer row stays clickable while the model opens');
   assert.equal(row.getAttribute('aria-busy'),'true');
   assert.ok(document.querySelector('[aria-label="Opening Stringer"]'));
-  assert.ok(document.querySelector('.canvas-model-opening .model-opening-spinner'),'the canvas shows loading as soon as the model is clicked');
+  const opening=document.querySelector('.model-opening');
+  assert.ok(opening?.querySelector('.model-opening-spinner'),'the canvas shows loading as soon as the model is clicked');
   await click(row);
   assert.equal(allocations,1,'clicking the same model again while it is opening does not start another build');
   await act(async()=>accept({project:structuredClone(project),job:project.activity[0]}));await flush(20);
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Stringer');
-  assert.ok(document.querySelector('.model-opening .model-opening-spinner'),'queued geometry has a dedicated loading spinner');
+  assert.equal(document.querySelector('.model-opening'),opening,'the same indicator stays mounted while geometry builds');
+  assert.equal(document.querySelectorAll('.model-opening').length,1);
+  let finishDisplay;
+  harness.load=(model,revision,artifact,workspace)=>workspace===project.workspace_id&&model.parts.length?
+    new Promise(resolve=>{finishDisplay=resolve;}):undefined;
   project.model.parts=[{...fixture().model.parts[0],name:'model'}];project.activity[0].state='succeeded';
+  project.display_generation='built-stringer';
   await act(async()=>harness.activity.onmessage({workspace_id:project.workspace_id,kind:'job_finished',job:project.activity[0]}));await flush(25);
+  assert.equal(document.querySelector('.model-opening'),opening,'the same indicator stays mounted during viewer load');
+  assert.ok(!document.querySelector('.view-recovery'),'the viewer does not add another loading screen');
+  assert.ok(document.querySelector('[aria-label="Opening Stringer"]'));
+  assert.equal(typeof finishDisplay,'function');
+  await act(async()=>finishDisplay());await flush();
+  harness.load=undefined;
   assert.equal(document.querySelector('.model-opening'),null);
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Stringer','the generic geometry name cannot replace the model entry title');
   assert.equal(document.querySelector('[aria-label="Opening Stringer"]'),null);
@@ -2723,9 +2734,14 @@ test('opening an Explorer model shows progress until its geometry finishes build
 
 });
 
-test('project STL shows a preview before its selectable model finishes building',async()=>{
+test('project STL opens in one selectable viewer and attaches a surface to the Assistant',async(t)=>{
+  const log=t.mock.method(console,'info',()=>{});
+  Object.defineProperty(document,'hidden',{value:false,configurable:true});
   const original=harness.invoke.bind(harness);
   let accept;
+  harness.load=async(model,revision,artifact,workspace,onStage)=>{
+    if(workspace==='view-bracket'&&model.parts.length){onStage('buffers');onStage('draw');}
+  };
   const project=fixture();
   project.workspace_id='view-bracket';
   project.revision='bracket-r';
@@ -2735,25 +2751,36 @@ test('project STL shows a preview before its selectable model finishes building'
   harness.invoke=async(command,args)=>{
     if(command==='project_source_index')return {files:[{path:'cad/bracket.stl',builders:[{id:'$file',label:'bracket.stl',kind:'model_file',available:true,line:1}]}]};
     if(command==='open_project_model')return new Promise(resolve=>{accept=resolve;});
-    if(command==='project_stl_preview'){
-      assert.deepEqual(args,{workspace:'workspace-1',path:'cad/bracket.stl'});
-      return new ArrayBuffer(36);
-    }
     if(command==='project'&&args.workspace===project.workspace_id)return structuredClone(project);
     return original(command,args);
   };
   await mountWorkbench();await flush(20);
   await expandModelFolders('cad');
+  const before=harness.constructions;
   await click(document.querySelector('#panel-model .library-part-link'));await flush();
-  assert.ok(document.querySelector('.stl-preview canvas'),'display starts before the native workspace is allocated');
+  assert.equal(harness.constructions,before,'no viewer is mounted during the native open request');
   await act(async()=>accept({project:structuredClone(project),job:project.activity[0]}));await flush(20);
-  assert.ok(document.querySelector('.stl-preview canvas'),'preview stays visible while the worker builds');
-  project.model.parts=fixture().model.parts;
+  assert.equal(log.mock.callCount(),0,'the empty scene does not count as a model frame');
+  project.model.parts=fixture().model.parts.map(part=>({...part,accuracy:'mesh'}));
+  project.display_generation='bracket-display';
   project.activity[0].state='succeeded';
   await act(async()=>harness.activity.onmessage({workspace_id:project.workspace_id,kind:'job_finished',job:project.activity[0]}));await flush(25);
-  assert.equal(document.querySelector('.stl-preview'),null);
-  assert.ok(harness.viewer.some(([name,model])=>name==='load'&&model.parts.length));
-  const viewport=harness.viewports.at(-1);
+  const loads=harness.viewer.filter(([name,model,, ,workspace])=>name==='load'&&model.parts.length&&workspace===project.workspace_id);
+  assert.equal(loads.length,1,'the first visible STL scene already supports selection');
+  assert.equal(performance.getEntriesByName('cadpad.stl.open-to-buffers').length,1);
+  await flush(50);
+  assert.equal(performance.getEntriesByName('cadpad.stl.open-to-frame').length,1);
+  assert.equal(log.mock.callCount(),1);
+  const [tag,json]=log.mock.calls[0].arguments;
+  assert.equal(tag,'[cadpad:model-open]');
+  const sample=JSON.parse(json);
+  assert.equal(sample.entry,'cad/bracket.stl');
+  assert.equal(sample.reusedWorkspace,false);
+  assert.equal(document.querySelector('[data-model-open-time]').textContent,
+    `Opened in ${sample.elapsedMs.frame.toLocaleString()} ms`);
+  assert.ok(sample.elapsedMs.frame>=sample.elapsedMs.draw&&sample.elapsedMs.draw>=sample.elapsedMs.backend);
+  const viewport=harness.viewports.find(view=>view.hasScene(project.workspace_id,project.revision));
+  assert.ok(viewport);
   const face={revision:project.revision,instance_id:project.model.parts[0].instance_id,entity_id:'face:0'};
   viewport.capture=()=>({image:'iVBORw0KGgo='});
   await act(async()=>viewport.onSelect(face));
@@ -2785,11 +2812,11 @@ test('selecting another Explorer model preserves loading tabs and the latest sel
   await click(row('Stringer'));
   assert.equal(row('Stringer').disabled,false);
   assert.equal(row('Stringer').getAttribute('aria-busy'),'true');
-  assert.ok(document.querySelector('.canvas-model-opening .model-opening-spinner'));
+  assert.ok(document.querySelector('.model-opening .model-opening-spinner'));
   assert.ok(canvasTabs().some(tab=>tab.textContent==='Stringer'),'the tab opens before the native request resolves');
   await click(row('Pin'));
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Pin');
-  assert.ok(document.querySelector('.canvas-model-opening .model-opening-spinner'),'the next model takes over the canvas loading state immediately');
+  assert.ok(document.querySelector('.model-opening .model-opening-spinner'),'the next model takes over the canvas loading state immediately');
   await act(async()=>resolvers.get('pin')());await flush(20);
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Pin');
   await act(async()=>resolvers.get('stringer')());await flush(20);

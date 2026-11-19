@@ -391,26 +391,10 @@ pub fn summarize_stl(bytes: &[u8]) -> Result<StlSummary> {
     visit_stl(bytes, |_| Ok(()))
 }
 
-/// Little-endian, non-indexed XYZ float32 positions for the provisional view.
-pub(crate) fn stl_preview(bytes: &[u8]) -> Result<Vec<u8>> {
-    let mut positions = Vec::new();
-    visit_stl(bytes, |point| {
-        for value in point {
-            let value = value as f32;
-            if !value.is_finite() {
-                return Err(Error::domain(
-                    "INVALID_GEOMETRY",
-                    "STL exceeds the preview coordinate range",
-                ));
-            }
-            positions.extend_from_slice(&value.to_le_bytes());
-        }
-        Ok(())
-    })?;
-    Ok(positions)
-}
-
-fn visit_stl(bytes: &[u8], mut vertex: impl FnMut([f64; 3]) -> Result<()>) -> Result<StlSummary> {
+pub(crate) fn visit_stl(
+    bytes: &[u8],
+    mut vertex: impl FnMut([f64; 3]) -> Result<()>,
+) -> Result<StlSummary> {
     if bytes.len() >= 84 {
         let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as u64;
         let binary_len = 84u64.saturating_add(count.saturating_mul(50));
@@ -817,6 +801,16 @@ pub fn validate_inputs(inputs: &Inputs) -> Result<()> {
     Ok(())
 }
 pub(crate) fn atomic_write(root: &Path, path: &str, bytes: &[u8]) -> Result<()> {
+    atomic_write_inner(root, path, bytes, true)
+}
+
+/// Regenerable display data only. Readers validate checksums and can repair
+/// lost buffers after a crash, so these writes need no forced disk flush.
+pub(crate) fn atomic_write_display_buffer(root: &Path, path: &str, bytes: &[u8]) -> Result<()> {
+    atomic_write_inner(root, path, bytes, false)
+}
+
+fn atomic_write_inner(root: &Path, path: &str, bytes: &[u8], durable: bool) -> Result<()> {
     let target = checked_path(root, path)?;
     fs::create_dir_all(target.parent().unwrap())?;
     let temporary = target
@@ -829,7 +823,9 @@ pub(crate) fn atomic_write(root: &Path, path: &str, bytes: &[u8]) -> Result<()> 
             .create_new(true)
             .open(&temporary)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        if durable {
+            file.sync_all()?;
+        }
         drop(file);
         // Validate again before replacing a user-editable path.
         checked_path(root, path)?;
@@ -1111,14 +1107,19 @@ pub fn store_blobs(directory: &Path, blobs: &BTreeMap<String, Vec<u8>>) -> Resul
         if !valid_hash(hash) || bytes_hash(bytes) != *hash {
             return Err(Error::domain("INVALID_REQUEST", "Asset digest mismatch"));
         }
-        let path = directory.join(hash);
-        if path.exists() {
-            if bytes_hash(&read_bounded(&path, ASSET_LIMIT)?) != *hash {
-                return Err(Error::domain("INVALID_REQUEST", "Corrupt managed asset"));
-            }
-        } else {
-            atomic_write(directory, hash, bytes)?;
+        store_verified_blob(directory, hash, bytes)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn store_verified_blob(directory: &Path, hash: &str, bytes: &[u8]) -> Result<()> {
+    let path = directory.join(hash);
+    if path.exists() {
+        if read_bounded(&path, ASSET_LIMIT)? != bytes {
+            return Err(Error::domain("INVALID_REQUEST", "Corrupt managed asset"));
         }
+    } else {
+        atomic_write(directory, hash, bytes)?;
     }
     Ok(())
 }
@@ -1287,7 +1288,7 @@ pub(crate) fn read_python_project_excluding(
 
 #[cfg(test)]
 mod mesh_tests {
-    use super::{list_mesh_files, mesh_path, stl_preview, summarize_stl};
+    use super::{list_mesh_files, mesh_path, summarize_stl};
     use std::fs;
     use std::io::Write;
 
@@ -1317,18 +1318,6 @@ mod mesh_tests {
         assert_eq!(summary.format, "ascii");
         assert_eq!(summary.triangles, 1);
         assert_eq!(summary.size, [4.0, 3.0, 1.0]);
-        let expected = |coords: [f32; 9]| {
-            coords.into_iter().flat_map(f32::to_le_bytes).collect::<Vec<_>>()
-        };
-        assert_eq!(
-            stl_preview(&binary).unwrap(),
-            expected([0., 0., 0., 10., 0., 0., 0., 20., 5.])
-        );
-        assert_eq!(
-            stl_preview(ascii).unwrap(),
-            expected([0., 0., 0., 4., 0., 0., 0., 3., 1.])
-        );
-        assert!(stl_preview(&binary[..binary.len() - 1]).is_err());
         assert!(summarize_stl(b"not a mesh").is_err());
         assert!(mesh_path("../part.stl").is_err());
         assert!(mesh_path("model.py").is_err());

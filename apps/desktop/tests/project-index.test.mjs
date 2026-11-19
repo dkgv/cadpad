@@ -207,7 +207,19 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Yoke','Pin','Brake body','Axle']);
   assert.equal(document.querySelector('.quick-model-current').textContent,'Open');
   const modelSearch=document.querySelector('[aria-label="Search models"]');
-  await act(async()=>{Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(modelSearch,'pin');modelSearch.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});
+  const searchModels=value=>act(async()=>{
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(modelSearch,value);
+    modelSearch.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+  });
+  await searchModels('BRKB');
+  assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Brake body']);
+  await searchModels('brake body()');
+  assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Brake body']);
+  await searchModels('brake_ mechanism');
+  assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Pin','Brake body']);
+  await searchModels('z/n/y.py');
+  assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Yoke']);
+  await searchModels('pin');
   assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Pin']);
   await act(async()=>document.querySelector('.quick-model-row').click());
   assert.deepEqual(quickChosen,[['cad/brake.py','pin']]);

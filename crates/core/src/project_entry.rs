@@ -18,6 +18,49 @@ fn model_file_asset(entry: &str) -> String {
     format!("imports/project/{digest}.{extension}")
 }
 
+fn model_file_adapter(entry: &str, asset: &str, format: &str) -> Result<String> {
+    let path = serde_json::to_string(entry)?;
+    let name = serde_json::to_string(asset)?;
+    let kind = if format == "stl" {
+        ", kind=\"surface\""
+    } else {
+        ""
+    };
+    Ok(format!(
+        "# Generated Cadpad entry point.\n{MODEL_FILE_COMMENT}{path}\nshow(import_{format}({name}), name=\"model\"{kind})\n"
+    ))
+}
+
+fn set_builder_entry(inputs: &mut crate::Inputs, adapter: String) {
+    let existing = &inputs.entry_point;
+    let name = if inputs.files.get(existing).is_some_and(|source| {
+        source.starts_with("# Generated Cadpad entry point.")
+            || source == portable::PROJECT_BROWSER_SOURCE
+    }) {
+        existing.clone()
+    } else {
+        (0..=portable::SOURCE_FILE_LIMIT)
+            .map(|index| format!("cadpad_view_{index}.py"))
+            .find(|name| !inputs.files.contains_key(name))
+            .unwrap()
+    };
+    inputs.files.insert(name.clone(), adapter);
+    inputs.entry_point = name;
+}
+
+pub(crate) fn stl_model_asset(inputs: &crate::Inputs) -> Option<(String, String)> {
+    let source = inputs.files.get(&inputs.entry_point)?;
+    let (entry, builder) = generated_model_entry(source)?;
+    if builder != MODEL_FILE_BUILDER || portable::model_file_format(&entry) != Some("stl") {
+        return None;
+    }
+    let asset = model_file_asset(&entry);
+    if model_file_adapter(&entry, &asset, "stl").ok()?.as_str() != source {
+        return None;
+    }
+    Some((entry, inputs.assets.get(&asset)?.clone()))
+}
+
 async fn read_project_model_file(directory: PathBuf, entry: &str) -> Result<Vec<u8>> {
     let relative = entry.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -173,18 +216,6 @@ impl Core {
         self.entry_analysis_request("index_sources", json!({"sources": sources}))
             .await
     }
-    /// Decode the project STL without starting a CAD worker.
-    pub async fn project_stl_preview(&self, workspace: &str, entry: &str) -> Result<Vec<u8>> {
-        if portable::model_file_format(entry) != Some("stl") {
-            return Err(Error::domain("INVALID_REQUEST", "Choose a project STL file"));
-        }
-        let directory = self.project_directory(workspace).await?;
-        let bytes = read_project_model_file(directory, entry).await?;
-        tokio::task::spawn_blocking(move || portable::stl_preview(&bytes))
-            .await
-            .map_err(|_| Error::domain("IO_ERROR", "Could not preview the STL file"))?
-    }
-
     /// STL files already stored in the project folder. Scratchpads have none.
     pub async fn project_meshes(&self, workspace: &str) -> Result<Value> {
         let directory = match self.project_directory(workspace).await {
@@ -278,9 +309,11 @@ impl Core {
         cached_view: Option<&str>,
     ) -> Result<(String, crate::Job)> {
         let _memory = self.pin_workspace(workspace).await?;
+        let standalone_stl =
+            builder == MODEL_FILE_BUILDER && portable::model_file_format(entry) == Some("stl");
         // Opening a model executes the selected disk sources in a private view.
         // Keep the project's saved checkpoints independent of that live layout.
-        let directory = {
+        let (directory, mesh_base) = {
             let all = self.workspace(workspace).await?;
             let parent = all
                 .get(workspace)
@@ -291,56 +324,96 @@ impl Core {
                     "Project changed while opening a model",
                 ));
             }
-            parent
-                .stored
-                .project
-                .as_ref()
-                .map(|binding| binding.directory.clone())
+            let current = parent.stored.current_revision();
+            let binding = parent.stored.project.as_ref();
+            let mesh_base = if standalone_stl
+                && current.inputs.mechanism == json!({})
+                && current.inputs.parameters == json!({})
+            {
+                binding.map(|binding| (current.inputs.clone(), binding.fingerprint.clone()))
+            } else {
+                None
+            };
+            (binding.map(|binding| binding.directory.clone()), mesh_base)
         };
-        let publication = self.blob_publication.read().await;
+        let mut publication = if mesh_base.is_none() {
+            Some(self.blob_publication.read().await)
+        } else {
+            None
+        };
+        let mut mesh_file = None;
         let disk = if let Some(directory) = directory {
-            let root = directory.clone();
-            let mut disk = tokio::task::spawn_blocking(move || portable::read_project(&root))
-                .await
-                .map_err(|error| Error::domain("IO_ERROR", error.to_string()))??;
+            let disk = if mesh_base.is_some() {
+                let bytes = read_project_model_file(directory.clone(), entry).await?;
+                mesh_file = Some((portable::bytes_hash(&bytes), bytes));
+                None
+            } else {
+                let root = directory.clone();
+                Some(
+                    tokio::task::spawn_blocking(move || portable::read_project(&root))
+                        .await
+                        .map_err(|error| Error::domain("IO_ERROR", error.to_string()))??,
+                )
+            };
+            let fingerprint = mesh_base
+                .as_ref()
+                .map(|(_, fingerprint)| fingerprint)
+                .or_else(|| disk.as_ref().map(|loaded| &loaded.fingerprint))
+                .unwrap();
             if let Some(view) = cached_view.filter(|view| *view != workspace) {
                 let out_of_tree_asset =
                     builder == MODEL_FILE_BUILDER && !entry.starts_with("assets/");
-                let asset_hash =
-                    if out_of_tree_asset && portable::model_file_format(entry).is_some() {
-                        Some(portable::bytes_hash(
-                            &read_project_model_file(directory.clone(), entry).await?,
-                        ))
-                    } else {
-                        None
-                    };
+                let asset_hash = if let Some((hash, _)) = &mesh_file {
+                    Some(hash.clone())
+                } else if out_of_tree_asset && portable::model_file_format(entry).is_some() {
+                    Some(portable::bytes_hash(
+                        &read_project_model_file(directory.clone(), entry).await?,
+                    ))
+                } else {
+                    None
+                };
                 if let Ok(all) = self.workspace(view).await {
                     let candidate = &all[view].stored;
                     let current = candidate.current_revision();
-                    let matches_asset = !out_of_tree_asset
+                    let matches_asset = (mesh_file.is_none() && !out_of_tree_asset)
                         || asset_hash.as_ref().is_some_and(|hash| {
                             current.inputs.assets.get(&model_file_asset(entry)) == Some(hash)
+                        });
+                    let original_mesh_build = candidate.model_source_revision.as_deref()
+                        == Some(revision)
+                        && current.parent.as_deref().is_some_and(|base| {
+                            candidate
+                                .revisions
+                                .header(base)
+                                .is_some_and(|header| header.parent.is_none())
                         });
                     if all
                         .get(workspace)
                         .is_some_and(|parent| parent.stored.current == revision)
                         && candidate.model_parent.as_deref() == Some(workspace)
+                        && (!standalone_stl || candidate.model_source_revision.is_some())
+                        && current.model["parts"][0]["geometry_fingerprint"]["format"]
+                            != crate::stl_model::LEGACY_FORMAT
                         && candidate.project.as_ref().is_some_and(|binding| {
                             binding.directory == directory
-                                && binding.fingerprint == disk.fingerprint
-                                && current.parent.as_deref()
-                                    == Some(binding.saved_revision.as_str())
-                                && candidate
-                                    .revisions
-                                    .header(&binding.saved_revision)
-                                    .is_some_and(|base| base.parent.as_deref() == Some(revision))
+                                && &binding.fingerprint == fingerprint
+                                && (original_mesh_build
+                                    || (current.parent.as_deref()
+                                        == Some(binding.saved_revision.as_str())
+                                        && candidate
+                                            .revisions
+                                            .header(&binding.saved_revision)
+                                            .is_some_and(|base| {
+                                                base.parent.as_deref() == Some(revision)
+                                            })))
                         })
                         && inputs_model_entry(&current.inputs)
                             .as_ref()
                             .is_some_and(|(path, id)| path == entry && id == builder)
                         && matches_asset
                         && let Some(job) = candidate.jobs.values().find(|job| {
-                            job.state == crate::JobState::Succeeded
+                            matches!(job.kind, crate::JobKind::Build)
+                                && job.state == crate::JobState::Succeeded
                                 && job.resulting_revision.as_deref() == Some(current.id.as_str())
                         })
                     {
@@ -349,14 +422,60 @@ impl Core {
                     }
                 }
             }
-            self.publish_portable_assets(&mut disk).await?;
-            Some(disk)
+            if let Some(mut loaded) = disk {
+                self.publish_portable_assets(&mut loaded).await?;
+                Some(loaded)
+            } else {
+                None
+            }
         } else {
             None
         };
         let workspace_id = crate::id();
         let base = crate::id();
-        {
+        let mut display_publication = None;
+        let mut construction = None;
+        let mesh = if let (Some((inputs, _)), Some((digest, bytes))) = (mesh_base, mesh_file) {
+            {
+                let all = self.workspaces.lock().await;
+                self.ensure_actor_active(actor)?;
+                crate::construction::check_job_capacity(&all, &workspace_id, actor)?;
+            }
+            self.ensure_disk_quota().await?;
+            let (cancel, receive) = tokio::sync::watch::channel(false);
+            construction = Some(self.construction_slot(receive.clone()).await?);
+            publication = Some(self.blob_publication.read().await);
+            display_publication = Some(self.display_publication.read().await);
+            // The parent snapshot supplies project context. The selected mesh is
+            // read directly and the finished tab is published in one transaction.
+            self.publish_asset_blob(digest.clone(), bytes).await?;
+            let mut draft = Self::input_draft(inputs, &base, actor);
+            let asset = model_file_asset(entry);
+            let adapter = model_file_adapter(entry, &asset, "stl")?;
+            draft.inputs.assets.insert(asset, digest.clone());
+            set_builder_entry(&mut draft.inputs, adapter);
+            self.validate_asset_budget(&draft.inputs).await?;
+            portable::validate_inputs(&draft.inputs)?;
+            let model_revision = crate::id();
+            let model = self
+                .publish_stl(
+                    &workspace_id,
+                    &model_revision,
+                    draft.inputs.clone(),
+                    entry.into(),
+                    digest,
+                    true,
+                    receive,
+                )
+                .await?;
+            drop(cancel);
+            crate::project_result::validate_publication(&model)?;
+            let motion = crate::motion::State::new(&draft.inputs, &model)?;
+            Some((draft, model_revision, model, motion))
+        } else {
+            None
+        };
+        let completed = {
             let mut all = self.workspace(workspace).await?;
             self.ensure_actor_active(actor)?;
             let parent = all
@@ -381,21 +500,80 @@ impl Core {
             initial.id = base.clone();
             initial.parent = Some(revision.into());
             initial.model = json!({"parts":[]});
+            if let Some(binding) = &mut stored.project {
+                binding.saved_revision = base.clone();
+            }
             if let Some(disk) = disk {
                 initial.inputs = disk.inputs;
                 if let Some(binding) = &mut stored.project {
-                    binding.saved_revision = base.clone();
                     binding.fingerprint = disk.fingerprint;
                 }
             }
-            stored.revisions.insert(base.clone(), initial);
+            if standalone_stl {
+                // The mesh tab branches from the current inputs. The
+                // project's own workspace retains its full undo history.
+                stored.revisions.clear();
+                stored.model_source_revision = Some(revision.into());
+                initial.parent = None;
+                initial.restored_from = None;
+            }
+            if mesh.is_some() {
+                let summary = parent.stored.revisions.header(revision).unwrap().clone();
+                stored
+                    .revisions
+                    .insert_with_unchanged_inputs(initial, summary);
+            } else {
+                stored.revisions.insert(base.clone(), initial);
+            }
             stored.drafts.clear();
             stored.jobs.clear();
             stored.job_snapshots.clear();
             stored.geometry_cache = serde_json::Value::Null;
             stored.recordings.clear();
             stored.recording_imports.clear();
+            let (completed, motion) = if let Some((draft, model_revision, model, motion)) = mesh {
+                crate::construction::check_job_capacity(&all, &workspace_id, actor)?;
+                stored.drafts.insert(draft.id.clone(), draft.clone());
+                // These inputs are already immutable in the committed revision.
+                // read_source accepts that revision as the job snapshot.
+                let mut job = Self::job_for_snapshot(
+                    &draft,
+                    actor,
+                    crate::JobKind::Build,
+                    model_revision.clone(),
+                );
+                let summary = stored.drafts.header(&draft.id).unwrap().clone();
+                if let Some(binding) = &mut stored.project
+                    && binding.fingerprint == summary.input_fingerprint
+                {
+                    binding.saved_revision = model_revision.clone();
+                }
+                if let Some(origin) = &mut stored.python_origin {
+                    origin.applied = true;
+                }
+                stored.revisions.insert_with_unchanged_inputs(
+                    crate::Revision {
+                        id: model_revision.clone(),
+                        parent: Some(base.clone()),
+                        inputs: draft.inputs,
+                        model,
+                        actor: draft.actor,
+                        restored_from: None,
+                    },
+                    summary,
+                );
+                stored.current = model_revision.clone();
+                job.state = crate::JobState::Succeeded;
+                job.resulting_revision = Some(model_revision);
+                stored.jobs.insert(job.id.clone(), job.clone());
+                (Some(job), Some(motion))
+            } else {
+                (None, None)
+            };
             self.persist(&stored).await?;
+            if completed.is_some() {
+                self.display_use.touch(&workspace_id, &stored.current);
+            }
             all.insert(
                 workspace_id.clone(),
                 crate::Workspace {
@@ -403,7 +581,7 @@ impl Core {
                     memory: std::sync::Arc::new(()),
                     saved_pose: None,
                     stored,
-                    motion: None,
+                    motion,
                     recovery: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                     display_epoch: std::sync::Arc::new(crate::id()),
                     worker: None,
@@ -411,8 +589,15 @@ impl Core {
                     cancellation: std::collections::HashMap::new(),
                 },
             );
-        }
+            completed
+        };
+        drop(display_publication);
         drop(publication);
+        drop(construction);
+        if let Some(job) = completed {
+            self.job_activity(&workspace_id, &job);
+            return Ok((workspace_id, job));
+        }
         match self
             .work_on_project_builder(&workspace_id, &base, entry, builder, actor)
             .await
@@ -433,26 +618,20 @@ impl Core {
         actor: &str,
     ) -> Result<crate::Job> {
         let _memory = self.pin_workspace(workspace).await?;
+        let publication = if builder == MODEL_FILE_BUILDER {
+            Some(self.blob_publication.read().await)
+        } else {
+            None
+        };
         let (adapter, staged) = if builder == MODEL_FILE_BUILDER {
             let format = portable::model_file_format(entry)
                 .ok_or_else(|| Error::domain("INVALID_REQUEST", "Choose a STEP or STL file"))?;
             let directory = self.project_directory(workspace).await?;
             let bytes = read_project_model_file(directory, entry).await?;
             let asset = model_file_asset(entry);
-            let draft = self
-                .stage_asset(workspace, revision, None, &asset, bytes, actor)
-                .await?;
-            let path = serde_json::to_string(entry)?;
-            let name = serde_json::to_string(&asset)?;
-            let kind = if format == "stl" {
-                ", kind=\"surface\""
-            } else {
-                ""
-            };
-            let adapter = format!(
-                "# Generated Cadpad entry point.\n{MODEL_FILE_COMMENT}{path}\nshow(import_{format}({name}), name=\"model\"{kind})\n"
-            );
-            (adapter, Some(draft))
+            let digest = self.store_asset_blob(bytes).await?;
+            let adapter = model_file_adapter(entry, &asset, format)?;
+            (adapter, Some((asset, digest)))
         } else {
             (
                 self.project_builder_adapter(workspace, revision, entry, builder)
@@ -473,21 +652,12 @@ impl Core {
                 ));
             }
             let inputs = ws.stored.current_revision().inputs.clone();
-            let mut draft = staged.unwrap_or_else(|| Self::input_draft(inputs, revision, actor));
-            let existing = &draft.inputs.entry_point;
-            let name = if draft.inputs.files.get(existing).is_some_and(|source| {
-                source.starts_with("# Generated Cadpad entry point.")
-                    || source == portable::PROJECT_BROWSER_SOURCE
-            }) {
-                existing.clone()
-            } else {
-                (0..=portable::SOURCE_FILE_LIMIT)
-                    .map(|index| format!("cadpad_view_{index}.py"))
-                    .find(|name| !draft.inputs.files.contains_key(name))
-                    .unwrap()
-            };
-            draft.inputs.files.insert(name.clone(), adapter);
-            draft.inputs.entry_point = name;
+            let mut draft = Self::input_draft(inputs, revision, actor);
+            if let Some((asset, digest)) = staged {
+                draft.inputs.assets.insert(asset, digest);
+                self.validate_asset_budget(&draft.inputs).await?;
+            }
+            set_builder_entry(&mut draft.inputs, adapter);
             portable::validate_inputs(&draft.inputs)?;
             let mut next = ws.stored.clone();
             next.drafts.insert(draft.id.clone(), draft.clone());
@@ -495,6 +665,7 @@ impl Core {
             ws.stored = next;
             draft
         };
+        drop(publication);
         self.build(workspace, revision, &draft.id, actor).await
     }
     async fn project_builder_adapter(

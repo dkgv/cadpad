@@ -691,6 +691,133 @@ async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
         let model = core.get_project(&tab).await.unwrap();
         assert_eq!(model["model_entry"]["entry"], entry);
         assert_eq!(model["model"]["parts"].as_array().unwrap().len(), 1);
+        if extension == "STL" {
+            let state: Value = serde_json::from_slice(
+                &std::fs::read(
+                    temp.path()
+                        .join("app")
+                        .join("workspaces")
+                        .join(&tab)
+                        .join("workspace.json"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(state["revisions"].as_object().unwrap().len(), 2);
+            assert_eq!(state["model_source_revision"], *base);
+            let part = &model["model"]["parts"][0];
+            assert_eq!(part["accuracy"], "mesh");
+            assert_eq!(
+                part["face_count"], 6,
+                "box triangles join into six planar surfaces"
+            );
+            assert_eq!(part["edge_count"], 12, "coplanar diagonals are excluded");
+            let revision = model["revision"].as_str().unwrap();
+            let edge =
+                serde_json::json!({"revision":revision,"instance_id":"model","entity_id":"edge:0"});
+            let inspected_edge = core
+                .query(
+                    &tab,
+                    revision,
+                    "inspect",
+                    serde_json::json!({"entities":[edge]}),
+                )
+                .await
+                .unwrap();
+            let _: cadpad_core::geometry::InspectionReply =
+                serde_json::from_value(inspected_edge.clone()).unwrap();
+            let inspected_edge = &inspected_edge["entities"][0];
+            assert_eq!(inspected_edge["kind"], "edge");
+            assert_eq!(inspected_edge["anchor"]["kind"], "local_point");
+            assert!([2., 3., 4.].contains(&inspected_edge["length"].as_f64().unwrap()));
+            let entities = serde_json::json!([
+                {"revision":revision,"instance_id":"model","entity_id":"face:0"},
+                {"revision":revision,"instance_id":"model","entity_id":"face:1"}
+            ]);
+            let result = core
+                .query(
+                    &tab,
+                    revision,
+                    "inspect",
+                    serde_json::json!({"entities":entities}),
+                )
+                .await
+                .unwrap();
+            let _: cadpad_core::geometry::InspectionReply =
+                serde_json::from_value(result.clone()).unwrap();
+            assert_eq!(result["accuracy"], "mesh");
+            assert_eq!(result["entities"][0]["anchor"]["kind"], "local_point");
+            assert!(result["entities"][0]["area"].as_f64().unwrap() > 0.);
+            let distance = core
+                .query(
+                    &tab,
+                    revision,
+                    "inspect",
+                    serde_json::json!({
+                        "query":"distance","entities":entities
+                    }),
+                )
+                .await
+                .unwrap();
+            assert!(
+                (distance["distance"].as_f64().unwrap() - 2.).abs() < 1e-6,
+                "{distance}"
+            );
+            let mixed_distance = core
+                .query(
+                    &tab,
+                    revision,
+                    "inspect",
+                    serde_json::json!({
+                        "query":"distance","entities":[edge, entities[0]]
+                    }),
+                )
+                .await
+                .unwrap();
+            assert!(mixed_distance["distance"].as_f64().unwrap().is_finite());
+            for format in ["STL", "STEP"] {
+                let exported = core
+                    .query(
+                        &tab,
+                        revision,
+                        "export",
+                        serde_json::json!({"format":format}),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(exported["format"], format);
+            }
+            let handle = part["mesh"]["buffers"]["vertices"]["handle"]
+                .as_str()
+                .unwrap();
+            std::fs::remove_file(
+                temp.path()
+                    .join("app")
+                    .join("artifacts")
+                    .join(&tab)
+                    .join(revision)
+                    .join(handle),
+            )
+            .unwrap();
+            let repair = core
+                .repair_display(
+                    "user",
+                    cadpad_core::recovery::RepairDisplay {
+                        workspace_id: tab.clone(),
+                        revision: revision.into(),
+                    },
+                )
+                .await
+                .unwrap();
+            let repair = done(&core, &tab, repair).await;
+            assert_eq!(
+                repair.state,
+                JobState::Succeeded,
+                "{:?}",
+                repair.diagnostics
+            );
+            assert_eq!(core.get_project(&tab).await.unwrap()["revision"], revision);
+        }
         let (reopened, cached_job) = core
             .open_project_model_reusing(parent, base, &entry, builder, "user", Some(&tab))
             .await
@@ -720,4 +847,181 @@ async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
         .await
         .unwrap();
     assert_eq!(updated["files"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn standalone_stl_uses_project_snapshot_and_checks_the_selected_file_on_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("design");
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    let source = root.join("geometry.py");
+    std::fs::write(&source, "# saved snapshot\n").unwrap();
+    let mesh = |width| {
+        format!(
+            "solid part\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex {width} 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid\n"
+        )
+    };
+    let entry = "assets/part.stl";
+    std::fs::write(root.join(entry), mesh(1)).unwrap();
+    portable::initialize_project_browser(&root).unwrap();
+    std::fs::write(
+        root.join("cadpad_view_0.py"),
+        "# Generated Cadpad entry point.\n# Project model file: \"assets/part.stl\"\nshow(import_stl(\"part.stl\"), name=\"model\", kind=\"surface\")\n",
+    ).unwrap();
+    let core = Core::open(
+        temp.path().join("app"),
+        WorkerConfig::bundled("unused".into()),
+    )
+    .await
+    .unwrap();
+    let project = core.open_project(root.clone(), "user").await.unwrap();
+    let (parent, base) = (&project.workspace_id, &project.base_revision);
+
+    // A half-written sibling source file cannot prevent opening a mesh.
+    std::fs::write(&source, [0xff]).unwrap();
+    let (tab, job) = core
+        .open_project_model(parent, base, entry, "$file", "user")
+        .await
+        .unwrap();
+    assert_eq!(
+        job.state,
+        JobState::Succeeded,
+        "the first standalone STL open returns its committed mesh"
+    );
+    assert_eq!(
+        core.read_source(&tab, job.snapshot_id.as_deref().unwrap(), "geometry.py")
+            .await
+            .unwrap()["source"],
+        "# saved snapshot\n"
+    );
+    let (cached, cached_job) = core
+        .open_project_model_reusing(parent, base, entry, "$file", "user", Some(&tab))
+        .await
+        .unwrap();
+    assert_eq!(cached, tab);
+    assert_eq!(cached_job.id, job.id);
+
+    std::fs::write(root.join(entry), mesh(3)).unwrap();
+    let (updated, job) = core
+        .open_project_model_reusing(parent, base, entry, "$file", "user", Some(&tab))
+        .await
+        .unwrap();
+    assert_ne!(updated, tab);
+    assert_eq!(done(&core, &updated, job).await.state, JobState::Succeeded);
+    assert_eq!(
+        core.get_project(&updated).await.unwrap()["model"]["parts"][0]["bounds"]["size"][0],
+        3.
+    );
+    assert_eq!(
+        core.get_project(&updated).await.unwrap()["model"]["parts"][0]["edge_count"],
+        3
+    );
+    assert_eq!(core.get_project(parent).await.unwrap()["revision"], *base);
+}
+
+/// Run with CADPAD_BENCH_PROJECT and CADPAD_BENCH_ENTRY set to an existing project and STL.
+#[tokio::test]
+#[ignore = "explicit real-file benchmark"]
+async fn benchmark_stl_open() {
+    use serde_json::json;
+    use std::{collections::BTreeMap, time::Instant};
+    use tokio::task::JoinSet;
+
+    let root = PathBuf::from(std::env::var_os("CADPAD_BENCH_PROJECT").expect("project directory"));
+    let entry = std::env::var("CADPAD_BENCH_ENTRY").expect("project-relative STL path");
+    assert!(
+        PathBuf::from(&entry)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("stl"))
+    );
+    let runs = std::env::var("CADPAD_BENCH_RUNS").map_or(5, |value| value.parse().unwrap());
+    assert!(runs > 0);
+
+    let mut samples = BTreeMap::<_, Vec<(f64, f64)>>::new();
+    for run in 1..=runs {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::open(
+            temp.path().join("app"),
+            WorkerConfig::bundled("unused".into()),
+        )
+        .await
+        .unwrap();
+        let parent = core.open_project(root.clone(), "benchmark").await.unwrap();
+        let mut cached = None;
+        for mode in ["new_workspace", "reused_workspace"] {
+            let started = Instant::now();
+            let (view, job) = core
+                .open_project_model_reusing(
+                    &parent.workspace_id,
+                    &parent.base_revision,
+                    &entry,
+                    "$file",
+                    "benchmark",
+                    cached.as_deref(),
+                )
+                .await
+                .unwrap();
+            let ready = done(&core, &view, job).await;
+            assert_eq!(ready.state, JobState::Succeeded);
+            if let Some(expected) = &cached {
+                assert_eq!(&view, expected);
+            }
+
+            let project = core.get_project(&view).await.unwrap();
+            let metadata_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let revision = project["revision"].as_str().unwrap();
+            let mut handles = BTreeMap::new();
+            for part in project["model"]["parts"].as_array().unwrap() {
+                for info in part["mesh"]["buffers"].as_object().unwrap().values() {
+                    handles.insert(
+                        info["handle"].as_str().unwrap(),
+                        info["bytes"].as_u64().unwrap(),
+                    );
+                }
+            }
+            assert!(!handles.is_empty());
+            let mut reads = JoinSet::new();
+            for (handle, bytes) in handles {
+                let (core, view, revision, handle) = (
+                    core.clone(),
+                    view.clone(),
+                    revision.to_owned(),
+                    handle.to_owned(),
+                );
+                reads.spawn(async move {
+                    let data = core.artifact(&view, &revision, &handle).await.unwrap();
+                    assert_eq!(data.len() as u64, bytes);
+                    bytes
+                });
+            }
+            let mut bytes = 0;
+            while let Some(result) = reads.join_next().await {
+                bytes += result.unwrap();
+            }
+            let buffers_ms = started.elapsed().as_secs_f64() * 1000.0;
+            samples
+                .entry(mode)
+                .or_default()
+                .push((metadata_ms, buffers_ms));
+            println!(
+                "{}",
+                json!({"entry":entry,"run":run,"mode":mode,"bufferBytes":bytes,
+                       "openToMetadataMs":metadata_ms,"openToBuffersMs":buffers_ms})
+            );
+            cached = Some(view);
+        }
+    }
+    fn median(mut values: Vec<f64>) -> f64 {
+        values.sort_by(f64::total_cmp);
+        let middle = values.len() / 2;
+        (values[middle] + values[(values.len() - 1) / 2]) / 2.0
+    }
+    for (mode, timings) in samples {
+        println!(
+            "{}",
+            json!({"entry":entry,"runs":runs,"mode":mode,
+                   "medianOpenToMetadataMs":median(timings.iter().map(|sample| sample.0).collect()),
+                   "medianOpenToBuffersMs":median(timings.iter().map(|sample| sample.1).collect())})
+        );
+    }
 }

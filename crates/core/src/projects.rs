@@ -138,6 +138,7 @@ impl Core {
         draft.external_fingerprint = external_fingerprint;
         let stored = StoredWorkspace {
             model_parent: None,
+            model_source_revision: None,
             geometry_cache: Value::Null,
             motion_tests: motion_tests.clone(),
             job_snapshots: crate::Snapshots::default(),
@@ -488,10 +489,7 @@ impl Core {
         if bytes.len() > portable::ASSET_LIMIT {
             return Err(Error::domain("INVALID_REQUEST", "Asset exceeds 64 MiB"));
         }
-        let digest = portable::bytes_hash(&bytes);
-        let blobs = BTreeMap::from([(digest.clone(), bytes)]);
-        let blob_directory = self.root.join("blobs");
-        blocking(move || portable::store_blobs(&blob_directory, &blobs)).await?;
+        let digest = self.store_asset_blob(bytes).await?;
         let mut workspaces = self.workspace(workspace_id).await?;
         let ws = workspaces
             .get_mut(workspace_id)
@@ -523,6 +521,20 @@ impl Core {
         self.persist(&next).await?;
         ws.stored = next;
         Ok(draft)
+    }
+    /// The caller retains the blob publication guard until the draft is durable.
+    pub(crate) async fn store_asset_blob(&self, bytes: Vec<u8>) -> Result<String> {
+        let (digest, bytes) = blocking(move || Ok((portable::bytes_hash(&bytes), bytes))).await?;
+        self.publish_asset_blob(digest.clone(), bytes).await?;
+        Ok(digest)
+    }
+    pub(crate) async fn publish_asset_blob(&self, digest: String, bytes: Vec<u8>) -> Result<()> {
+        let blob_directory = self.root.join("blobs");
+        blocking(move || {
+            std::fs::create_dir_all(&blob_directory)?;
+            portable::store_verified_blob(&blob_directory, &digest, &bytes)
+        })
+        .await
     }
     /// Import a plain Python project without requiring an agent or project wizard.
     /// The user selected the entry file; dependencies remain the pinned worker set.

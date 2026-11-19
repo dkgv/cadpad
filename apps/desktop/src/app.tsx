@@ -1,3 +1,4 @@
+import type {ModelOpenFrame} from './model-open-timing';
 import {watchProjectFiles,reconnectProjectFiles} from './project-files';
 import {connectNativeStream,messageChannel} from './native-stream';
 import {JointWizard} from './joint-wizard';
@@ -7,7 +8,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { CadViewport, sceneEntity, sameEntity, referenceLetter, recordedFrameAt, type Inspection, type Entity, type SceneModel, type SelectionMode, type Scope, type MotionSnapshot } from '@cadpad/viewer';
 import './style.css';
-import {Icon,humanLabel,errorSummary,PropertySummary,type IconName} from './ui';
+import {Icon,humanLabel,errorSummary,ModelOpening,PropertySummary,type IconName} from './ui';
 import {ExternalLoads} from './loads';
 import {PhysicsSettings} from './physics-settings';
 import {Requirements} from './motion-tests';
@@ -786,7 +787,14 @@ export function App({host}:{host?:SessionHost}={}) {
     const timer=setInterval(()=>void check(),2000);
     return()=>{active=false;clearInterval(timer);};
   },[project?.workspace_id,agentTurn?.id,agentTurn?.state]);
-  useEffect(() => { if(hostRef.current?.initialProject){adopt(hostRef.current.initialProject);return;}let active=true;const request=hostRef.current?invoke<Project>('project',{workspace:hostRef.current.workspaceId}):invoke<Project>('initialize');request.then(next=>{if(active)adopt(next);}).catch(e=>{if(active)setError(message(e));});return()=>{active=false;}; },[]);
+  useEffect(() => {
+    const session=hostRef.current;
+    if(session?.initialProject){adopt(session.initialProject);return;}
+    let active=true;
+    const request=session?invoke<Project>('project',{workspace:session.workspaceId}):invoke<Project>('initialize');
+    request.then(next=>{if(active)adopt(next);}).catch(e=>{if(active)setError(message(e));});
+    return()=>{active=false;};
+  },[]);
   useEffect(()=>()=>{
     if(targetFrame.current!==null)cancelAnimationFrame(targetFrame.current);
     if(draftUiFrame.current!==null)cancelAnimationFrame(draftUiFrame.current);
@@ -811,7 +819,8 @@ export function App({host}:{host?:SessionHost}={}) {
           const primary=next[next.length-1]??null;
           setReferences(next);choosePrimary(primary);viewport.selectEntity(primary);if(primary&&!toolPanelOpen.current)setModelOpen(true);return;
         }
-        if(origin==='replacement'&&current&&intendedSelection(current))return;setSelection(entity,origin!=='replacement');},item=>{if(!active||!item.parameter)return;const current=currentProject.current;if(!current||!viewport.hasScene(current.workspace_id,current.revision))return;setPanel('model');requestAnimationFrame(()=>document.getElementById(`parameter:${item.parameter}`)?.focus());},state=>{if(!active)return;setGraphicsLost(state==='lost');if(state==='restored')setViewAttempt(attempt=>attempt+1);});
+        if(origin==='replacement'&&current&&intendedSelection(current))return;setSelection(entity,origin!=='replacement');},item=>{if(!active||!item.parameter)return;const current=currentProject.current;if(!current||!viewport.hasScene(current.workspace_id,current.revision))return;setPanel('model');requestAnimationFrame(()=>document.getElementById(`parameter:${item.parameter}`)?.focus());},state=>{if(!active)return;setGraphicsLost(state==='lost');if(state==='restored')setViewAttempt(attempt=>attempt+1);},()=>hostRef.current?.openTiming?.('pick'));
+      hostRef.current?.openTiming?.('renderer');
       viewer.current=viewport;if(hoverStatus.current)viewport.setStatusContainer(hoverStatus.current);setGraphicsLost(false);
       return()=>{active=false;viewer.current=null;viewport.dispose();};
     }catch(error){viewer.current=null;setStartupError(message(error));return()=>{active=false;};}
@@ -828,9 +837,10 @@ export function App({host}:{host?:SessionHost}={}) {
     if(viewport.hasScene(project.workspace_id,project.revision)&&viewStatus?.phase==='ready'&&viewStatus.workspace===project.workspace_id&&viewStatus.revision===project.revision&&viewStatus.generation===project.display_generation)return;
     status('loading');
     const browseGenerated=!host?.modelEntry&&!!project.model_entry;
-    viewport.load(project.display_error||browseGenerated?{parts:[]}:project.model,project.revision,handle => invoke<ArrayBuffer>('artifact',{
-      workspace:project.workspace_id,revision:project.revision,handle
-    }),project.workspace_id).then(()=>{
+    const model=project.display_error||browseGenerated?{parts:[]}:project.model;
+    viewport.load(model,project.revision,handle=>invoke<ArrayBuffer>('artifact',{
+      workspace:project.workspace_id,revision:project.revision,handle,
+    }),project.workspace_id,stage=>{if(scoped())hostRef.current?.openTiming?.(stage);}).then(()=>{
       if(!scoped())return;
       displayRetry.current=false;
       for(const part of project.model.parts)viewport.setVisible(part.instance_id,!hiddenIntent.current.has(part.instance_id));
@@ -1157,9 +1167,30 @@ export function App({host}:{host?:SessionHost}={}) {
     if(providerOpen&&!dialog.open)dialog.showModal();else if(!providerOpen&&dialog.open)dialog.close();
   },[providerOpen,host?.active,host?.chrome]);
   const scenePhase=startupError?'failed':graphicsLost?'lost':!project?'idle':viewStatus?.workspace===project.workspace_id&&viewStatus.revision===project.revision&&viewStatus.generation===project.display_generation?viewStatus.phase:'loading';
+  const modelBuildPending=!!host?.modelEntry&&!project?.model.parts.length&&
+    (!!project?.activity.some(item=>item.state==='queued'||item.state==='running')||
+      job?.state==='queued'||job?.state==='running');
+  const retainedView=!!project&&!!viewer.current?.hasScene(project.workspace_id,project.revision);
+  const managedOpening=!!host?.onOpeningSettled;
+  const viewProblem=scenePhase==='lost'||scenePhase==='failed'||scenePhase==='missing'||!!project?.display_error;
+  useEffect(()=>{
+    if(viewProblem||scenePhase==='ready'&&!modelBuildPending)hostRef.current?.onOpeningSettled?.();
+  },[managedOpening,scenePhase,modelBuildPending,viewProblem]);
+  const [openFrame,setOpenFrame]=useState<ModelOpenFrame>();
+  useEffect(()=>{
+    const timing=hostRef.current?.openTiming;
+    if(!timing||managedOpening||scenePhase!=='ready'||!retainedView||!host?.visible||!project?.model.parts.length)return;
+    // The second callback follows a paint opportunity for the visible model.
+    let frame=requestAnimationFrame(()=>{
+      frame=requestAnimationFrame(()=>{
+        if(!document.hidden)setOpenFrame(timing('frame'));
+      });
+    });
+    return()=>cancelAnimationFrame(frame);
+  },[managedOpening,scenePhase,retainedView,host?.visible,project?.revision,project?.model.parts.length]);
+  const localModelOpening=!!host?.modelEntry&&!managedOpening&&!viewProblem&&!retainedView&&(modelBuildPending||scenePhase==='loading');
   const agentChromeStatus=agentStartCancelling?'Stopping…':agentWorking?agentTurn.activity:agentSending?'Starting request…':'';
   const projectBound=!!project&&(project.saved_revision!=null||project.external_tracking);
-  const retainedView=!!project&&!!viewer.current?.hasScene(project.workspace_id,project.revision);
   const generatedProjectView=!host?.modelEntry&&!!project?.model_entry;
   const modelInCanvas=!!project?.model.parts.length&&!generatedProjectView&&!project.display_error&&(scenePhase==='ready'||retainedView);
   const [modelHistory,setModelHistory]=useState<{label?:string;revision:string;restored:boolean;initial:boolean;actor:string;parts:number;created_at?:number}[]>([]);
@@ -1194,11 +1225,12 @@ export function App({host}:{host?:SessionHost}={}) {
 
 </div>);
   const explorer=displayProject||project;
+  const selectedMesh=explorer?.model.parts.some(part=>part.instance_id===selection?.instance_id&&part.accuracy==='mesh');
   const modelPanel=(          <aside className="model-browser explorer-panel inspector-page" id="panel-model" aria-label="Explorer" hidden={!host&&!modelOpen}>
             {!host&&<PanelResizeHandle panel="model" value={panelSizes.model} onChange={value=>resizePanel('model',value)}/>}
             {!host&&<header className="dock-heading"><strong>Explorer</strong><button className="icon-button" aria-label="Close Explorer" onClick={()=>{setModelOpen(false);requestAnimationFrame(()=>document.getElementById('tab-model')?.focus());}}><Icon name="close" size={16}/></button></header>}
             <div className="model-browser-content">
-          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">Measured on the current model.</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} projectName={explorer.name||undefined} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={host?busy||agentSending||agentWorking:working} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} assets={explorer.assets||{}} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its source and geometry.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
+          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':selectedMesh&&selection.entity_id.startsWith('face:')?'Surface':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">{selectedMesh?'Measured from STL triangles.':'Measured on the current model.'}</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} projectName={explorer.name||undefined} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={host?busy||agentSending||agentWorking:working} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} assets={explorer.assets||{}} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its source and geometry.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
 
         </div>
           </aside>);
@@ -1231,8 +1263,8 @@ export function App({host}:{host?:SessionHost}={}) {
         <button className={dimensions?'active':''} aria-pressed={dimensions} onClick={()=>setDimensions(!dimensions)}><Icon name="measure" size={16}/>Dimensions</button>
 
       </nav>}
-      <div className="viewport" ref={container} aria-busy={scenePhase==='loading'||scenePhase==='lost'}/>
-      {(scenePhase==='lost'||scenePhase==='loading'||scenePhase==='failed'||scenePhase==='missing'&&!retainedView)&&<div className={`view-recovery ${retainedView?'retained-view':''}`}><div className="view-recovery-card" role={scenePhase==='failed'?'alert':'status'}>
+      <div className="viewport" ref={container} aria-busy={managedOpening||localModelOpening||scenePhase==='loading'||scenePhase==='lost'}/>
+      {(scenePhase==='lost'||scenePhase==='loading'&&!viewProblem&&!host?.modelEntry||scenePhase==='failed'||scenePhase==='missing'&&!retainedView)&&<div className={`view-recovery ${retainedView?'retained-view':''}`}><div className="view-recovery-card" role={scenePhase==='failed'?'alert':'status'}>
         <strong>{startupError?'Unable to start the 3D view':scenePhase==='lost'?'Waiting for graphics…':scenePhase==='loading'?'Loading model…':scenePhase==='missing'?'Display data needs restoring':'Unable to display this model'}</strong>
         {scenePhase==='lost'?<p>The graphics connection was interrupted. Your model is still available to save or export. The view will reload when graphics return.</p>:scenePhase!=='loading'&&<p>{startupError||viewStatus?.message||project?.display_error?.message}</p>}
         {scenePhase==='failed'&&<button onClick={()=>{displayRetry.current=false;if(!viewer.current)setViewportAttempt(attempt=>attempt+1);else setViewAttempt(attempt=>attempt+1);}}>Retry view</button>}
@@ -1241,7 +1273,7 @@ export function App({host}:{host?:SessionHost}={}) {
 
       {!!importCandidates.length&&<div className="import-setup-backdrop"><section className="import-setup" role="dialog" aria-modal="true" aria-labelledby="import-setup-title"><header><h2 id="import-setup-title">Import model</h2><button className="icon-button" aria-label="Close import setup" onClick={()=>setImportCandidates([])}><Icon name="close" size={15}/></button></header><div className="import-setup-body"><p>Choose a model from this project folder.</p><div className="import-file-list" role="radiogroup" aria-label="Model file">{importCandidates.map(path=><button key={path} role="radio" aria-checked={importChoice===path} className={importChoice===path?'selected':''} onClick={()=>setImportChoice(path)}><Icon name="file" size={18}/><span>{path.split('/').at(-1)}</span><small>{path.split('.').at(-1)?.toUpperCase()}</small></button>)}</div><p className="import-setup-hint">The original file stays in your folder.</p></div><footer><button disabled={working} onClick={()=>setImportCandidates([])}>Skip for now</button><button className="primary-button" disabled={working||!importChoice} onClick={()=>{const path=importChoice;setImportCandidates([]);void run('import_model',{selectedPath:path});}}><Icon name="import" size={14}/>Import</button></footer></section></div>}
 
-      {host?.modelEntry&&!project?.model.parts.length&&job&&['queued','running'].includes(job.state)&&<div className="empty model-opening" role="status"><span className="model-opening-spinner" aria-hidden="true"/><h1>Opening model…</h1><p>Building geometry for this tab.</p></div>}
+      {localModelOpening&&<ModelOpening/>}
       {!host?.modelEntry&&(generatedProjectView||!project?.model.parts.length)&&job?.state!=='failed'&&(project?.external_tracking&&(project.files?.length??0)>1?<div className="empty">
         <h1>No model open</h1>
         {job&&['queued','running'].includes(job.state)?<p role="status">Building selected model…</p>:<>
@@ -1256,7 +1288,7 @@ export function App({host}:{host?:SessionHost}={}) {
       {!project?.model.parts.length&&job?.state==='failed'&&<div className="build-empty"><strong>Model could not build</strong><p>Review the error below to continue.</p></div>}
       </div>
       {job?.state==='failed'&&!agentWorking&&!agentSending&&<BuildDiagnostics key={job.id} diagnostics={job.diagnostics} onRetry={()=>void run('rebuild')} onSetup={project?.external_tracking?()=>void setupProjectEntry():undefined}/>}
-      <footer><span>Millimetres <span className="footer-dot">·</span> {generatedProjectView?0:project?.model.parts.length||0} parts</span><span className="hover-status" aria-label="Hovered geometry" ref={hoverStatus}/><span>{manipulating&&motion?.mode==='manipulate'&&!motion.playback?'Drag a moving part to slide or rotate it':'Drag to orbit'} <span className="footer-dot">·</span> ⇧ drag to pan <span className="footer-dot">·</span> Scroll to zoom</span></footer>
+      <footer><span>Millimetres <span className="footer-dot">·</span> {generatedProjectView?0:project?.model.parts.length||0} parts{openFrame&&<> <span className="footer-dot">·</span> <span data-model-open-time title={openFrame.reusedWorkspace?'Click to first visible frame, reused workspace':'Click to first visible frame, new workspace'}>Opened in {openFrame.ms.toLocaleString()} ms</span></>}</span><span className="hover-status" aria-label="Hovered geometry" ref={hoverStatus}/><span>{manipulating&&motion?.mode==='manipulate'&&!motion.playback?'Drag a moving part to slide or rotate it':'Drag to orbit'} <span className="footer-dot">·</span> ⇧ drag to pan <span className="footer-dot">·</span> Scroll to zoom</span></footer>
     </section>);
   const openChatIds=chatTabIds(chatList,activeChatId);
   const chatHostMap=Object.fromEntries(openChatIds.map(id=>[id,chatHost(id)]));

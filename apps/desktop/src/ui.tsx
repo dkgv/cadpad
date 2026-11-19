@@ -44,8 +44,11 @@ export function humanLabel(value:string){return value.replaceAll('_',' ').replac
 export function errorSummary(value:string){
   try{const data=JSON.parse(value);const message=data?.message||data?.error?.message;return typeof message==='string'?message:'This action could not be completed.';}catch{return value;}
 }
+export function ModelOpening(){
+  return <div className="model-opening" role="status"><span className="model-opening-spinner" aria-hidden="true"/><strong>Opening model…</strong></div>;
+}
 export function PropertySummary({inspection}:{inspection:Inspection|null}){
-  if(!inspection)return <p className="muted">Reading exact geometry…</p>;
+  if(!inspection)return <p className="muted">Reading geometry…</p>;
   const entity=(inspection.entities?.[0]||{}) as unknown as Record<string,unknown>;
   const fields=[['volume','Volume','mm³'],['area','Surface area','mm²'],['length','Length','mm'],['radius','Radius','mm']] as const;
   const bounds=entity.bounds as {size?:number[]}|undefined;

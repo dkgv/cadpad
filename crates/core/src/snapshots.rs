@@ -47,6 +47,7 @@ fn content_fingerprint(inputs: &Inputs) -> String {
 pub(crate) trait Snapshot:
     Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
+    fn snapshot_id(&self) -> &str;
     fn summary(&self) -> Summary;
 }
 fn input_summary(id: &str, actor: &str, inputs: &Inputs) -> Summary {
@@ -73,10 +74,22 @@ fn input_summary(id: &str, actor: &str, inputs: &Inputs) -> Summary {
     }
 }
 impl Snapshot for Revision {
+    fn snapshot_id(&self) -> &str {
+        &self.id
+    }
     fn summary(&self) -> Summary {
-        let mut summary = input_summary(&self.id, &self.actor, &self.inputs);
+        self.summarize_revision(input_summary(&self.id, &self.actor, &self.inputs))
+    }
+}
+impl Revision {
+    fn summarize_revision(&self, mut summary: Summary) -> Summary {
+        summary.id.clone_from(&self.id);
+        summary.actor.clone_from(&self.actor);
         summary.parent = self.parent.clone();
         summary.restored_from = self.restored_from.clone();
+        summary.part_count = 0;
+        summary.part_names.clear();
+        summary.mesh_handles.clear();
         if let Some(parts) = self.model["parts"].as_array() {
             summary.part_count = parts.len();
             summary.part_names = parts
@@ -93,8 +106,9 @@ impl Snapshot for Revision {
                 }
             }
         }
-        summary.has_content |= summary.part_count > 0;
-        summary.protected = crate::recovery::validate_publication(&self.model).is_err()
+        summary.has_content = self.inputs != Inputs::default() || summary.part_count > 0;
+        summary.protected = (!crate::stl_model::is_mesh(&self.model)
+            && crate::recovery::validate_publication(&self.model).is_err())
             || crate::recovery::validate_display_publication(&self.model).is_err();
         summary
     }
@@ -106,6 +120,9 @@ impl Summary {
     }
 }
 impl Snapshot for Draft {
+    fn snapshot_id(&self) -> &str {
+        &self.id
+    }
     fn summary(&self) -> Summary {
         input_summary(&self.id, &self.actor, &self.inputs)
     }
@@ -203,6 +220,9 @@ impl<T: Snapshot> Snapshots<T> {
     }
     pub fn insert(&mut self, id: String, value: T) {
         let summary = value.summary();
+        self.insert_summary(id, value, summary);
+    }
+    fn insert_summary(&mut self, id: String, value: T, summary: Summary) {
         self.entries.insert(
             id,
             Entry {
@@ -242,7 +262,7 @@ impl<T: Snapshot> Snapshots<T> {
             .clone()
             .ok_or_else(|| Error::domain("IO_ERROR", "Snapshot has no durable body"))?;
         let value: T = serde_json::from_reader(BufReader::new(range.reader()))?;
-        if value.summary().id != id {
+        if value.snapshot_id() != id {
             return Err(Error::domain(
                 "INVALID_REQUEST",
                 "Snapshot identity mismatch",
@@ -312,6 +332,24 @@ impl<T: Snapshot> Snapshots<T> {
             },
         );
         Ok(())
+    }
+}
+impl Snapshots<Draft> {
+    /// The queued copy differs from the draft only in its snapshot ID.
+    pub(crate) fn insert_job_copy(&mut self, snapshot: Draft, mut summary: Summary) {
+        summary.id.clone_from(&snapshot.id);
+        self.insert_summary(snapshot.id.clone(), snapshot, summary);
+    }
+}
+impl Snapshots<Revision> {
+    /// Reuse only when the caller has established that the inputs are unchanged.
+    pub(crate) fn insert_with_unchanged_inputs(
+        &mut self,
+        revision: Revision,
+        input_summary: Summary,
+    ) {
+        let summary = revision.summarize_revision(input_summary);
+        self.insert_summary(revision.id.clone(), revision, summary);
     }
 }
 pub(crate) struct SnapshotEdit<'a, T: Snapshot> {
@@ -716,27 +754,25 @@ fn write_map<T: Snapshot, W: Write>(
         serde_json::to_writer(&mut *writer, id)?;
         writer.write_all(b":")?;
         let start = writer.offset;
-        let summary = if let Some(value) = &entry.value {
-            serde_json::to_writer(&mut *writer, value.as_ref())?;
-            value.summary()
-        } else {
-            let range = entry
-                .location
-                .read()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| Error::domain("IO_ERROR", "Missing snapshot bytes"))?;
+        // Snapshot edits clear their range before any resident value changes.
+        let range = entry.location.read().unwrap().clone();
+        if let Some(range) = range {
             let n = io::copy(&mut range.reader(), writer)?;
             if n != range.bytes {
                 return Err(Error::domain("IO_ERROR", "Truncated snapshot bytes"));
             }
-            entry.summary.clone()
-        };
+        } else {
+            let value = entry
+                .value
+                .as_ref()
+                .ok_or_else(|| Error::domain("IO_ERROR", "Missing snapshot bytes"))?;
+            serde_json::to_writer(&mut *writer, value.as_ref())?;
+        }
         locations.push((
             entry.location.clone(),
             start,
             writer.offset - start,
-            summary,
+            entry.summary.clone(),
             PhantomData,
         ));
     }
@@ -752,7 +788,7 @@ pub(crate) struct Publication {
 pub(crate) fn write(path: &Path, stored: &StoredWorkspace) -> Result<Publication> {
     let file = File::create(path)?;
     let mut writer = Counter {
-        inner: io::BufWriter::new(file),
+        inner: io::BufWriter::with_capacity(128 * 1024, file),
         offset: 0,
     };
     let Value::Object(mut fields) = serde_json::to_value(metadata(stored))? else {

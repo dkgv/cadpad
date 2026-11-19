@@ -303,7 +303,9 @@ impl Core {
         draft: crate::Draft,
         cancel: watch::Receiver<bool>,
     ) {
-        let Ok(_memory) = self.pin_workspace(workspace).await else { return; };
+        let Ok(_memory) = self.pin_workspace(workspace).await else {
+            return;
+        };
         {
             let mut workspaces = self.workspaces.lock().await;
             let ws = workspaces.get_mut(workspace).unwrap();
@@ -326,6 +328,35 @@ impl Core {
                 .mesh_buffers_valid(workspace, &draft.base_revision, &model)
                 .await?
             {
+                return Ok(());
+            }
+            if crate::stl_model::is_mesh(&model) {
+                let (entry, digest) = crate::project_entry::stl_model_asset(&draft.inputs)
+                    .ok_or_else(|| Error::domain("INVALID_GEOMETRY", "STL source is missing"))?;
+                let _slot = self.construction_slot(cancel.clone()).await?;
+                let _publication = self.display_publication.read().await;
+                let restored = self
+                    .publish_stl(
+                        workspace,
+                        &draft.base_revision,
+                        draft.inputs.clone(),
+                        entry,
+                        digest,
+                        model["parts"][0]["geometry_fingerprint"]["format"]
+                            == crate::stl_model::FORMAT,
+                        cancel.clone(),
+                    )
+                    .await?;
+                let restored = &restored["parts"][0];
+                let current = &model["parts"][0];
+                if restored["mesh"] != current["mesh"]
+                    || restored["geometry_fingerprint"] != current["geometry_fingerprint"]
+                {
+                    return Err(Error::domain(
+                        "RECOVERY_GEOMETRY_CHANGED",
+                        "Rebuilt STL display differs from the saved mesh",
+                    ));
+                }
                 return Ok(());
             }
             let worker = self

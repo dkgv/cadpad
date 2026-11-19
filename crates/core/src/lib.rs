@@ -30,6 +30,7 @@ pub mod recovery;
 pub mod runtime;
 mod snapshots;
 mod source_files;
+mod stl_model;
 pub mod tools;
 pub mod views;
 pub mod worker;
@@ -170,6 +171,8 @@ pub struct Job {
 struct StoredWorkspace {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_parent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_source_revision: Option<String>,
     schema_version: u32,
     id: String,
     current: String,
@@ -438,6 +441,7 @@ impl Core {
         };
         let stored = StoredWorkspace {
             model_parent: None,
+            model_source_revision: None,
             geometry_cache: Value::Null,
             motion_tests: BTreeMap::new(),
             job_snapshots: Snapshots::default(),
@@ -663,37 +667,68 @@ impl Core {
                 ));
             }
             construction::check_job_capacity(&workspaces, workspace_id, actor)?;
-            let mut snapshot = draft.as_ref().clone();
-            snapshot.id = id();
-            let job = Job {
-                kind: kind.clone(),
-                snapshot_id: Some(snapshot.id.clone()),
-                id: id(),
-                draft_id: draft.id.clone(),
-                actor: actor.into(),
-                state: JobState::Queued,
-                resulting_revision: None,
-                diagnostics: Value::Null,
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64,
-            };
-            let (send, receive) = watch::channel(false);
             let ws = workspaces.get_mut(workspace_id).unwrap();
             let mut next = ws.stored.clone();
-            next.job_snapshots
-                .insert(snapshot.id.clone(), snapshot.clone());
-            next.jobs.insert(job.id.clone(), job.clone());
+            let (job, snapshot) = Self::register_job(&mut next, &draft, actor, kind);
+            let (send, receive) = watch::channel(false);
             self.persist(&next).await?;
             ws.stored = next;
             ws.cancellation.insert(job.id.clone(), send);
             (job, snapshot, receive)
         };
-        self.job_activity(workspace_id, &job);
+        self.launch_job(workspace_id, &job, snapshot, receive);
+        Ok(job)
+    }
+
+    fn register_job(
+        next: &mut StoredWorkspace,
+        draft: &Draft,
+        actor: &str,
+        kind: JobKind,
+    ) -> (Job, Draft) {
+        let mut snapshot = draft.clone();
+        snapshot.id = id();
+        let job = Self::job_for_snapshot(draft, actor, kind, snapshot.id.clone());
+        let summary = next
+            .drafts
+            .header(&draft.id)
+            .expect("draft was staged")
+            .clone();
+        next.job_snapshots
+            .insert_job_copy(snapshot.clone(), summary);
+        next.jobs.insert(job.id.clone(), job.clone());
+        (job, snapshot)
+    }
+
+    fn job_for_snapshot(draft: &Draft, actor: &str, kind: JobKind, snapshot_id: String) -> Job {
+        Job {
+            kind,
+            snapshot_id: Some(snapshot_id),
+            id: id(),
+            draft_id: draft.id.clone(),
+            actor: actor.into(),
+            state: JobState::Queued,
+            resulting_revision: None,
+            diagnostics: Value::Null,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        }
+    }
+
+    fn launch_job(
+        &self,
+        workspace_id: &str,
+        job: &Job,
+        snapshot: Draft,
+        receive: watch::Receiver<bool>,
+    ) {
+        self.job_activity(workspace_id, job);
+        let kind = job.kind.clone();
+        let job_id = job.id.clone();
         let core = self.clone();
         let workspace_id = workspace_id.to_string();
-        let job_id = job.id.clone();
         tokio::spawn(async move {
             if kind == JobKind::Build {
                 core.run_build(&workspace_id, &job_id, snapshot, receive)
@@ -703,7 +738,6 @@ impl Core {
                     .await;
             }
         });
-        Ok(job)
     }
     pub(crate) async fn materialize(
         &self,
@@ -758,6 +792,7 @@ impl Core {
         let revision_id = id();
         let mut slot = None;
         let mut recording_publication = None;
+        let mut stl_publication = None;
         let outcome: Result<(
             Option<Worker>,
             Value,
@@ -799,6 +834,17 @@ impl Core {
                 }
                 ws.stored.jobs.get_mut(job_id).unwrap().state = JobState::Running;
                 self.job_activity(workspace_id, &ws.stored.jobs[job_id]);
+            }
+            if draft.inputs.mechanism == json!({}) && draft.inputs.parameters == json!({})
+                && let Some((entry, digest)) = project_entry::stl_model_asset(&draft.inputs)
+            {
+                slot = Some(self.construction_slot(cancel.clone()).await?);
+                stl_publication = Some(self.display_publication.read().await);
+                let model = self.publish_stl(workspace_id, &revision_id, draft.inputs.clone(),
+                    entry, digest, true, cancel.clone()).await?;
+                project_result::validate_publication(&model)?;
+                let motion = motion::State::new(&draft.inputs, &model)?;
+                return Ok((None, json!({"data":model}), motion, Vec::new()));
             }
             if let Some(reused) = self
                 .try_authoritative_rebuild(
@@ -955,19 +1001,28 @@ impl Core {
             Ok((worker, result, motion, rebound))
                 if !*cancel.borrow() && next.current == draft.base_revision =>
             {
+                let snapshot_summary = next.job_snapshots.header(&draft.id).cloned();
                 if result["authoritative_reuse"].is_null() || !result["geometry_cache"].is_null() {
+                    let input_digest = snapshot_summary.as_ref().map_or_else(
+                        || portable::fingerprint(&draft.inputs).unwrap_or_default(),
+                        |summary| summary.input_fingerprint.clone(),
+                    );
                     next.geometry_cache = geometry_cache::record(
                         &next.geometry_cache,
                         &revision_id,
-                        &portable::fingerprint(&draft.inputs).unwrap_or_default(),
+                        &input_digest,
                         &result["geometry_cache"],
                     );
                 }
+                let parameters = result["data"]["parameters"].clone();
+                let dependencies = serde_json::from_value(result["data"]["dependencies"].clone())
+                    .unwrap_or_default();
+                let unchanged_inputs = draft.inputs.parameters == parameters
+                    && draft.inputs.dependencies == dependencies;
+                let reusable_summary = snapshot_summary.filter(|_| unchanged_inputs);
                 let mut inputs = draft.inputs;
-                inputs.parameters = result["data"]["parameters"].clone();
-                inputs.dependencies =
-                    serde_json::from_value(result["data"]["dependencies"].clone())
-                        .unwrap_or_default();
+                inputs.parameters = parameters;
+                inputs.dependencies = dependencies;
                 let revision = Revision {
                     id: revision_id.clone(),
                     parent: Some(draft.base_revision.clone()),
@@ -992,19 +1047,25 @@ impl Core {
                         import.pending_revision = None;
                     }
                 }
-                if let Some(fingerprint) = draft.external_fingerprint
-                    && let Some(binding) = &mut next.project
-                {
-                    binding.fingerprint = fingerprint.clone();
-                    if portable::fingerprint(&revision.inputs).ok().as_ref() == Some(&fingerprint) {
+                if let Some(summary) = reusable_summary {
+                    next.revisions
+                        .insert_with_unchanged_inputs(revision, summary);
+                } else {
+                    next.revisions.insert(revision_id.clone(), revision);
+                }
+                if let Some(binding) = &mut next.project {
+                    if let Some(fingerprint) = draft.external_fingerprint {
+                        binding.fingerprint = fingerprint;
+                    }
+                    if next
+                        .revisions
+                        .header(&revision_id)
+                        .unwrap()
+                        .input_fingerprint
+                        == binding.fingerprint
+                    {
                         binding.saved_revision = revision_id.clone();
                     }
-                }
-                if let Some(binding) = &mut next.project
-                    && portable::fingerprint(&revision.inputs).ok().as_ref()
-                        == Some(&binding.fingerprint)
-                {
-                    binding.saved_revision = revision_id.clone();
                 }
                 if let Some(mut origin) = draft.python_origin {
                     origin.applied = true;
@@ -1012,7 +1073,6 @@ impl Core {
                 } else if let Some(origin) = &mut next.python_origin {
                     origin.applied = true;
                 }
-                next.revisions.insert(revision_id.clone(), revision);
                 next.current = revision_id.clone();
                 candidate = worker;
                 candidate_motion = Some(motion);
@@ -1063,6 +1123,9 @@ impl Core {
                     ws.motion = candidate_motion;
                     ws.worker = Some(Arc::new(Mutex::new(worker)));
                     ws.worker_last_used = self.worker_cache.next_use();
+                } else if stl_model::is_mesh(&ws.stored.current_revision().model) {
+                    ws.motion = candidate_motion;
+                    ws.worker = None;
                 }
             }
             Err(error) => {
@@ -1150,33 +1213,44 @@ impl Core {
                 "Unknown geometry query",
             ));
         }
-        let worker = self
-            .verified_worker(workspace_id, revision, receive.clone())
-            .await?;
-        let mut waiting = receive.clone();
-        if *waiting.borrow() {
-            return Err(Error::domain("CANCELLED", "Query cancelled"));
-        }
-        let mut native = tokio::select! {guard=worker.lock()=>guard,_=waiting.changed()=>return Err(Error::domain("CANCELLED","Cancelled while waiting for native geometry"))};
-        let result = native.request(revision, method, args, receive).await;
-        drop(native);
-        if let Err(error) = &result
-            && matches!(
-                error.code(),
-                "CANCELLED" | "WORKER_UNAVAILABLE" | "IO_ERROR" | "RESOURCE_LIMIT"
-            )
-        {
-            let mut workspaces = self.workspace(workspace_id).await?;
-            let ws = workspaces.get_mut(workspace_id).unwrap();
-            if ws
-                .worker
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &worker))
-            {
-                ws.worker = None;
+        let mesh_revision = {
+            let workspaces = self.workspace(workspace_id).await?;
+            let current = workspaces[workspace_id].stored.current_revision();
+            (current.id == revision && stl_model::is_mesh(&current.model))
+                .then(|| (current.model.clone(), current.inputs.clone()))
+        };
+        let data = if let Some((model, inputs)) = mesh_revision {
+            self.query_stl(workspace_id, revision, model, inputs, method, args, receive)
+                .await?
+        } else {
+            let worker = self
+                .verified_worker(workspace_id, revision, receive.clone())
+                .await?;
+            let mut waiting = receive.clone();
+            if *waiting.borrow() {
+                return Err(Error::domain("CANCELLED", "Query cancelled"));
             }
-        }
-        let result = result?;
+            let mut native = tokio::select! {guard=worker.lock()=>guard,_=waiting.changed()=>return Err(Error::domain("CANCELLED","Cancelled while waiting for native geometry"))};
+            let result = native.request(revision, method, args, receive).await;
+            drop(native);
+            if let Err(error) = &result
+                && matches!(
+                    error.code(),
+                    "CANCELLED" | "WORKER_UNAVAILABLE" | "IO_ERROR" | "RESOURCE_LIMIT"
+                )
+            {
+                let mut workspaces = self.workspace(workspace_id).await?;
+                let ws = workspaces.get_mut(workspace_id).unwrap();
+                if ws
+                    .worker
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &worker))
+                {
+                    ws.worker = None;
+                }
+            }
+            result?["data"].clone()
+        };
         // Caller can still receive useful old data, but it must never be published as current.
         let workspaces = self.workspace(workspace_id).await?;
         if workspaces[workspace_id].stored.current != revision {
@@ -1194,7 +1268,7 @@ impl Core {
                 ));
             }
         }
-        Ok(result["data"].clone())
+        Ok(data)
     }
     pub async fn artifact(
         &self,

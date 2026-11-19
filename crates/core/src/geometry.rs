@@ -14,6 +14,7 @@ pub enum Units {
 #[serde(rename_all = "snake_case")]
 pub enum Accuracy {
     Exact,
+    Mesh,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Bounds {
@@ -105,6 +106,10 @@ pub enum GeometryCenter {
     GeometryCenter {
         instance_id: String,
         entity: annotations::GeometryRef,
+    },
+    LocalPoint {
+        instance_id: String,
+        point: [f64; 3],
     },
 }
 #[derive(Serialize, Deserialize, JsonSchema)]

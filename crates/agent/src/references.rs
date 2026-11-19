@@ -130,7 +130,9 @@ pub fn summarize(project: &Value, entities: &[Entity]) -> Result<Vec<ChatReferen
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let label = if features.is_empty() {
+        let label = if kind == "face" && part["accuracy"] == "mesh" {
+            "Mesh surface".into()
+        } else if features.is_empty() {
             kind_label(kind).to_string()
         } else {
             features.join(", ")
@@ -239,7 +241,7 @@ pub async fn resolve(tools: &dyn ToolExecutor, request: Request<'_>) -> Result<R
             json!({"workspace_id":workspace,"revision":revision,"entities":entities,"pose_version":pose_version}),
         )
         .await;
-    let exact = match inspected {
+    let properties = match inspected {
         Ok(value) => value,
         Err(error) => json!({"unavailable": error.to_string()}),
     };
@@ -255,19 +257,30 @@ pub async fn resolve(tools: &dyn ToolExecutor, request: Request<'_>) -> Result<R
             })
         })
         .collect::<Vec<_>>();
+    let mesh = properties["accuracy"] == "mesh";
     let mut text = String::from(
         "The user selected this geometry in the viewport and attached it to the message below. \
 Letters match the badges in the viewport and screenshot; with one reference the user may say \"this\". \
-Entity IDs are scoped to the stated revision. Source files are the component modules whose show() call published each part; \
-face/edge provenance is not recorded, so match exact properties to the code that produced them.\n<references>\n",
+Entity IDs are scoped to the stated revision. ",
     );
-    text.push_str(&serde_json::to_string_pretty(
-        &json!({"revision": revision, "pose_version": pose_version, "units": "mm", "references": references, "exact_properties": exact}),
-    )?);
+    text.push_str(if mesh {
+        "Properties are measured from the STL triangles. A selected surface may group adjacent coplanar triangles.\n<references>\n"
+    } else {
+        "Source files are the component modules whose show() call published each part; \
+face/edge provenance is not recorded, so match exact properties to the code that produced them.\n<references>\n"
+    });
+    let mut context = json!({"revision": revision, "pose_version": pose_version, "units": "mm", "references": references});
+    context[if mesh {
+        "mesh_properties"
+    } else {
+        "exact_properties"
+    }] = properties;
+    text.push_str(&serde_json::to_string_pretty(&context)?);
     text.push_str("\n</references>\n");
     let files = chips
         .iter()
         .filter_map(|chip| chip.file.clone())
+        .filter(|file| file.ends_with(".py"))
         .collect::<BTreeSet<_>>();
     let mut budget = MAX_SOURCE_BYTES;
     for file in files {

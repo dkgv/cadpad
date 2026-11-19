@@ -2,7 +2,7 @@ import type {Anchor,DimensionDefinition,Entity,GeometryRef} from './index';
 export interface Inspection {
   revision:string;
   pose_version:number;
-  entities?:{reference:Entity;anchor?:Extract<Anchor,{kind:'geometry_center'}>;circular_definition?:Extract<DimensionDefinition,{kind:'geometry_circle'}>}[];
+  entities?:{reference:Entity;anchor?:Extract<Anchor,{kind:'geometry_center'|'local_point'}>;circular_definition?:Extract<DimensionDefinition,{kind:'geometry_circle'}>}[];
 }
 interface PartFeatures {instance_id:string;features?:Record<string,string[]>}
 function inspected(selection:Entity,inspection:Inspection|null){
@@ -19,6 +19,7 @@ export function selectedAnchor(selection:Entity|null,part:PartFeatures|undefined
   const feature=uniqueFeature(selection,part);
   if(feature)return {kind:'feature_center',instance_id:part.instance_id,feature};
   const anchor=inspected(selection,inspection)?.anchor;
+  if(anchor?.kind==='local_point'&&anchor.instance_id===selection.instance_id&&Array.isArray(anchor.point)&&anchor.point.length===3&&anchor.point.every(Number.isFinite))return anchor;
   return anchor?.kind==='geometry_center'&&anchor.instance_id===selection.instance_id&&validReference(anchor.entity)&&anchor.entity.entity_kind===selection.entity_id.split(':')[0]?anchor:null;
 }
 export function selectedCircle(selection:Entity|null,part:PartFeatures|undefined,inspection:Inspection|null,measure:'radius'|'diameter'):DimensionDefinition|null{

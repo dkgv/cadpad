@@ -4,28 +4,21 @@ import {App,hasUnsavedChanges,type Project} from './app';
 import {DockArea,DockContent,group,groups,placeTab,placeTabs,removeTab,updateGroup,validateDock,dockId,type DockNode,type DockTab,type DockEdge} from './dock-layout';
 import {DockDragProvider,DockOuterTarget,type DockDragPayload} from './dock-drag';
 import type {SessionHost,ToolTab,MessageSink,SelectionContext} from './session-host';
-import {Icon} from './ui';
+import {Icon,ModelOpening} from './ui';
+import {measureModelOpen} from './model-open-timing';
 import {ProjectEntry,type EntrySelection} from './project-entry';
 import {SidebarSections} from './sidebar-sections';
 import {AppAlert} from './app-alert';
-import {StlPreview} from './stl-preview';
 import './workbench.css';
 
 type Area='canvas'|'left'|'right';
-type DocumentTab={kind?:'changes';id:string;workspace:string;name:string;dirty:boolean;pending?:boolean;modelEntry?:{entry:string;builder:string;project:string}};
-function isStlEntry(model?: DocumentTab['modelEntry']) {
-  return model?.builder==='$file'&&/\.stl$/i.test(model.entry);
-}
-type ModelOpen={identity:string;cancelled:boolean;done:boolean;dropped:boolean;reused:boolean;docClosed:boolean;workspace:string;jobId:string;docId:string;promise:Promise<void>};
+type DocumentTab={kind?:'changes';id:string;workspace:string;name:string;dirty:boolean;pending?:boolean;opening?:boolean;modelEntry?:{entry:string;builder:string;project:string}};
+type ModelOpen={identity:string;cancelled:boolean;dropped:boolean;reused:boolean;docClosed:boolean;workspace:string;jobId:string;docId:string;promise:Promise<void>};
 function modelJob(job:unknown):{id:string;state:string}|undefined{
   if(!job||typeof job!=='object')return;
   const record=job as {id?:unknown;state?:unknown};
   if(typeof record.id!=='string'||typeof record.state!=='string'||!record.id)return;
   return {id:record.id,state:record.state};
-}
-function modelPending(project:Project,job?:{state:string}){
-  const state=job?.state??project.activity.find(item=>['queued','running'].includes(item.state))?.state;
-  return !!state&&['queued','running'].includes(state)&&project.model.parts.length===0;
 }
 type Layout={projectWorkspace?:string;canvas:DockNode;left:DockNode;right:DockNode;documents:DocumentTab[];focus:string;leftWidth:number;rightWidth:number;expanded:ToolTab[];locations:Partial<Record<ToolTab,Area>>;sectionWeights:Partial<Record<ToolTab,number>>};
 const key='cadpad.dock-layout.v2';
@@ -78,7 +71,7 @@ function restore(project:Project,known:Set<string>):Layout{
   try{
     const text=localStorage.getItem(key)??localStorage.getItem('cadpad.dock-layout.v1');if(!text||text.length>64000)return fallback;
     const saved=JSON.parse(text) as Layout;
-    const documents=Array.isArray(saved.documents)?saved.documents.filter(doc=>doc.kind!=='changes'&&typeof doc.id==='string'&&typeof doc.name==='string'&&/^[\w-]+$/.test(doc.id)&&known.has(doc.workspace)&&(saved.projectWorkspace?known.has(saved.projectWorkspace):doc.workspace===project.workspace_id)).slice(0,32):[];
+    const documents=Array.isArray(saved.documents)?saved.documents.filter(doc=>!doc.pending&&doc.kind!=='changes'&&typeof doc.id==='string'&&typeof doc.name==='string'&&/^[\w-]+$/.test(doc.id)&&known.has(doc.workspace)&&(saved.projectWorkspace?known.has(saved.projectWorkspace):doc.workspace===project.workspace_id)).slice(0,32):[];
     if(saved.projectWorkspace&&!documents.some(doc=>doc.workspace===project.workspace_id))return fallback;
     const canvas=validateDock(saved.canvas,new Set(documents.map(doc=>doc.id)));
     const seen=new Set<string>(),left=validateDock(saved.left,new Set(toolIds),0,seen),right=validateDock(saved.right,new Set(toolIds),0,seen);
@@ -96,7 +89,7 @@ function restore(project:Project,known:Set<string>):Layout{
     const used=new Set(groups(canvas).flatMap(g=>g.tabs));
     const restored=documents.filter(doc=>used.has(doc.id)).map(doc=>{
       const staleView=!doc.modelEntry&&doc.workspace===project.workspace_id&&!!project.model_entry;
-      return {...doc,name:staleView?project.name||'Untitled':modelTabTitle(undefined,doc.name,doc.modelEntry)};
+      return {...doc,opening:false,name:staleView?project.name||'Untitled':modelTabTitle(undefined,doc.name,doc.modelEntry)};
     });if(!restored.length)return fallback;
     return {projectWorkspace:saved.projectWorkspace??project.workspace_id,canvas,left:leftNorm.node,right:rightNorm.node,documents:restored,focus:groups(canvas).some(g=>g.active===saved.focus)?saved.focus:groups(canvas).map(g=>g.active).find(Boolean)??restored[0].id,leftWidth:Number.isFinite(saved.leftWidth)?Math.max(220,Math.min(640,saved.leftWidth)):320,rightWidth:Number.isFinite(saved.rightWidth)?Math.max(220,Math.min(640,saved.rightWidth)):320,expanded,locations,sectionWeights};
   }catch{return fallback;}
@@ -135,10 +128,8 @@ export function Workbench(){
   const mounted=useRef(new Set<string>());
   const chromeId=useRef<string|null>(null);
   const chromeDocument=useRef<{project:string;document:DocumentTab}|null>(null);
+  const openTimings=useRef(new Map<string,ReturnType<typeof measureModelOpen>>());
   const openingModels=useRef(new Map<string,ModelOpen>());
-  const activeOpen=useRef<ModelOpen|null>(null);
-  const [canvasOpening,setCanvasOpening]=useState(false);
-  const [openingModel,setOpeningModel]=useState<{entry:string;builder:string}|null>(null);
   const memoryPolicy=useRef(Promise.resolve());
   const menuBridge=useRef<Channel<string>|null>(null),viewBridge=useRef<Channel<any>|null>(null);
   const modelViews=useRef(new Map<string,{workspace:string;sourceRevision:string}>());
@@ -180,14 +171,20 @@ export function Workbench(){
     const pane=layout?.focus?hosts.current.get(layout.focus)?.closest<HTMLElement>('[data-dock-group]'):null;
     if(pane?.isConnected)activePane.current=pane;
   },[layout?.focus]);
-  useEffect(()=>{const doc=layout?.documents.find(doc=>doc.id===layout.focus);if(doc)void invoke('switch_project',{workspace:doc.workspace}).catch(error=>setFailure(describeError(error)));},[layout?.focus]);
+  useEffect(()=>{
+    if(!layout)return;
+    const live=new Set(layout.documents.map(doc=>doc.id));
+    for(const id of openTimings.current.keys())if(!live.has(id))openTimings.current.delete(id);
+  },[layout?.documents]);
+  const focusedWorkspace=layout?.documents.find(doc=>doc.id===layout.focus&&!doc.pending)?.workspace;
+  useEffect(()=>{
+    if(!focusedWorkspace)return;
+    let active=true;
+    void invoke('focus_project',{workspace:focusedWorkspace}).catch(error=>{if(active)setFailure(describeError(error));});
+    return()=>{active=false;};
+  },[focusedWorkspace]);
   useEffect(()=>{if(!layout||layout.documents.length)return;void invoke('update_native_menu',{status:{has_project:false,has_parts:false,working:false,busy:false,can_undo:false,editing:false,dimensions:false,advanced:false,document_name:'Cadpad',inspector:'',model_browser_open:false,motion_panel_open:false,has_selection:false,has_hidden_parts:false,selection_mode:'face',dimension_scope:'selected',workspaces:known.filter(ws=>!ws.model_parent).map(ws=>({id:ws.workspace_id,name:ws.name,selected:false,running:!!ws.running}))}}).catch(()=>{});},[layout?.documents.length,known]);
   function focus(area:Area,groupId:string,tab:string){
-    if(area==='canvas'&&activeOpen.current?.docId!==tab){
-      activeOpen.current=null;
-      setCanvasOpening(false);
-      setOpeningModel(null);
-    }
     update(current=>{
       const node=groups(current[area]).find(g=>g.id===groupId);if(node?.active===tab&&(area!=='canvas'||current.focus===tab))return current;
       return {...current,[area]:updateGroup(current[area],groupId,g=>({...g,active:tab})),focus:area==='canvas'?tab:current.focus};
@@ -228,7 +225,6 @@ export function Workbench(){
   }
   function releaseOpen(open:ModelOpen){
     open.cancelled=true;
-    if(activeOpen.current===open)activeOpen.current=null;
     if(open.docId&&!open.docClosed){open.docClosed=true;closeDocument(open.docId);}
     if(!open.workspace||open.dropped||open.reused)return;
     open.dropped=true;
@@ -238,15 +234,8 @@ export function Workbench(){
     if(jobId)void invoke('stop',{workspace,jobId}).catch(()=>{});
     void invoke('forget_workspace',{workspace}).catch(()=>{});
   }
-  function noteModelProgress(project:Project){
-    const open=activeOpen.current;
-    if(!open||open.cancelled||open.workspace!==project.workspace_id)return;
-    if(!modelPending(project))open.done=true;
-    const document=state.current?.documents.find(doc=>doc.id===open.docId);
-    if(open.done||!isStlEntry(document?.modelEntry))setCanvasOpening(false);
-    if(open.done)activeOpen.current=null;
-  }
   async function openModel(document:string,entry:string,builder:string){
+    const started=performance.now();
     const current=state.current,source=current?.documents.find(doc=>doc.id===document)
       ??(chromeDocument.current?.document.id===document?chromeDocument.current.document:undefined);
     if(!current||!source)return;
@@ -255,17 +244,11 @@ export function Workbench(){
     const identity=JSON.stringify([project,entry,builder]);
     const existing=current.documents.find(doc=>!doc.pending&&doc.modelEntry?.project===project&&doc.modelEntry.entry===entry&&doc.modelEntry.builder===builder);
     if(existing){
-      activeOpen.current=null;
-      setCanvasOpening(false);
-      setOpeningModel(null);
       focusDocument(existing.id);
       return;
     }
     const pending=openingModels.current.get(identity);
-    if(pending&&!pending.cancelled&&!pending.done){
-      activeOpen.current=pending;
-      setCanvasOpening(true);
-      setOpeningModel({entry,builder});
+    if(pending&&!pending.cancelled){
       if(pending.docId)focusDocument(pending.docId);
       return pending.promise;
     }
@@ -273,13 +256,12 @@ export function Workbench(){
     if(current.documents.length+allocating>=32){setFailure('Close a model tab before opening another.');return;}
     const sourceProject=projects.current.get(project)||projects.current.get(root.workspace)||projects.current.get(source.workspace);
     if(!sourceProject)return;
-    setCanvasOpening(true);
-    setOpeningModel({entry,builder});
-    const open:ModelOpen={identity,cancelled:false,done:false,dropped:false,reused:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
+    const open:ModelOpen={identity,cancelled:false,dropped:false,reused:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
+    const timing=measureModelOpen(entry,builder,started,()=>open.reused);
     openingModels.current.set(identity,open);
-    activeOpen.current=open;
-    const placeholder:DocumentTab={id:dockId(),workspace:project,name:modelTabTitle(undefined,entry,{entry,builder}),dirty:false,pending:true,modelEntry:{entry,builder,project}};
+    const placeholder:DocumentTab={id:dockId(),workspace:project,name:modelTabTitle(undefined,entry,{entry,builder}),dirty:false,pending:true,opening:true,modelEntry:{entry,builder,project}};
     open.docId=placeholder.id;
+    openTimings.current.set(placeholder.id,timing);
     update(layout=>{
       const target=groups(layout.canvas).find(pane=>pane.tabs.includes(layout.focus))||groups(layout.canvas)[0];
       return {...layout,documents:[...layout.documents,placeholder],canvas:placeTab(layout.canvas,placeholder.id,target.id),focus:placeholder.id};
@@ -293,17 +275,15 @@ export function Workbench(){
           catch{modelViews.current.delete(identity);}
         }
         result??=await invoke<{project:Project;job:unknown}>('open_project_model',{workspace:sourceProject.workspace_id,revision:sourceProject.revision,entry,builder,cachedView:cached?.sourceRevision===sourceProject.revision?cached.workspace:undefined});
+        timing('backend');
         const job=modelJob(result.job)??modelJob(result.project.activity.find(item=>['queued','running'].includes(item.state))??result.project.activity.at(-1));
         open.workspace=result.project.workspace_id;
         open.reused=open.workspace===cached?.workspace;
         open.jobId=job?.id??'';
         if(open.cancelled||state.current?.projectWorkspace!==project||!state.current.documents.some(doc=>doc.id===open.docId)){
-          const active=activeOpen.current===open;
           releaseOpen(open);
-          if(active)setCanvasOpening(false);
           return;
         }
-        if(!modelPending(result.project,job))open.done=true;
         if(modelViews.current.size>=128&&!modelViews.current.has(identity))modelViews.current.delete(modelViews.current.keys().next().value!);
         modelViews.current.set(identity,{workspace:result.project.workspace_id,sourceRevision:sourceProject.revision});
         projects.current.set(result.project.workspace_id,result.project);
@@ -312,11 +292,8 @@ export function Workbench(){
       }catch(error){
         if(!open.cancelled&&state.current?.projectWorkspace===project)setFailure(describeError(error));
         closeDocument(open.docId);
-        open.done=true;
-        if(activeOpen.current===open){activeOpen.current=null;setCanvasOpening(false);}
       }finally{
         if(openingModels.current.get(identity)===open)openingModels.current.delete(identity);
-        setOpeningModel(current=>current?.entry===entry&&current.builder===builder?null:current);
       }
     })();
     open.promise=task;
@@ -583,13 +560,12 @@ export function Workbench(){
     {!layout.documents.length&&<header className="app-header workbench-empty-header" data-tauri-drag-region/>}
     <div className="docked-main">{!groups(layout.left).some(g=>g.tabs.length)&&<DockOuterTarget area="left" group={groups(layout.left)[0].id}/>} {!groups(layout.right).some(g=>g.tabs.length)&&<DockOuterTarget area="right" group={groups(layout.right)[0].id}/>}<Slot host={rail} className="workbench-rail-slot"/>
       {!!layout.documents.length&&groups(layout.left).some(g=>g.tabs.length)&&<><div className="docked-sidebar left" style={{width:layout.leftWidth}}>{area('left')}</div><WidthDivider side="left" value={layout.leftWidth} onChange={width=>update(current=>({...current,leftWidth:width}))}/></>}
-      <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<AppAlert message={failure} onDismiss={()=>setFailure('')}/>}{!!layout.documents.length&&area('canvas')}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Create a project, open a project folder, or continue a recent project.</p><div className="dock-welcome-actions"><button onClick={()=>void action('new-project')}><Icon name="plus" size={15}/>New project…</button><button className="primary-button" onClick={()=>void action('open')}><Icon name="folder" size={15}/>Open project…</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.filter(ws=>!ws.model_parent).slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span>{ws.name||'Untitled'}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}{canvasOpening&&!isStlEntry(focusDoc?.modelEntry)&&<div className="canvas-model-opening"><div className="empty model-opening" role="status"><span className="model-opening-spinner" aria-hidden="true"/><h1>Opening model…</h1><p>Building geometry for this tab.</p></div></div>}</div>
+      <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<AppAlert message={failure} onDismiss={()=>setFailure('')}/>}{!!layout.documents.length&&area('canvas')}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Create a project, open a project folder, or continue a recent project.</p><div className="dock-welcome-actions"><button onClick={()=>void action('new-project')}><Icon name="plus" size={15}/>New project…</button><button className="primary-button" onClick={()=>void action('open')}><Icon name="folder" size={15}/>Open project…</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.filter(ws=>!ws.model_parent).slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span>{ws.name||'Untitled'}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}</div>
       {!!layout.documents.length&&groups(layout.right).some(g=>g.tabs.length)&&<><WidthDivider side="right" value={layout.rightWidth} onChange={width=>update(current=>({...current,rightWidth:width}))}/><div className="docked-sidebar right" style={{width:layout.rightWidth}}>{area('right')}</div></>}
     </div>
-    {canvasOpening&&focusDoc?.modelEntry&&isStlEntry(focusDoc.modelEntry)&&
-      <DockContent key={focusDoc.id+':preview'} host={host(focusDoc.id)}>
-        <StlPreview workspace={focusDoc.modelEntry.project} entry={focusDoc.modelEntry.entry}/>
-      </DockContent>}
+    {layout.documents.filter(doc=>doc.opening).map(doc=>
+      <DockContent key={`opening:${doc.id}`} host={host(doc.id)}><ModelOpening/></DockContent>
+    )}
     {[...layout.documents,...(chromeDocument.current&&!layout.documents.some(doc=>doc.id===chromeId.current)?[chromeDocument.current.document]:[])].filter(doc=>{
       if(doc.pending||doc.kind==='changes')return false;
       if(visible.has(doc.id)||doc.id===chromeId.current)mounted.current.add(doc.id);
@@ -597,12 +573,16 @@ export function Workbench(){
     }).map(doc=>{
       const sessionHost:SessionHost={
         workspaceId:doc.workspace,modelEntry:doc.modelEntry,onOpenModel:(entry,builder)=>openModel(doc.id,entry,builder),
+        openTiming:openTimings.current.get(doc.id),
         active:doc.id===layout.focus,chrome:doc.id===chromeId.current,visible:visible.has(doc.id),
-        projectWorkspace,focusWorkspace,focusModelEntry:focusDoc?.modelEntry,openingModel:openingModel??undefined,focusSelection:selections[focusWorkspace],
+        projectWorkspace,focusWorkspace,focusModelEntry:focusDoc?.modelEntry,openingModel:focusDoc?.opening?focusDoc.modelEntry:undefined,focusSelection:selections[focusWorkspace],
         onSelection:context=>setSelections(current=>({...current,[context.workspace]:context})),initialProject:projects.current.get(doc.workspace),
         changes:host('$changes'),openChanges,closeChanges,
         header,rail,notices,tools:toolHosts,visibleTools,showTool,onOpen:openProject,onOpenWorkspace:workspace=>void openWorkspace(workspace),
-        onProject:project=>{noteModelProgress(project);projects.current.set(project.workspace_id,project);update(current=>{const prior=current.documents.find(item=>item.id===doc.id);const fallback=prior?.modelEntry?prior.name:project.name||'Untitled';const name=modelTabTitle(project,fallback,prior?.modelEntry);if(prior&&prior.name===name&&prior.dirty===hasUnsavedChanges(project))return current;return {...current,documents:current.documents.map(item=>item.kind!=='changes'&&item.workspace===project.workspace_id?{...item,name:modelTabTitle(project,item.modelEntry?item.name:project.name||'Untitled',item.modelEntry),dirty:hasUnsavedChanges(project)}:item)};});},
+        onOpeningSettled:doc.opening?()=>update(current=>({
+          ...current,documents:current.documents.map(item=>item.id===doc.id?{...item,opening:false}:item),
+        })):undefined,
+        onProject:project=>{projects.current.set(project.workspace_id,project);update(current=>{const prior=current.documents.find(item=>item.id===doc.id);const fallback=prior?.modelEntry?prior.name:project.name||'Untitled';const name=modelTabTitle(project,fallback,prior?.modelEntry);if(prior&&prior.name===name&&prior.dirty===hasUnsavedChanges(project))return current;return {...current,documents:current.documents.map(item=>item.kind!=='changes'&&item.workspace===project.workspace_id?{...item,name:modelTabTitle(project,item.modelEntry?item.name:project.name||'Untitled',item.modelEntry),dirty:hasUnsavedChanges(project)}:item)};});},
         connectMenu:channel=>connectMenu(doc.id,channel),connectView:channel=>connectView(doc.id,channel),
       };
       return <DockContent key={doc.id} host={host(doc.id)}><App host={sessionHost}/></DockContent>;

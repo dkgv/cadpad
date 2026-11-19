@@ -1,7 +1,22 @@
-import React,{useEffect,useId,useRef,useState} from 'react';
+import React,{useEffect,useId,useMemo,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
 import {Icon,errorSummary} from './ui';
 import {indexedModels,loadSourceIndex,modelCaption,useSourceCatalogEpoch,type IndexedModel} from './source-catalog';
+
+function normalizeSearch(value:string){
+  return value.toLowerCase().replace(/[_\s]+/g,' ');
+}
+
+function fuzzyGap(query:string,value:string){
+  let end=0,gap=0;
+  for(const character of query){
+    const index=value.indexOf(character,end);
+    if(index===-1)return Infinity;
+    if(end>0)gap+=index-end;
+    end=index+character.length;
+  }
+  return gap;
+}
 
 export function QuickModelSelector({open,workspace,revision,activeEntry,activeBuilder,busy,onClose,onChoose}:{
   open:boolean;workspace:string;revision:string;activeEntry?:string;activeBuilder?:string;busy?:boolean;onClose:()=>void;onChoose:(path:string,builder:string)=>void;
@@ -13,8 +28,23 @@ export function QuickModelSelector({open,workspace,revision,activeEntry,activeBu
   const choose=useRef(onChoose);choose.current=onChoose;
   const id=useId();
   const catalogEpoch=useSourceCatalogEpoch();
-  const search=query.trim().toLowerCase();
-  const matches=models.filter(({file,builder})=>`${modelCaption(builder)} ${builder.label} ${file.path} ${file.description}`.toLowerCase().includes(search));
+  const search=normalizeSearch(query.trim());
+  const matches=useMemo(()=>{
+    if(!search)return models;
+    const literal:IndexedModel[]=[];
+    const fuzzy:{model:IndexedModel;gap:number}[]=[];
+    for(const model of models){
+      const {file,builder}=model;
+      const fields=[modelCaption(builder),builder.label,file.path,file.description];
+      if(normalizeSearch(fields.join(' ')).includes(search)){
+        literal.push(model);
+        continue;
+      }
+      const gap=Math.min(...fields.map(value=>fuzzyGap(search,normalizeSearch(value))));
+      if(Number.isFinite(gap))fuzzy.push({model,gap});
+    }
+    return [...literal,...fuzzy.sort((a,b)=>a.gap-b.gap).map(({model})=>model)];
+  },[models,search]);
   useEffect(()=>{
     if(!open)return;
     let active=true;setQuery('');setHighlight(0);setLoading(true);setError('');setModels([]);
@@ -44,7 +74,7 @@ export function QuickModelSelector({open,workspace,revision,activeEntry,activeBu
         event.preventDefault();setHighlight(current=>matches.length?(current+(event.key==='ArrowDown'?1:-1)+matches.length)%matches.length:0);input.current?.focus();
       }else if(event.key==='Enter'&&event.target===input.current){event.preventDefault();const match=matches[highlight];if(match)select(match.file.path,match.builder.id);}
     }}>
-      <div className="quick-model-search"><Icon name="search" size={18}/><input ref={input} type="search" aria-label="Search models" placeholder="Go to model…" value={query} onChange={event=>setQuery(event.target.value)} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={`${id}-results`} aria-activedescendant={matches[highlight]?`${id}-option-${highlight}`:undefined}/></div>
+      <div className="quick-model-search"><Icon name="search" size={18}/><input ref={input} type="search" autoCorrect="off" autoComplete="off" autoCapitalize="off" spellCheck={false} aria-label="Search models" placeholder="Go to model…" value={query} onChange={event=>setQuery(event.target.value)} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={`${id}-results`} aria-activedescendant={matches[highlight]?`${id}-option-${highlight}`:undefined}/></div>
       <div className="quick-model-results" role="listbox" id={`${id}-results`} aria-label="Project models" aria-busy={loading||!!busy}>
         {loading&&<p className="quick-model-empty" role="status">Indexing project models…</p>}
         {error&&<p className="quick-model-empty" role="alert">{error}</p>}

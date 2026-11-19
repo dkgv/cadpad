@@ -1,5 +1,6 @@
 export type MessageSink<T>={onmessage:(message:T)=>void};
 import type {Project} from './app';
+import type {ModelOpenFrame,OpenStage} from './model-open-timing';
 import type {Entity} from '@cadpad/viewer';
 export type SelectionContext={workspace:string;revision:string;entities:Entity[];omitted:Set<string>;capture:()=>string|null;toggleOmitted:(entity:Entity)=>void;clear:()=>void};
 export type ToolTab='model'|'move'|'simulate'|'test'|'assistant';
@@ -19,6 +20,8 @@ export type SessionHost={
   openingModel?:{entry:string;builder:string};
   focusSelection?:SelectionContext;
   onSelection?:(context:SelectionContext)=>void;
+  onOpeningSettled?:()=>void;
+  openTiming?:(stage:OpenStage)=>ModelOpenFrame|undefined;
   changes:HTMLElement;openChanges:()=>void;closeChanges:()=>void;
   header:HTMLElement;rail:HTMLElement;notices:HTMLElement;tools:Record<ToolTab,HTMLElement>;
   visibleTools:ToolTab[];
