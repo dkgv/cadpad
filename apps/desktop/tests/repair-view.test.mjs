@@ -76,6 +76,21 @@ beforeEach(()=>{
 afterEach(()=>{viewport.dispose();container.remove();delete globalThis.__cadpadViewportHarness;});
 after(async()=>{dom.window.close();await fs.rm(directory,{recursive:true,force:true});});
 
+test('first frame centers and fits a small part away from the origin',async()=>{
+  const initial=model();
+  initial.scene.parts=initial.scene.parts.slice(0,1);
+  initial.scene.parts[0].position=[160,0,128];
+  await viewport.load(initial.scene,'r1',initial.artifact,'workspace-1');
+  near(viewer.getCameraLocationSettings().target,[165,5,128]);
+  const camera=viewer.camera.getCamera();
+  const corners=[[160,0,128],[170,0,128],[160,10,128],[170,10,128]];
+  const extent=Math.max(...corners.flatMap(point=>{
+    const projected=new THREE.Vector3(...point).project(camera);
+    return [Math.abs(projected.x),Math.abs(projected.y)];
+  }));
+  assert.ok(extent>0.9&&extent<0.94,`projected half extent: ${extent}`);
+});
+
 for(const orthographic of [true,false])test(`diagonal cube views preserve ${orthographic?'orthographic':'perspective'} target, distance and zoom`,async()=>{
   const initial=model();await viewport.load(initial.scene,'r1',initial.artifact,'workspace-1');
   viewer.switchCamera(orthographic);

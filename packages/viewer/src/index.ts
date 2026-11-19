@@ -362,6 +362,7 @@ export class CadViewport {
     this.viewer.glassMode(true);
     this.setAdvancedTools(this.advancedTools);
     for(const [path,part] of this.paths)if(!this.visible.has(part.instance_id))setRenderedVisibility(this.viewer,path,false);
+    if(!this.repairCamera)this.frameVisible();
     this.highlight(this.selectedEntity,false);
     this.drawMotionHints();
     this.drawReferences();
@@ -778,7 +779,7 @@ export class CadViewport {
     }
     this.updateAnnotationPoses(); this.viewer.update(true);
   }
-  capture(options: {width?:number;height?:number;dimensions?:boolean;camera_preset?:'iso'|'front'|'rear'|'top'|'bottom'|'left'|'right';camera?:{position:Vec3;quaternion:[number,number,number,number];target:Vec3;zoom:number;orthographic:boolean}} = {}) {
+  capture(options: {width?:number;height?:number;dimensions?:boolean;trimTransparentMargins?:boolean;camera_preset?:'iso'|'front'|'rear'|'top'|'bottom'|'left'|'right';camera?:{position:Vec3;quaternion:[number,number,number,number];target:Vec3;zoom:number;orthographic:boolean}} = {}) {
     if (!this.presented) throw Object.assign(new Error('No committed geometry is displayed'),{code:'VIEW_NOT_READY'});
     const savedCamera=this.viewer.getCameraLocationSettings(), savedOrtho=this.viewer.ortho;
     const savedDimensions=this.dimensions, savedScope=this.scope;
@@ -818,7 +819,35 @@ export class CadViewport {
         context.font=`700 ${12*pixelScale}px -apple-system,BlinkMacSystemFont,sans-serif`;context.fillStyle='#ffffff';context.textAlign='center';context.textBaseline='middle';
         context.fillText(badge.letter,point.x,point.y+.5*pixelScale);context.textAlign='start';
       }
-      return {image:output.toDataURL('image/png').split(',')[1],camera:{...this.viewer.getCameraLocationSettings(),orthographic:this.viewer.ortho},revision:this.revision,pose_version:this.motion?.pose_version||0,visible_part_ids:[...this.visible]};
+      let imageCanvas=output;
+      if(options.trimTransparentMargins){
+        const {width,height}=output;
+        const {data}=context.getImageData(0,0,width,height);
+        let left=width,top=height,right=-1,bottom=-1;
+        for(let y=0;y<height;y++){
+          for(let x=0;x<width;x++){
+            if(!data[(y*width+x)*4+3])continue;
+            left=Math.min(left,x);top=Math.min(top,y);
+            right=Math.max(right,x);bottom=Math.max(bottom,y);
+          }
+        }
+        if(right>=left&&bottom>=top){
+          const padding=Math.round(8*pixelScale);
+          left=Math.max(0,left-padding);top=Math.max(0,top-padding);
+          right=Math.min(width-1,right+padding);bottom=Math.min(height-1,bottom+padding);
+          const cropWidth=right-left+1,cropHeight=bottom-top+1;
+          if(cropWidth!==width||cropHeight!==height){
+            const cropped=document.createElement('canvas');
+            cropped.width=cropWidth;cropped.height=cropHeight;
+            const cropContext=cropped.getContext('2d');
+            if(cropContext){
+              cropContext.drawImage(output,left,top,cropWidth,cropHeight,0,0,cropWidth,cropHeight);
+              imageCanvas=cropped;
+            }
+          }
+        }
+      }
+      return {image:imageCanvas.toDataURL('image/png').split(',')[1],camera:{...this.viewer.getCameraLocationSettings(),orthographic:this.viewer.ortho},revision:this.revision,pose_version:this.motion?.pose_version||0,visible_part_ids:[...this.visible]};
     }finally{
       if(this.contextLost){
         // A capture's temporary camera must not become the user's recovery view.
