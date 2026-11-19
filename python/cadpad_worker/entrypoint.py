@@ -6,16 +6,23 @@ import json
 def index_sources(args):
     """Build a source catalog without importing project modules or constructing CAD."""
     from .part_index import detect
-    detected = detect(args['sources'])
-    files = []
-    for entry, source in sorted(args['sources'].items()):
-        plan = analyze(dict(entry=entry, source=source, include_source=False))
+    trees, diagnostics = {}, {}
+    for entry, source in args['sources'].items():
         try:
-            tree = ast.parse(source)
-            lines = {node.name: node.lineno for node in tree.body if isinstance(node, ast.FunctionDef)}
-            description = (ast.get_docstring(tree) or '').split('\n')[0][:240]
-        except SyntaxError:
-            lines, description = {}, ''
+            trees[entry] = ast.parse(source, filename=entry)
+        except SyntaxError as error:
+            diagnostics[entry] = syntax_diagnostic(entry, error)
+    detected = detect(trees)
+    files = []
+    for entry in sorted(args['sources']):
+        tree = trees.get(entry)
+        if tree is None:
+            files.append(dict(path=entry, description='', builders=[], recommended=None,
+                              diagnostic=diagnostics[entry]))
+            continue
+        plan = analyze_tree(dict(entry=entry, include_source=False), tree)
+        lines = {node.name: node.lineno for node in tree.body if isinstance(node, ast.FunctionDef)}
+        description = (ast.get_docstring(tree) or '').split('\n')[0][:240]
         builders = [{key: option[key] for key in ('id', 'label', 'available', 'reason')}
                     | {'line': lines.get(option['id'].split(':')[0], 1),
                        'kind': 'geometry_candidate' if option['id'].split(':')[0] in detected.get(entry, {}) else 'function',
@@ -79,13 +86,22 @@ def build(context):
 ''' + ("    # Context builders may publish directly instead of returning geometry.\n" if context else "    if count == 0:\n        raise ValueError('The selected builder returned no CadQuery geometry. Choose another builder or edit this entry point.')\n")
 
 
+def syntax_diagnostic(entry, error):
+    return f"{entry}:{error.lineno}: {error.msg}"
+
+
 def analyze(args):
     entry, source = args['entry'], args['source']
     try:
         tree = ast.parse(source, filename=entry)
     except SyntaxError as error:
         return dict(options=[], recommended=None, has_main=False, direct=False,
-                    diagnostic=f"{entry}:{error.lineno}: {error.msg}")
+                    diagnostic=syntax_diagnostic(entry, error))
+    return analyze_tree(args, tree)
+
+
+def analyze_tree(args, tree):
+    entry = args['entry']
     include_source = args.get('include_source', True)
     options = []
     has_main = any(isinstance(node, ast.If) and '__name__' in ast.unparse(node.test) and '__main__' in ast.unparse(node.test) for node in tree.body)

@@ -12,16 +12,12 @@ _GEOMETRY_METHODS = {
 }
 
 
-def detect(sources):
+def detect(trees):
     modules, paths = {}, {}
-    for path, source in sources.items():
+    for path, tree in trees.items():
         module = path[:-3].replace('/', '.')
         if module.endswith('.__init__'):
             module = module[:-9]
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            continue
         modules[module] = (path, tree)
         paths[path] = module
 
@@ -106,14 +102,18 @@ def detect(sources):
             yield node
             pending.extend(ast.iter_child_nodes(node))
 
+    function_nodes = {key: [node for node in body_nodes(function)
+                            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.Call, ast.Return))]
+                      for key, (_, function) in functions.items()}
     for _ in range(len(functions) + 1):
         added = False
         for key, (module, function) in functions.items():
             if key in geometry:
                 continue
             env, variables = envs[module], set()
-            nodes = list(body_nodes(function))
+            nodes = function_nodes[key]
             for _ in range(4):
+                previous_size = len(variables)
                 for node in nodes:
                     if isinstance(node, (ast.Assign, ast.AnnAssign)) and shape(node.value, env, variables):
                         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -121,6 +121,8 @@ def detect(sources):
                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('append', 'extend') and any(shape(arg, env, variables) for arg in node.args):
                         if isinstance(node.func.value, ast.Name):
                             variables.add(node.func.value.id)
+                if len(variables) == previous_size:
+                    break
             returns_shape = any(isinstance(node, ast.Return) and shape(node.value, env, variables) for node in nodes)
             publishes = any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id in ('context', 'ctx') and node.func.attr == 'show' for node in nodes)
             if returns_shape or publishes:

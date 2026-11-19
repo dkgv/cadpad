@@ -8,7 +8,6 @@ import json
 import math
 import os
 import runpy
-import struct
 import sys
 import uuid
 from collections import OrderedDict
@@ -338,9 +337,10 @@ class Model:
         from .display_cache import policy, offers
         self._display_policy = policy(self, geometry_fingerprint, FINGERPRINT_FORMAT)
         self._mesh_reuse = offers(args)
-        # Fingerprint every shape before tessellating any shared occurrence.
-        for part in self.parts.values():
-            part.fingerprint = geometry_fingerprint(part.shape)
+        # Snapshot shared occurrences before any of them can be tessellated.
+        if len(self.parts) > 1:
+            for part in self.parts.values():
+                part.fingerprint = geometry_fingerprint(part.shape)
         result = dict(collision_validation=collision_validation, parts=[self.describe(part, mesh=generate_mesh) for part in self.parts.values()],
                       parameters=self.parameters, annotations=self.annotations,
                       units="mm", revision=revision,
@@ -373,6 +373,7 @@ class Model:
         fingerprint = geometry_fingerprint(shape)
         if part.fingerprint is not None and fingerprint != part.fingerprint:
             raise DomainError("RECOVERY_GEOMETRY_CHANGED", "Geometry changed during publication")
+        part.fingerprint = fingerprint
         # Exact intrinsic values depend on BRep, not an occurrence's name,
         # transform, density or semantic feature selections. Never share mutable
         # result dictionaries with the cache or another occurrence.
@@ -424,6 +425,7 @@ class Model:
         from OCP.TopExp import TopExp_Explorer
         from OCP.TopTools import TopTools_IndexedMapOfShape
         from OCP.BRep import BRep_Tool
+        import numpy as np
         displayed_faces = list(get_faces(shape.wrapped))
         # STL import is a shell of one triangular face per facet, not a solid.
         # Those edges are the triangle boundaries. Publishing them makes the
@@ -454,13 +456,16 @@ class Model:
             # which otherwise emits every triangle edge.
             tess = dict(tess, edges=[], segments_per_edge=[], edge_types=[])
         mappings = {}
-        for kind, published, displayed, counts in (
-                ("face", shape.Faces(), displayed_faces, tess["triangles_per_face"]),
-                ("edge", shape.Edges(), displayed_edges, tess["segments_per_edge"])):
+        for kind, get_published, displayed, counts in (
+                ("face", shape.Faces, displayed_faces, tess["triangles_per_face"]),
+                ("edge", shape.Edges, displayed_edges, tess["segments_per_edge"])):
             if len(displayed) != len(counts):
                 raise DomainError("INVALID_GEOMETRY", "Tessellator topology does not match the published shape")
+            if not displayed:
+                mappings[kind] = []
+                continue
             indices = TopTools_IndexedMapOfShape()
-            for entity in published:
+            for entity in get_published():
                 indices.Add(entity.wrapped)
             identifiers = []
             for entity in displayed:
@@ -477,9 +482,10 @@ class Model:
                            ("edges", "f"), ("triangles_per_face", "I"), ("segments_per_edge", "I"), ("obj_vertices", "f"), ("face_types", "I"), ("edge_types", "I")):
             value = tess.get(key)
             if value is not None:
-                array = value.reshape(-1).tolist() if hasattr(value, "reshape") else list(value)
-                finite(array)
-                buffers[key] = self.artifact(struct.pack(f"<{len(array)}{dtype}", *array), ".bin")
+                array = np.asarray(value, dtype="<f4" if dtype == "f" else "<u4")
+                if dtype == "f" and not np.isfinite(array).all():
+                    raise DomainError("INVALID_GEOMETRY", "Geometry contains non-finite values")
+                buffers[key] = self.artifact(array.tobytes(), ".bin")
         result = dict(buffers=buffers, face_ids=mappings["face"],
                       edge_ids=mappings["edge"],
                       format="cadpad-mesh-v2", tolerance_mm=0.1,

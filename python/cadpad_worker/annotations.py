@@ -240,13 +240,13 @@ def automatic_circles(model):
     """Reuse intrinsic discovery, keeping suppression and identities per instance."""
     from .model import intrinsic_reuse_allowed, circular_producers_unchanged
     output, templates = [], {}
-    stock_children = circular_producers_unchanged()
+    can_share_templates = len(model.parts) > 1 and circular_producers_unchanged()
     for instance, part in model.parts.items():
         # Read the actual geometry now: do not trust shape identity or a cached
         # fingerprint left by an earlier call after someone changed the shape.
-        fingerprint = geometry_fingerprint(part.shape)
-        reusable = stock_children and intrinsic_reuse_allowed(part.shape)
-        candidates = templates.get(fingerprint) if reusable else None
+        reusable = can_share_templates and intrinsic_reuse_allowed(part.shape)
+        fingerprint = geometry_fingerprint(part.shape) if reusable else None
+        candidates = templates.get(fingerprint)
         if candidates is None:
             candidates = _automatic_circle_candidates(model, instance, part)
             if reusable:
