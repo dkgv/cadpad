@@ -59,6 +59,7 @@ type AgentTurn = {id:string;workspace_id:string;chat_id?:string;state:'running'|
 type PendingAgentStart={workspace:string;cancelRequested:boolean;turn?:AgentTurn;stopping?:Promise<AgentTurn>};
 type ChatReference={letter:string;instance_id:string;entity_id:string;part:string;label:string;file?:string;line?:number};
 type ChatMessage = {image?:string;checkpoint_revision?:string;role:string;text:string;references?:ChatReference[];steps?:AgentStep[]};
+type MessageEdit=Pick<ChatMessage,'image'|'references'|'text'|'checkpoint_revision'>&{chatId:string;index:number};
 const MAX_REFERENCES=8;
 const MAX_ATTACHED_IMAGE=1024*1024;
 const entityKey=(entity:Entity)=>`${entity.revision}|${entity.instance_id}|${entity.entity_id}`;
@@ -304,9 +305,17 @@ export function App({host}:{host?:SessionHost}={}) {
   // Chat loads and live turn updates are independent; streaming must not drop a
   // just-fetched user message that refreshChat is about to commit.
   const chatEpoch=useRef(0);
-  const [providerOpen,setProviderOpen]=useState(false),[providerSettings,setProviderSettings]=useState<AgentSettings|null>(null),[agentModels,setAgentModels]=useState<ModelChoice[]|null>(null);
+  const [providerOpen,setProviderOpen]=useState(false),[providerSettings,setProviderSettings]=useState<AgentSettings|null>(null);
+  const [agentCatalog,setAgentCatalog]=useState<{backend:string;models:ModelChoice[]}|null>(null);
   const [agentBackend,setAgentBackend]=useState('claude_cli');
   const [modelId,setModelId]=useState(''),[apiKey,setApiKey]=useState(''),[savingProvider,setSavingProvider]=useState(false);
+  const agentConfigPending=useRef(false);
+  const assistantVisible=host?host.chrome&&host.visibleTools.includes('assistant'):assistantOpen;
+  const savedBackend=providerSettings?.backend||providerSettings?.provider;
+  const savedModel=providerSettings?.model||'';
+  const catalogBackend=providerOpen?agentBackend:assistantVisible?savedBackend:undefined;
+  const agentModels=agentCatalog?.backend===agentBackend?agentCatalog.models:null;
+  const composerModels=agentCatalog&&agentCatalog.backend===savedBackend?agentCatalog.models:[];
   const liveTurn=useRef<AgentTurn|null>(null);
   const pendingTurnChat=useRef(new Map<string,string>());
   const settledTurns=useRef(new Set<string>());
@@ -387,15 +396,15 @@ export function App({host}:{host?:SessionHost}={}) {
       throw error;
     }
   }
-  const [editingMessage,setEditingMessage]=useState<{chatId:string;index:number;text:string;revision?:string}|null>(null);
+  const [editingMessage,setEditingMessage]=useState<MessageEdit|null>(null);
   const [editingMessageBusy,setEditingMessageBusy]=useState(false);
   async function submitMessageEdit(){
     const edit=editingMessage,current=currentProject.current;
     if(!edit||!current||!edit.text.trim()||editingMessageBusy)return;
     setEditingMessageBusy(true);setError('');
     try{
-      if(edit.revision&&edit.revision!==current.revision){
-        let job=await invoke<Job>('restore_checkpoint',{workspace:current.workspace_id,revision:current.revision,target:edit.revision});
+      if(edit.checkpoint_revision&&edit.checkpoint_revision!==current.revision){
+        let job=await invoke<Job>('restore_checkpoint',{workspace:current.workspace_id,revision:current.revision,target:edit.checkpoint_revision});
         while(['queued','running'].includes(job.state)){
           await new Promise(resolve=>window.setTimeout(resolve,200));
           job=await invoke<Job>('job',{workspace:current.workspace_id,jobId:job.id});
@@ -406,16 +415,17 @@ export function App({host}:{host?:SessionHost}={}) {
       await invoke('agent_chat',{workspace:current.workspace_id,action:`rewind:${edit.index}`,chatId:edit.chatId});
       await refreshChat(current.workspace_id);
       setEditingMessage(null);
-      await sendPrompt(edit.text,edit.chatId);
+      await sendPrompt(edit.text,edit.chatId,edit);
     }catch(error){setError(message(error));}finally{setEditingMessageBusy(false);}
   }
-  async function sendPrompt(submission?:string,chatId?:string){
-    const current=displayProject||currentProject.current;
+  async function sendPrompt(submission?:string,chatId?:string,edit?:MessageEdit){
+    const latest=currentProject.current;
+    const current=edit&&latest?.workspace_id===displayProject?.workspace_id?latest:displayProject||latest;
     // Chrome keeps one project chat book mounted across model canvases.
     const workspace=chatScope();
     const targetChat=chatId??selectedChat.current?.id??activeChatId??undefined;
     const submitted=submission??(targetChat?draftFor(targetChat):prompt);
-    if(chatChangePending.current||!current||!workspace||!submitted.trim()||pendingAgentStarts.current.has(workspace))return;
+    if(agentConfigPending.current||chatChangePending.current||!current||!workspace||!submitted.trim()||pendingAgentStarts.current.has(workspace))return;
     if(liveTurn.current?.workspace_id===workspace&&['running','cancelling'].includes(liveTurn.current.state))return;
     const previousId=liveTurn.current?.id;
     const pending:PendingAgentStart={workspace,cancelRequested:false};
@@ -423,16 +433,18 @@ export function App({host}:{host?:SessionHost}={}) {
     pendingAgentStarts.current.set(workspace,pending);starting(workspace,'starting');notePendingChat(pendingTab);chatEpoch.current++;setError('');setNotice('');
     // Show the outbound message immediately; refreshChat reconciles with the server.
     if(chatScope()===workspace){
-      const optimistic={role:'user',text:submitted,image:attachedImage?.data};
+      const optimistic={role:'user',text:submitted,image:edit?edit.image:attachedImage?.data,references:edit?.references};
       const base=!targetChat||targetChat===activeChatId?chat:chatMessages[targetChat]||[];
-      const next=[...base,optimistic];
+      const next=[...(edit?base.slice(0,edit.index):base),optimistic];
       if(!targetChat||targetChat===activeChatId)setChat(next);
       if(targetChat)setChatMessages(current=>({...current,[targetChat]:next}));
     }
     try{
       const candidates=remoteSelection?focusedSelection?.entities??[]:referencesNow.current;
-      const attached=current.revision===candidates[0]?.revision?candidates.filter(item=>!composerOmitted.has(entityKey(item))):[];
-      const image=attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
+      const attached=edit
+        ?(edit.references??[]).map(({instance_id,entity_id})=>({revision:current.revision,instance_id,entity_id}))
+        :current.revision===candidates[0]?.revision?candidates.filter(item=>!composerOmitted.has(entityKey(item))):[];
+      const image=edit?edit.image??null:attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
       const turn=await invoke<AgentTurn>('agent_start',{workspace,...(current.workspace_id!==workspace?{modelWorkspace:current.workspace_id}:{}),prompt:submitted,references:attached,image,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
       if(turn.workspace_id!==workspace)throw new Error('Agent reply belongs to another workspace');
       pending.turn=turn;
@@ -440,7 +452,7 @@ export function App({host}:{host?:SessionHost}={}) {
       if(turn.chat_id){if(['succeeded','failed','cancelled'].includes(turn.state))noteSettledChat(turn.chat_id,turn.id);else notePendingChat(turn.chat_id,turn.id);}
       if(chatScope()===workspace&&(!liveTurn.current||liveTurn.current.id===turn.id||liveTurn.current.id===previousId))showTurn(turn);
       if(pending.cancelRequested)await cancelAcceptedStart(pending);
-      if(chatScope()===workspace){if(!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}await refreshChat(workspace);}
+      if(chatScope()===workspace){if(!edit&&!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}await refreshChat(workspace);}
     }catch(error){
       dropPendingStart(pendingTab);
       if(pending.cancelRequested&&!pending.turn){if(chatScope()===workspace)void refreshChat(workspace).catch(()=>{});return;}
@@ -451,7 +463,7 @@ export function App({host}:{host?:SessionHost}={}) {
   /** The live view with references highlighted and lettered, bounded for the model's context. */
   function referenceView():string|null{
     for(const [width,height] of [[1024,768],[768,576]]){
-      try{const image=viewer.current?.capture({width,height,dimensions:false}).image;if(image&&image.length<=MAX_ATTACHED_IMAGE)return image;}catch{return null;}
+      try{const image=viewer.current?.capture({width,height,dimensions:false,trimTransparentMargins:true}).image;if(image&&image.length<=MAX_ATTACHED_IMAGE)return image;}catch{return null;}
     }
     return null;
   }
@@ -486,15 +498,21 @@ export function App({host}:{host?:SessionHost}={}) {
     try{const turn=await invoke<AgentTurn>('agent_stop',{turnId:previous.id});if(activeWorkspace.current===workspace&&liveTurn.current?.id===previous.id){showTurn(turn);if(['succeeded','failed','cancelled'].includes(turn.state))await refreshChat(workspace);}}
     catch(error){if(activeWorkspace.current===workspace&&liveTurn.current?.id===previous.id&&liveTurn.current.state==='cancelling'){const restored={...liveTurn.current,state:previous.state,activity:previous.activity};liveTurn.current=restored;setAgentTurn(restored);setError(message(error));}}
   }
-  async function saveProvider(){
+  async function saveProvider(composerModel?:string){
+    const fromComposer=composerModel!==undefined;
+    const backend=fromComposer?savedBackend:agentBackend;
+    if(!backend||agentConfigPending.current)return;
+    agentConfigPending.current=true;
     setSavingProvider(true);setError('');
     try{
-      const settings=await invoke<AgentSettings>('configure_agent',{backend:agentBackend,model:modelId,apiKey:apiKey||null});
+      const settings=await invoke<AgentSettings>('configure_agent',{backend,model:composerModel??modelId,apiKey:fromComposer?null:apiKey||null});
       setProviderSettings(settings);setAgentBackend(settings.backend||settings.provider);setModelId(settings.model||'');setApiKey('');
+      window.dispatchEvent(new CustomEvent<AgentSettings>('cadpad-agent-settings-changed',{detail:settings}));
+      if(fromComposer)return;
       setProviderOpen(!settings.configured);
       setNotice(settings.configured?'Agent settings saved. Send your request to start modeling.':settings.credential_storage==='local_cli'?'CLI selected. Sign in with that CLI if Cadpad still shows it as unavailable.':'Model saved. Add your API key to start modeling.');
     }
-    catch(e){setError(message(e));}finally{setSavingProvider(false);}
+    catch(e){setError(message(e));}finally{agentConfigPending.current=false;setSavingProvider(false);}
   }
   async function saveAgentArtifact(artifact:{handle:string;format:string;revision:string}){
     if(!project)return;const workspace=project.workspace_id;
@@ -729,16 +747,26 @@ export function App({host}:{host?:SessionHost}={}) {
     return()=>{cancelled=true;};
   },[chatWorkspace,visibleChatKey,activeChatId]);
   useEffect(()=>{
-    if(!providerOpen)return;
-    invoke<AgentSettings>('agent_settings').then(settings=>{setProviderSettings(settings);setAgentBackend(settings.backend||settings.provider||'claude_cli');setModelId(settings.model);}).catch(e=>setError(message(e)));
-  },[providerOpen]);
+    const update=(event:Event)=>setProviderSettings((event as CustomEvent<AgentSettings>).detail);
+    window.addEventListener('cadpad-agent-settings-changed',update);
+    return()=>window.removeEventListener('cadpad-agent-settings-changed',update);
+  },[]);
   useEffect(()=>{
-    if(!providerOpen)return;
+    if(!providerOpen&&(!assistantVisible||providerSettings))return;
     let active=true;
-    setAgentModels(null);
-    invoke<ModelChoice[]>('agent_models',{backend:agentBackend}).then(models=>{if(active)setAgentModels(Array.isArray(models)?models:[]);}).catch(()=>{if(active)setAgentModels([]);});
+    invoke<AgentSettings>('agent_settings').then(settings=>{
+      if(!active||agentConfigPending.current)return;
+      setProviderSettings(settings);setAgentBackend(settings.backend||settings.provider||'claude_cli');setModelId(settings.model||'');
+    }).catch(e=>{if(active&&providerOpen)setError(message(e));});
     return()=>{active=false;};
-  },[providerOpen,agentBackend]);
+  },[providerOpen,assistantVisible]);
+  useEffect(()=>{
+    if(!catalogBackend)return;
+    let active=true;
+    const store=(models:ModelChoice[])=>{if(active)setAgentCatalog({backend:catalogBackend,models});};
+    invoke<ModelChoice[]>('agent_models',{backend:catalogBackend}).then(models=>store(Array.isArray(models)?models:[])).catch(()=>store([]));
+    return()=>{active=false;};
+  },[catalogBackend]);
   useEffect(()=>{
     const channel=new Channel<{kind:string;workspace_id:string;turn_id:string;delta?:string;turn?:AgentTurn}>();
     channel.onmessage=event=>{
@@ -1302,7 +1330,7 @@ export function App({host}:{host?:SessionHost}={}) {
           busy={!project||chatBusy||agentSending}
           pendingChatIds={pendingChatIds}
           landedChat={landedChat}
-          panelOpen={assistantOpen}
+          panelOpen={assistantVisible}
           hosts={chatHostMap}
           onVisibleChats={setVisibleChatIds}
           onNew={()=>changeChat('new')}
@@ -1318,7 +1346,7 @@ export function App({host}:{host?:SessionHost}={}) {
               <ConversationScroll key={`${project?.workspace_id}:${chatId}`} ref={activePane?conversationRef:undefined}>
                 <div className="inspector-page" id={activePane?'panel-assistant':undefined} role="region" aria-label="Assistant conversation">
                   {!messages.length&&!live&&<div className="assistant-welcome"><h3>Describe a change</h3><p>Ask for a part, an edit, or a mechanism. It shows up in this document.</p></div>}
-                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p>{entry.text}</p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({chatId,index,text:entry.text,revision:entry.checkpoint_revision})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending} onClick={()=>void run('restore_checkpoint',{target:entry.checkpoint_revision})}><Icon name="undo" size={13}/>Restore</button>}</>:<FinishedReply text={entry.text} steps={entry.steps}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=><li key={`${chip.instance_id}:${chip.entity_id}`} className="reference-chip" title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`}>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></li>)}</ul>}</div>)}
+                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p>{entry.text}</p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({...entry,chatId,index})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending} onClick={()=>void run('restore_checkpoint',{target:entry.checkpoint_revision})}><Icon name="undo" size={13}/>Restore</button>}</>:<FinishedReply text={entry.text} steps={entry.steps}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=><li key={`${chip.instance_id}:${chip.entity_id}`} className="reference-chip" title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`}>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></li>)}</ul>}</div>)}
                   {activePane&&!!agentChromeStatus&&<span className="visually-hidden" data-agent-chrome-status role="status">{agentChromeStatus}</span>}
                   {live&&<div className="chat-message assistant streaming" aria-live="polite"><strong>Cadpad</strong>{agentWorking&&agentTurn.steps?.length?<LiveReply steps={agentTurn.steps} activity={agentTurn.activity} startedAt={agentTurn.started_at} stopping={agentStartCancelling||agentTurn.state==='cancelling'}/>:agentWorking&&agentTurn.text?<><Markdown text={agentTurn.text}/><LiveReply steps={[]} activity={agentTurn.activity} startedAt={agentTurn.started_at}/></>:<LiveReply steps={[]} activity={agentStartCancelling?'Stopping':agentWorking?agentTurn.activity:'Starting'} startedAt={agentWorking?agentTurn.started_at:undefined}/>}</div>}
                   {live&&agentTurn?.state==='failed'&&<p className="agent-failure">{agentTurn.error?.message||'The agent could not finish this change.'}</p>}
@@ -1333,7 +1361,14 @@ export function App({host}:{host?:SessionHost}={}) {
                 const input=event.currentTarget,start=input.selectionStart,end=input.selectionEnd;
                 setDraft(chatId,draft.slice(0,start)+text+draft.slice(end));
                 requestAnimationFrame(()=>{input.selectionStart=input.selectionEnd=start+text.length;});
-              }} onFocus={()=>{setPanel('assistant');if(chatId!==activeChatId&&chatId!=='new')void changeChat('select',chatId);}} onChange={event=>setDraft(chatId,event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();if(!agentWorking&&!agentSending&&!chatBusy){setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}}}/><div className="composer-actions"><button type="button" className="composer-settings" onClick={()=>setProviderOpen(true)}><Icon name="sliders" size={14}/>{providerSettings?.configured===false?'Connect agent':'Agent settings'}</button>{agentWorking||agentSending?<button className="send-prompt" title="Stop assistant" aria-label="Stop assistant" disabled={agentStartCancelling||agentTurn?.state==='cancelling'} type="button" onClick={()=>void stopAgent()}><span className="stop-glyph" aria-hidden="true"/></button>:<button className="send-prompt" title="Send message" aria-label="Send message" disabled={!project||!draft.trim()||chatBusy} type="submit"><Icon name="arrowUp" size={18}/></button>}</div></div></form>
+              }} onFocus={()=>{setPanel('assistant');if(chatId!==activeChatId&&chatId!=='new')void changeChat('select',chatId);}} onChange={event=>setDraft(chatId,event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();if(!agentWorking&&!agentSending&&!chatBusy){setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}}}/><div className="composer-actions"><div className="composer-options">
+                <button type="button" className="composer-settings" disabled={savingProvider} onClick={()=>setProviderOpen(true)}><Icon name="sliders" size={14}/>Settings</button>
+                <select className="composer-model" aria-label="Assistant model" title={composerModels.find(model=>model.id===savedModel)?.label||savedModel||'Assistant model'} value={savedModel} disabled={!savedBackend||savingProvider||agentSending||agentWorking} onChange={event=>void saveProvider(event.target.value)}>
+                  {savedBackend==='anthropic_api'?(!savedModel&&<option value="" disabled>Choose a model</option>):<option value="">Provider default</option>}
+                  {savedModel&&!composerModels.some(model=>model.id===savedModel)&&<option value={savedModel}>{savedModel}</option>}
+                  {composerModels.map(model=><option key={model.id} value={model.id}>{model.label}</option>)}
+                </select>
+              </div>{agentWorking||agentSending?<button className="send-prompt" title="Stop assistant" aria-label="Stop assistant" disabled={agentStartCancelling||agentTurn?.state==='cancelling'} type="button" onClick={()=>void stopAgent()}><span className="stop-glyph" aria-hidden="true"/></button>:<button className="send-prompt" title="Send message" aria-label="Send message" disabled={!project||!draft.trim()||chatBusy||savingProvider} type="submit"><Icon name="arrowUp" size={18}/></button>}</div></div></form>
             </div>;
           }}
         />

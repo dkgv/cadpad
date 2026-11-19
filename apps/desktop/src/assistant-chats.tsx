@@ -70,6 +70,21 @@ export function AssistantChatDock({
   const dock=useRef<HTMLDivElement>(null);
   const [emptyClosed,setEmptyClosed]=useState(false);
   const ids=useMemo(()=>chatTabIds(chats,activeId).filter(id=>!emptyClosed||chats.some(chat=>chat.id===id&&chat.message_count>0)),[chats,activeId,emptyClosed]);
+  const reopenHandled=useRef(true);
+  useEffect(()=>{
+    if(!panelOpen){
+      reopenHandled.current=ids.length>0;
+      return;
+    }
+    if(reopenHandled.current)return;
+    if(ids.length){
+      reopenHandled.current=true;
+      return;
+    }
+    if(busy)return;
+    reopenHandled.current=true;
+    void onNew().then(created=>{if(created)setEmptyClosed(false);});
+  },[panelOpen,ids.length,busy,onNew]);
   useEffect(()=>{dock.current?.dispatchEvent(new CustomEvent('cadpad-chat-tabs-change',{bubbles:true,detail:{count:ids.length}}));},[ids.length,workspaceKey]);
   const [tree,setTree]=useState<DockNode>(()=>group(ids,activeId&&ids.includes(activeId)?activeId:ids[0]??null));
   const [removed,setRemoved]=useState<string|null>(null);

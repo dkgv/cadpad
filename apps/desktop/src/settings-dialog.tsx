@@ -74,7 +74,6 @@ export function SettingsDialog({
   const known=!!modelId&&catalog.some(model=>model.id===modelId);
   const showCustom=customModel||(!!modelId&&models!==null&&!known);
   const selectValue=showCustom?'__custom__':modelId;
-  const modelLabel=catalog.find(model=>model.id===modelId)?.label||modelId;
   function chooseModel(value:string){
     if(value==='__custom__'){setCustomModel(true);return;}
     setCustomModel(false);
@@ -94,10 +93,7 @@ export function SettingsDialog({
   return <dialog ref={dialogRef} className="settings-dialog" onCancel={onClose} onClose={onClose} onClick={event=>{if(event.target===event.currentTarget)onClose();}}>
     <div className="settings-sheet">
       <div className="settings-heading">
-        <div>
-          <p className="eyebrow">Preferences</p>
-          <h2>Settings</h2>
-        </div>
+        <h2>Settings</h2>
         <button className="icon-button" aria-label="Close settings" onClick={onClose}><Icon name="close"/></button>
       </div>
       <div className="settings-body">
@@ -175,7 +171,6 @@ export function SettingsDialog({
       </div>
       <div className="settings-footer">
         {api&&providerSettings?.configured&&<span className="muted">API key saved in the system keychain</span>}
-        {!api&&providerSettings?.configured&&<span className="muted">{modelId?`Using ${modelLabel}`:'Using the CLI default model'}</span>}
         <button className="primary-button" disabled={saveDisabled} onClick={onSave}>{savingProvider?'Saving…':'Save settings'}</button>
       </div>
     </div>

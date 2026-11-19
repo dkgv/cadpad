@@ -508,10 +508,11 @@ test('settings and Assistant composer retain agent configuration and sending',as
 test('agent settings lists provider models and saves the selected one',async()=>{
   const original=harness.invoke.bind(harness);
   const models=[{id:'gpt-5.6-sol-high',label:'GPT-5.6 Sol High'},{id:'composer-2.5',label:'Composer 2.5'}];
+  let modelPreference='';
   harness.invoke=async(command,args)=>{
     if(command==='agent_models')return models;
-    if(command==='agent_settings')return {provider:'cursor_cli',backend:'cursor_cli',model:'',configured:true,credential_storage:'local_cli',bridge_available:true,cli:[{backend:'cursor_cli',installed:true,authenticated:true,detail:'Signed in'}]};
-    if(command==='configure_agent'){harness.calls.push([command,args]);return {provider:'cursor_cli',backend:'cursor_cli',model:args.model,configured:true,credential_storage:'local_cli',bridge_available:true};}
+    if(command==='agent_settings')return {provider:'cursor_cli',backend:'cursor_cli',model:modelPreference,configured:true,credential_storage:'local_cli',bridge_available:true,cli:[{backend:'cursor_cli',installed:true,authenticated:true,detail:'Signed in'}]};
+    if(command==='configure_agent'){harness.calls.push([command,args]);modelPreference=args.model;return {provider:'cursor_cli',backend:'cursor_cli',model:modelPreference,configured:true,credential_storage:'local_cli',bridge_available:true};}
     return original(command,args);
   };
   await act(async()=>harness.menu.onmessage('settings'));await flush(30);
@@ -522,11 +523,20 @@ test('agent settings lists provider models and saves the selected one',async()=>
   const saved=harness.calls.findLast(([name])=>name==='configure_agent');
   assert.equal(saved[1].backend,'cursor_cli');
   assert.equal(saved[1].model,'composer-2.5');
+  await flush();
+  const picker=document.querySelector('[aria-label="Assistant model"]');
+  assert.equal(picker.value,'composer-2.5');
+  assert.equal(picker.closest('.composer-options').querySelector('button').textContent,'Settings');
+  await setValue(picker,'gpt-5.6-sol-high','change');await flush();
+  assert.equal(picker.value,'gpt-5.6-sol-high');
+  assert.deepEqual(harness.calls.findLast(([name])=>name==='configure_agent')[1],{backend:'cursor_cli',model:'gpt-5.6-sol-high',apiKey:null});
   await act(async()=>harness.menu.onmessage('settings'));await flush(30);
+  assert.equal(document.querySelector('[aria-label="Model"]').value,'gpt-5.6-sol-high');
   await setValue(document.querySelector('[aria-label="Model"]'),'__custom__','change');
   await setValue(document.querySelector('[aria-label="Model ID"]'),'gpt-5.6-sol-xhigh');
   await click(button('Save settings'));await flush();
   assert.equal(harness.calls.findLast(([name])=>name==='configure_agent')[1].model,'gpt-5.6-sol-xhigh');
+  assert.equal(picker.value,'gpt-5.6-sol-xhigh');
 });
 
 test('OpenCode settings discovers models and saves a custom variant',async()=>{
@@ -1172,6 +1182,33 @@ test('assistant chat tabs can split beside each other like other panes',async()=
   }
 });
 
+
+test('resending an edited chat message keeps its image and geometry references',async()=>{
+  const image='iVBORw0KGgo=';
+  const references=[{letter:'',instance_id:'rail',entity_id:'face:2',part:'rail',label:'Top'}];
+  const original=harness.invoke.bind(harness);
+  let messages=[{role:'user',text:'Use this reference',image,references,checkpoint_revision:'checkpoint'},{role:'assistant',text:'Original reply'}];
+  const conversation=()=>({active_chat_id:'edit-chat',chats:[{id:'edit-chat',title:'Reference',message_count:messages.length}],messages,turn:null});
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation')return conversation();
+    if(command==='restore_checkpoint')return {id:'restore',state:'succeeded'};
+    if(command==='project')return {...harness.project,revision:'restored'};
+    if(command==='agent_chat'&&args.action==='rewind:0'){messages=[];return conversation();}
+    if(command==='agent_start')messages=[{role:'user',text:args.prompt,image:args.image,references:args.references.length?references:[]}];
+    return original(command,args);
+  };
+  await act(async()=>harness.agent.onmessage({kind:'refresh'}));await flush();
+  await click(document.querySelector('.chat-message.user .message-revert'));
+  await setValue(document.querySelector('.message-edit textarea'),'Use this reference for the bracket');
+  await click(document.querySelector('.message-edit .primary-button'));await flush();
+  const start=harness.calls.findLast(([name])=>name==='agent_start')?.[1];
+  assert.equal(start.prompt,'Use this reference for the bracket');
+  assert.equal(start.chatId,'edit-chat');
+  assert.equal(start.image,image);
+  assert.deepEqual(start.references,[{revision:'restored',instance_id:'rail',entity_id:'face:2'}]);
+  assert.equal(document.querySelector('.message-image')?.getAttribute('src'),`data:image/png;base64,${image}`);
+  assert.match(document.querySelector('.message-references')?.textContent,/railTop/);
+});
 
 test('dropping an image onto the assistant pane attaches it to the next prompt',async()=>{
   const originalCreate=globalThis.createImageBitmap;
