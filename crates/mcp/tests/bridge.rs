@@ -343,7 +343,27 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
         }),
     )
     .await;
-    for (name, result) in [("update_source", &draft), ("read_source", &source)] {
+    let hits = sdk(
+        mcp.peer(),
+        "search_source",
+        json!({"workspace_id":ws,"version":draft["id"],"path":"model.py","query":"plate"}),
+    )
+    .await;
+    assert_eq!(hits["matches"][0]["line"], 3);
+    let page = sdk(
+        mcp.peer(),
+        "read_source_lines",
+        json!({"workspace_id":ws,"version":draft["id"],"path":"model.py","start_line":hits["matches"][0]["line"]}),
+    )
+    .await;
+    assert_eq!(page["source"], "show(cq.Workplane().box(width,20,6),name='plate')");
+    assert_eq!(page["hash"], source["hash"]);
+    for (name, result) in [
+        ("update_source", &draft),
+        ("read_source", &source),
+        ("search_source", &hits),
+        ("read_source_lines", &page),
+    ] {
         let schema = serde_json::to_value(
             live_tools
                 .tools
@@ -398,7 +418,19 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
     let measured=sdk(mcp.peer(),"inspect",json!({"workspace_id":ws,"revision":revision,"entities":[{"revision":revision,"instance_id":"plate","entity_id":"part:0"}]})).await;
     assert_eq!(measured["entities"][0]["volume"], 6000.0);
     let selection = sdk(mcp.peer(), "get_selection", json!({"workspace_id":ws})).await;
-    for (name, result) in [("inspect", &measured), ("get_selection", &selection)] {
+    let publication = sdk(
+        mcp.peer(),
+        "trace_part_source",
+        json!({"workspace_id":ws,"revision":revision,"instance_id":"plate"}),
+    )
+    .await;
+    assert_eq!(publication["publication"], json!({"file":"model.py","line":3}));
+    assert!(live_tools.tools.iter().any(|tool| tool.name == "trace_mesh_edges"));
+    for (name, result) in [
+        ("inspect", &measured),
+        ("get_selection", &selection),
+        ("trace_part_source", &publication),
+    ] {
         let schema = serde_json::to_value(
             live_tools
                 .tools

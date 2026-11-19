@@ -2769,6 +2769,7 @@
                     "accuracy": {
                       "enum": [
                         "exact",
+                        "mesh",
                         null
                       ],
                       "type": [
@@ -3837,7 +3838,8 @@
                   "properties": {
                     "accuracy": {
                       "enum": [
-                        "exact"
+                        "exact",
+                        "mesh"
                       ],
                       "type": "string"
                     },
@@ -4697,7 +4699,8 @@
         "$defs": {
           "Accuracy": {
             "enum": [
-              "exact"
+              "exact",
+              "mesh"
             ],
             "type": "string"
           },
@@ -5092,7 +5095,8 @@
         "$defs": {
           "Accuracy": {
             "enum": [
-              "exact"
+              "exact",
+              "mesh"
             ],
             "type": "string"
           },
@@ -5587,7 +5591,8 @@
         "$defs": {
           "Accuracy": {
             "enum": [
-              "exact"
+              "exact",
+              "mesh"
             ],
             "type": "string"
           },
@@ -6050,7 +6055,8 @@
         "$defs": {
           "Accuracy": {
             "enum": [
-              "exact"
+              "exact",
+              "mesh"
             ],
             "type": "string"
           },
@@ -6577,7 +6583,8 @@
         "$defs": {
           "Accuracy": {
             "enum": [
-              "exact"
+              "exact",
+              "mesh"
             ],
             "type": "string"
           },
@@ -7040,7 +7047,8 @@
         "$defs": {
           "Accuracy": {
             "enum": [
-              "exact"
+              "exact",
+              "mesh"
             ],
             "type": "string"
           },
@@ -7633,7 +7641,7 @@
       }
     },
     {
-      "description": "Read a relative Python source path from a revision, editable draft, or immutable job snapshot_id, including its content hash.",
+      "description": "Read a relative Python source path from a revision, editable draft, or immutable job snapshot_id, including its content hash. For large files use search_source and read_source_lines.",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -7700,6 +7708,276 @@
         "anyOf": [
           {
             "$ref": "#/$defs/SourceContent"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Find a part name, builder name, or other case-sensitive literal in one project-relative Python file. Use the revision, draft ID, or job snapshot ID as version. Returns one hit per matching line with a short excerpt. Pass next_line as start_line to continue, or use read_source_lines to inspect a hit in context.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "max_matches": {
+            "description": "Maximum matching lines (1–50). Defaults to 20.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "query": {
+            "description": "Case-sensitive literal text within a single line.",
+            "type": "string"
+          },
+          "start_line": {
+            "description": "One-based first line to search. Defaults to 1.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "version",
+          "path",
+          "query"
+        ],
+        "title": "SearchSource",
+        "type": "object"
+      },
+      "name": "search_source",
+      "output_schema": {
+        "$defs": {
+          "SourceMatch": {
+            "properties": {
+              "byte_offset": {
+                "description": "Zero-based UTF-8 byte offset of the first match on this line.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "line": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "preview": {
+                "description": "Bounded excerpt around the first match.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "line",
+              "byte_offset",
+              "preview"
+            ],
+            "type": "object"
+          },
+          "SourceMatches": {
+            "properties": {
+              "hash": {
+                "type": "string"
+              },
+              "matches": {
+                "items": {
+                  "$ref": "#/$defs/SourceMatch"
+                },
+                "type": "array"
+              },
+              "next_line": {
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "hash",
+              "matches",
+              "next_line"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SourceMatches"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Read up to 8 KiB of a project-relative Python file from a revision, draft, or job snapshot. Use one-based start_line to read around a search hit or publication line. Continue with next_line as start_line and next_byte_offset as byte_offset. A null next_line means there is no next page.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "byte_offset": {
+            "description": "UTF-8 byte offset within the first line. Use next_byte_offset from a previous page.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_lines": {
+            "description": "Maximum lines to read (1–200). Defaults to 80.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "start_line": {
+            "description": "One-based first line. Defaults to 1.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "version",
+          "path"
+        ],
+        "title": "ReadSourceLines",
+        "type": "object"
+      },
+      "name": "read_source_lines",
+      "output_schema": {
+        "$defs": {
+          "SourceLines": {
+            "properties": {
+              "byte_offset": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "hash": {
+                "type": "string"
+              },
+              "next_byte_offset": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "next_line": {
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "start_line": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "hash",
+              "source",
+              "start_line",
+              "byte_offset",
+              "next_line",
+              "next_byte_offset"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SourceLines"
           },
           {
             "$ref": "#/$defs/ToolFailure"
@@ -8968,7 +9246,7 @@
       }
     },
     {
-      "description": "Query exact BRep properties or the distance between two revision-scoped entities. Coordinates and lengths are millimetres; quaternions use xyzw.",
+      "description": "Query CAD or STL mesh properties and distances between revision-scoped entities. The result reports exact CAD or mesh accuracy. Coordinates and lengths are millimetres; quaternions use xyzw.",
       "input_schema": {
         "$defs": {
           "Entity": {
@@ -9035,7 +9313,8 @@
         "$defs": {
           "Accuracy": {
             "enum": [
-              "exact"
+              "exact",
+              "mesh"
             ],
             "type": "string"
           },
@@ -9279,6 +9558,32 @@
                   "kind",
                   "instance_id",
                   "entity"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "instance_id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "const": "local_point",
+                    "type": "string"
+                  },
+                  "point": {
+                    "items": {
+                      "format": "double",
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "instance_id",
+                  "point"
                 ],
                 "type": "object"
               }
@@ -9689,6 +9994,345 @@
         "anyOf": [
           {
             "$ref": "#/$defs/InspectionReply"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Use when the user asks what selected STL edges separate. Pass one to sixteen edge references from the message or get_selection, in the same order and with their current revision. Returns endpoints in part-local millimetres, incident face IDs and normals, and the unsigned angle between two incident facet planes in degrees. Classifies each edge as open, coplanar, crease, or non-manifold. The result describes mesh topology and cannot establish which CAD operation made the edge.",
+      "input_schema": {
+        "$defs": {
+          "Entity": {
+            "additionalProperties": false,
+            "properties": {
+              "entity_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "revision",
+              "instance_id",
+              "entity_id"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "entities": {
+            "description": "One to sixteen selected STL edges, in selection order.",
+            "items": {
+              "$ref": "#/$defs/Entity"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "revision",
+          "entities"
+        ],
+        "title": "TraceMeshEdges",
+        "type": "object"
+      },
+      "name": "trace_mesh_edges",
+      "output_schema": {
+        "$defs": {
+          "Accuracy": {
+            "enum": [
+              "exact",
+              "mesh"
+            ],
+            "type": "string"
+          },
+          "EdgeClassification": {
+            "enum": [
+              "open",
+              "coplanar",
+              "crease",
+              "non_manifold"
+            ],
+            "type": "string"
+          },
+          "EdgeTrace": {
+            "properties": {
+              "classification": {
+                "$ref": "#/$defs/EdgeClassification"
+              },
+              "endpoints": {
+                "items": {
+                  "items": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "incident_triangle_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "incident_triangles": {
+                "description": "Up to eight incident triangles, with face IDs usable in inspect.",
+                "items": {
+                  "$ref": "#/$defs/IncidentTriangle"
+                },
+                "type": "array"
+              },
+              "plane_angle_degrees": {
+                "description": "Unsigned angle between the two facet planes, ignoring STL winding.",
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "reference": {
+                "$ref": "#/$defs/Entity"
+              }
+            },
+            "required": [
+              "reference",
+              "endpoints",
+              "classification",
+              "incident_triangle_count",
+              "incident_triangles",
+              "plane_angle_degrees"
+            ],
+            "type": "object"
+          },
+          "EdgeTraceReply": {
+            "properties": {
+              "accuracy": {
+                "$ref": "#/$defs/Accuracy"
+              },
+              "edges": {
+                "items": {
+                  "$ref": "#/$defs/EdgeTrace"
+                },
+                "type": "array"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "units": {
+                "$ref": "#/$defs/Units"
+              }
+            },
+            "required": [
+              "revision",
+              "accuracy",
+              "units",
+              "edges"
+            ],
+            "type": "object"
+          },
+          "Entity": {
+            "additionalProperties": false,
+            "properties": {
+              "entity_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "revision",
+              "instance_id",
+              "entity_id"
+            ],
+            "type": "object"
+          },
+          "IncidentTriangle": {
+            "properties": {
+              "face_id": {
+                "type": "string"
+              },
+              "normal": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "face_id",
+              "normal"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "Units": {
+            "enum": [
+              "mm"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/EdgeTraceReply"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Use when the user asks where a selected face, edge, or part comes from. Pass its instance_id and current revision from the message or get_selection. Returns a Python show() file and line when known, or the path of a linked STL or STEP asset. Use read_source_lines around the publication line, then search_source for the builder. This traces the containing part. Individual face and edge creation history is unavailable.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "instance_id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "revision",
+          "instance_id"
+        ],
+        "title": "TracePartSource",
+        "type": "object"
+      },
+      "name": "trace_part_source",
+      "output_schema": {
+        "$defs": {
+          "PartSourceTrace": {
+            "properties": {
+              "asset_path": {
+                "description": "Asset path when the linked source is a mesh or CAD exchange file.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "publication": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SourceLocation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Known component publication site. This is not face or edge provenance."
+              },
+              "revision": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "revision",
+              "instance_id",
+              "publication",
+              "asset_path"
+            ],
+            "type": "object"
+          },
+          "SourceLocation": {
+            "description": "Project-relative Python file and line of the `show()` call that published a part.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "file",
+              "line"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PartSourceTrace"
           },
           {
             "$ref": "#/$defs/ToolFailure"
@@ -16176,7 +16820,8 @@
         "$defs": {
           "Accuracy": {
             "enum": [
-              "exact"
+              "exact",
+              "mesh"
             ],
             "type": "string"
           },

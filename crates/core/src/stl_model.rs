@@ -428,12 +428,143 @@ enum Selection<'a> {
     Edge([DVec3; 2]),
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(crate) struct EdgeTraceReply {
+    revision: String,
+    accuracy: crate::geometry::Accuracy,
+    units: crate::geometry::Units,
+    edges: Vec<EdgeTrace>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct EdgeTrace {
+    reference: crate::tools::Entity,
+    endpoints: [[f64; 3]; 2],
+    classification: EdgeClassification,
+    incident_triangle_count: usize,
+    /// Up to eight incident triangles, with face IDs usable in inspect.
+    incident_triangles: Vec<IncidentTriangle>,
+    /// Unsigned angle between the two facet planes, ignoring STL winding.
+    plane_angle_degrees: Option<f64>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum EdgeClassification {
+    Open,
+    Coplanar,
+    Crease,
+    NonManifold,
+}
+
+#[derive(Clone, serde::Serialize, schemars::JsonSchema)]
+struct IncidentTriangle {
+    face_id: String,
+    normal: [f64; 3],
+}
+
+#[derive(Default)]
+struct EdgeIncidence {
+    count: usize,
+    triangles: Vec<IncidentTriangle>,
+}
+
+fn trace_edges<'a>(
+    revision: &str,
+    refs: &[Value],
+    spans: &[usize],
+    vertices: &[u8],
+    selected: impl Fn(&Value) -> Result<Selection<'a>>,
+    cancel: &watch::Receiver<bool>,
+) -> Result<Value> {
+    let key = |endpoints: [DVec3; 2]| {
+        let [a, b] = endpoints.map(|p| vertex_key(p.as_vec3().to_array()));
+        edge_key(a, b)
+    };
+    let mut incidence = ahash::AHashMap::<EdgeKey, EdgeIncidence>::new();
+    let mut selections = Vec::with_capacity(refs.len());
+    for reference in refs {
+        let Selection::Edge(endpoints) = selected(reference)? else {
+            return Err(Error::domain(
+                "INVALID_REQUEST",
+                "Select STL edges to trace",
+            ));
+        };
+        incidence.entry(key(endpoints)).or_default();
+        selections.push((serde_json::from_value(reference.clone())?, endpoints));
+    }
+    let mut face = 0;
+    for (index, triangle) in read_vertices(vertices).enumerate() {
+        if index % 4096 == 0 {
+            check_cancel(cancel)?;
+        }
+        if index == spans[face + 1] {
+            face += 1;
+        }
+        let [a, b, c] = triangle.map(vertex_key);
+        for edge in [edge_key(a, b), edge_key(b, c), edge_key(c, a)] {
+            if let Some(found) = incidence.get_mut(&edge) {
+                found.count += 1;
+                if found.triangles.len() < 8 {
+                    found.triangles.push(IncidentTriangle {
+                        face_id: format!("face:{face}"),
+                        normal: cross(triangle).normalize().to_array(),
+                    });
+                }
+            }
+        }
+    }
+    let edges = selections
+        .into_iter()
+        .map(|(reference, endpoints)| {
+            let found = &incidence[&key(endpoints)];
+            let (classification, plane_angle_degrees) = match found.count {
+                0 => {
+                    return Err(Error::domain(
+                        "ARTIFACT_CORRUPT",
+                        "STL edge has no incident triangles",
+                    ));
+                }
+                1 => (EdgeClassification::Open, None),
+                2 => {
+                    let a = DVec3::from_array(found.triangles[0].normal);
+                    let b = DVec3::from_array(found.triangles[1].normal);
+                    let sine = a.cross(b).length();
+                    let angle = sine.atan2(a.dot(b).abs()).to_degrees();
+                    let classification = if sine <= 1e-7 {
+                        EdgeClassification::Coplanar
+                    } else {
+                        EdgeClassification::Crease
+                    };
+                    (classification, Some(angle))
+                }
+                _ => (EdgeClassification::NonManifold, None),
+            };
+            Ok(EdgeTrace {
+                reference,
+                endpoints: endpoints.map(|point| point.to_array()),
+                classification,
+                incident_triangle_count: found.count,
+                incident_triangles: found.triangles.clone(),
+                plane_angle_degrees,
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(json!(EdgeTraceReply {
+        revision: revision.into(),
+        accuracy: crate::geometry::Accuracy::Mesh,
+        units: crate::geometry::Units::Millimetres,
+        edges
+    }))
+}
+
 fn inspect(
     model: &Value,
     args: &Value,
     vertices: &[u8],
     counts: &[u8],
     edges: &[u8],
+    trace: Option<&watch::Receiver<bool>>,
 ) -> Result<Value> {
     let revision = model["revision"].as_str().unwrap_or_default();
     let part = &model["parts"][0];
@@ -482,6 +613,9 @@ fn inspect(
             "Unknown STL geometry selection",
         ))
     };
+    if let Some(cancel) = trace {
+        return trace_edges(revision, refs, &spans, vertices, selected, cancel);
+    }
     let mut result = json!({"revision":revision,"pose_version":args["pose_version"],"accuracy":"mesh","units":"mm"});
     if args["query"] == "distance" {
         use parry3d_f64::{
@@ -646,6 +780,17 @@ impl Core {
             .await
             .map_err(|_| Error::domain("IO_ERROR", "STL export failed"))?;
         }
+        let trace = method == "trace_mesh_edges";
+        if trace
+            && !args["entities"]
+                .as_array()
+                .is_some_and(|refs| (1..=16).contains(&refs.len()))
+        {
+            return Err(Error::domain(
+                "INVALID_REQUEST",
+                "Trace 1..16 selected STL edges",
+            ));
+        }
         let buffers = &model["parts"][0]["mesh"]["buffers"];
         let load = |name: &str| buffers[name]["handle"].as_str().unwrap_or_default();
         let has = |prefix: &str| {
@@ -658,7 +803,7 @@ impl Core {
             })
         };
         let faces = async {
-            if has("face:") {
+            if trace || has("face:") {
                 tokio::try_join!(
                     self.read_artifact(workspace, revision, load("vertices")),
                     self.read_artifact(workspace, revision, load("triangles_per_face")),
@@ -677,7 +822,14 @@ impl Core {
         let ((vertices, counts), edges) = tokio::try_join!(faces, edges)?;
         tokio::task::spawn_blocking(move || {
             check_cancel(&cancel)?;
-            inspect(&model, &args, &vertices, &counts, &edges)
+            inspect(
+                &model,
+                &args,
+                &vertices,
+                &counts,
+                &edges,
+                trace.then_some(&cancel),
+            )
         })
         .await
         .map_err(|_| Error::domain("INVALID_GEOMETRY", "STL inspection failed"))?

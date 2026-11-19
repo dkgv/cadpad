@@ -304,7 +304,7 @@ face/edge provenance is not recorded, so match exact properties to the code that
                 text.push_str(&format!(
                     "<source path=\"{file}\" revision=\"{revision}\"{}>\n{shown}\n</source>\n",
                     if cut {
-                        " truncated=\"true; use read_source for the rest\""
+                        " truncated=\"true; use search_source or read_source_lines for the rest\""
                     } else {
                         ""
                     }

@@ -23,6 +23,62 @@ pub struct ReadSource {
     pub version: String,
     pub path: String,
 }
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ReadSourceLines {
+    workspace_id: String,
+    version: String,
+    path: String,
+    /// One-based first line. Defaults to 1.
+    start_line: Option<usize>,
+    /// Maximum lines to read (1–200). Defaults to 80.
+    max_lines: Option<usize>,
+    /// UTF-8 byte offset within the first line. Use next_byte_offset from a previous page.
+    byte_offset: Option<usize>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct SourceLines {
+    path: String,
+    hash: String,
+    source: String,
+    start_line: usize,
+    byte_offset: usize,
+    next_line: Option<usize>,
+    next_byte_offset: usize,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SearchSource {
+    workspace_id: String,
+    version: String,
+    path: String,
+    /// Case-sensitive literal text within a single line.
+    query: String,
+    /// One-based first line to search. Defaults to 1.
+    start_line: Option<usize>,
+    /// Maximum matching lines (1–50). Defaults to 20.
+    max_matches: Option<usize>,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct SourceMatch {
+    line: usize,
+    /// Zero-based UTF-8 byte offset of the first match on this line.
+    byte_offset: usize,
+    /// Bounded excerpt around the first match.
+    preview: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct SourceMatches {
+    path: String,
+    hash: String,
+    matches: Vec<SourceMatch>,
+    next_line: Option<usize>,
+}
+
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateSource {
@@ -83,6 +139,33 @@ pub struct Inspect {
     pub query: Option<String>,
     pub pose_version: Option<u64>,
 }
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TraceMeshEdges {
+    workspace_id: String,
+    revision: String,
+    /// One to sixteen selected STL edges, in selection order.
+    entities: Vec<Entity>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TracePartSource {
+    workspace_id: String,
+    revision: String,
+    instance_id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct PartSourceTrace {
+    revision: String,
+    instance_id: String,
+    /// Known component publication site. This is not face or edge provenance.
+    publication: Option<crate::geometry::SourceLocation>,
+    /// Asset path when the linked source is a mesh or CAD exchange file.
+    asset_path: Option<String>,
+}
+
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SetParameter {
@@ -202,7 +285,15 @@ fn build_definitions() -> Vec<ToolSpec> {
         ),
         spec::<ReadSource>(
             "read_source",
-            "Read a relative Python source path from a revision, editable draft, or immutable job snapshot_id, including its content hash.",
+            "Read a relative Python source path from a revision, editable draft, or immutable job snapshot_id, including its content hash. For large files use search_source and read_source_lines.",
+        ),
+        spec::<SearchSource>(
+            "search_source",
+            "Find a part name, builder name, or other case-sensitive literal in one project-relative Python file. Use the revision, draft ID, or job snapshot ID as version. Returns one hit per matching line with a short excerpt. Pass next_line as start_line to continue, or use read_source_lines to inspect a hit in context.",
+        ),
+        spec::<ReadSourceLines>(
+            "read_source_lines",
+            "Read up to 8 KiB of a project-relative Python file from a revision, draft, or job snapshot. Use one-based start_line to read around a search hit or publication line. Continue with next_line as start_line and next_byte_offset as byte_offset. A null next_line means there is no next page.",
         ),
         spec::<SetAnnotation>(
             "set_annotation",
@@ -235,6 +326,14 @@ fn build_definitions() -> Vec<ToolSpec> {
         spec::<Inspect>(
             "inspect",
             "Query CAD or STL mesh properties and distances between revision-scoped entities. The result reports exact CAD or mesh accuracy. Coordinates and lengths are millimetres; quaternions use xyzw.",
+        ),
+        spec::<TraceMeshEdges>(
+            "trace_mesh_edges",
+            "Use when the user asks what selected STL edges separate. Pass one to sixteen edge references from the message or get_selection, in the same order and with their current revision. Returns endpoints in part-local millimetres, incident face IDs and normals, and the unsigned angle between two incident facet planes in degrees. Classifies each edge as open, coplanar, crease, or non-manifold. The result describes mesh topology and cannot establish which CAD operation made the edge.",
+        ),
+        spec::<TracePartSource>(
+            "trace_part_source",
+            "Use when the user asks where a selected face, edge, or part comes from. Pass its instance_id and current revision from the message or get_selection. Returns a Python show() file and line when known, or the path of a linked STL or STEP asset. Use read_source_lines around the publication line, then search_source for the builder. This traces the containing part. Individual face and edge creation history is unavailable.",
         ),
         spec::<SetParameter>(
             "set_parameter",
@@ -288,9 +387,13 @@ fn build_definitions() -> Vec<ToolSpec> {
             "control_playback" => Some(result_schema::<crate::playback::Reply>()),
             "control_motion_tests" => Some(result_schema::<crate::motion_tests::Reply>()),
             "read_source" => Some(result_schema::<SourceContent>()),
+            "search_source" => Some(result_schema::<SourceMatches>()),
+            "read_source_lines" => Some(result_schema::<SourceLines>()),
             "update_source" => Some(result_schema::<SourceUpdate>()),
             "set_dimensions" => Some(result_schema::<crate::views::DimensionsReply>()),
             "get_selection" => Some(result_schema::<crate::geometry::SelectionReply>()),
+            "trace_mesh_edges" => Some(result_schema::<crate::stl_model::EdgeTraceReply>()),
+            "trace_part_source" => Some(result_schema::<PartSourceTrace>()),
             "inspect" => Some(result_schema::<crate::geometry::InspectionReply>()),
             "check_interference" => Some(result_schema::<crate::geometry::InterferenceReply>()),
             "capture_view" => Some(result_schema::<crate::views::CaptureReply>()),
@@ -338,6 +441,64 @@ fn parse<T: for<'de> Deserialize<'de>>(arguments: Value) -> Result<T> {
     serde_json::from_value(arguments)
         .map_err(|error| Error::domain("INVALID_REQUEST", error.to_string()))
 }
+fn source_limit(value: Option<usize>, default: usize, max: usize, field: &str) -> Result<usize> {
+    let value = value.unwrap_or(default);
+    if !(1..=max).contains(&value) {
+        return Err(Error::domain(
+            "INVALID_REQUEST",
+            format!("{field} must be between 1 and {max}"),
+        ));
+    }
+    Ok(value)
+}
+
+fn source_page(
+    file: SourceContent,
+    start: usize,
+    limit: usize,
+    offset: usize,
+) -> Result<SourceLines> {
+    const MAX_BYTES: usize = 8192;
+    let mut lines = file
+        .source
+        .split_inclusive('\n')
+        .enumerate()
+        .skip(start - 1)
+        .peekable();
+    if offset != 0
+        && !lines
+            .peek()
+            .is_some_and(|(_, line)| offset < line.len() && line.is_char_boundary(offset))
+    {
+        return Err(Error::domain(
+            "INVALID_REQUEST",
+            "byte_offset must point to a UTF-8 character on the first line",
+        ));
+    }
+    let mut page = SourceLines {
+        path: file.path,
+        hash: file.hash,
+        source: String::new(),
+        start_line: start,
+        byte_offset: offset,
+        next_line: None,
+        next_byte_offset: 0,
+    };
+    for (index, line) in lines.by_ref().take(limit) {
+        let skip = if index + 1 == start { offset } else { 0 };
+        let remaining = &line[skip..];
+        let count = remaining.floor_char_boundary(MAX_BYTES - page.source.len());
+        page.source.push_str(&remaining[..count]);
+        if count < remaining.len() {
+            page.next_line = Some(index + 1);
+            page.next_byte_offset = skip + count;
+            return Ok(page);
+        }
+    }
+    page.next_line = lines.next().map(|(index, _)| index + 1);
+    Ok(page)
+}
+
 impl Core {
     pub async fn dispatch(
         &self,
@@ -427,6 +588,65 @@ impl Core {
                 let args: ReadSource = parse(arguments)?;
                 self.read_source(&args.workspace_id, &args.version, &args.path)
                     .await
+            }
+            "search_source" => {
+                let args: SearchSource = parse(arguments)?;
+                let start = source_limit(args.start_line, 1, usize::MAX, "start_line")?;
+                let limit = source_limit(args.max_matches, 20, 50, "max_matches")?;
+                if args.query.is_empty()
+                    || args.query.len() > 256
+                    || args.query.contains(['\r', '\n'])
+                {
+                    return Err(Error::domain(
+                        "INVALID_REQUEST",
+                        "query must be 1–256 UTF-8 bytes on one line",
+                    ));
+                }
+                let file = self
+                    .source_content(&args.workspace_id, &args.version, &args.path)
+                    .await?;
+                let mut hits =
+                    file.source
+                        .lines()
+                        .enumerate()
+                        .skip(start - 1)
+                        .filter_map(|(index, line)| {
+                            line.find(&args.query)
+                                .map(|offset| (index + 1, offset, line))
+                        });
+                let matches = hits
+                    .by_ref()
+                    .take(limit)
+                    .map(|(line, byte_offset, text)| {
+                        let start = text.ceil_char_boundary(byte_offset.saturating_sub(96));
+                        let end = text.floor_char_boundary((start + 384).min(text.len()));
+                        SourceMatch {
+                            line,
+                            byte_offset,
+                            preview: text[start..end].into(),
+                        }
+                    })
+                    .collect();
+                Ok(json!(SourceMatches {
+                    path: file.path,
+                    hash: file.hash,
+                    matches,
+                    next_line: hits.next().map(|(line, _, _)| line),
+                }))
+            }
+            "read_source_lines" => {
+                let args: ReadSourceLines = parse(arguments)?;
+                let start = source_limit(args.start_line, 1, usize::MAX, "start_line")?;
+                let limit = source_limit(args.max_lines, 80, 200, "max_lines")?;
+                let file = self
+                    .source_content(&args.workspace_id, &args.version, &args.path)
+                    .await?;
+                Ok(json!(source_page(
+                    file,
+                    start,
+                    limit,
+                    args.byte_offset.unwrap_or(0)
+                )?))
             }
             "set_annotation" => {
                 let args: SetAnnotation = parse(arguments)?;
@@ -528,6 +748,59 @@ impl Core {
                     .await?;
                 let reply: crate::geometry::InspectionReply = serde_json::from_value(result)?;
                 Ok(json!(reply))
+            }
+            "trace_mesh_edges" => {
+                let args: TraceMeshEdges = parse(arguments)?;
+                self.query_as_actor(
+                    &context.actor,
+                    &args.workspace_id,
+                    &args.revision,
+                    "trace_mesh_edges",
+                    json!({"entities": args.entities}),
+                )
+                .await
+            }
+            "trace_part_source" => {
+                let args: TracePartSource = parse(arguments)?;
+                let _memory = self.pin_workspace(&args.workspace_id).await?;
+                let workspaces = self.workspace(&args.workspace_id).await?;
+                let current = workspaces[&args.workspace_id].stored.current_revision();
+                if current.id != args.revision {
+                    return Err(Error::domain(
+                        "STALE_ENTITY",
+                        "Source trace requires the current revision",
+                    ));
+                }
+                let part = current.model["parts"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|part| part["instance_id"] == args.instance_id)
+                    .ok_or_else(|| Error::domain("STALE_ENTITY", "Unknown part instance"))?;
+                let source: Option<crate::geometry::SourceLocation> =
+                    serde_json::from_value(part["source"].clone())?;
+                let linked_entry = (args.instance_id == "model")
+                    .then(|| crate::project_entry::model_entry_asset(&current.inputs))
+                    .flatten()
+                    .map(|(entry, _, _)| entry);
+                let (publication, asset_path) = match (linked_entry, source) {
+                    (Some(entry), _) => (None, Some(entry)),
+                    (None, Some(location)) if current.inputs.files.contains_key(&location.file) => {
+                        (Some(location), None)
+                    }
+                    (None, Some(location))
+                        if crate::portable::model_file_format(&location.file).is_some() =>
+                    {
+                        (None, Some(location.file))
+                    }
+                    _ => (None, None),
+                };
+                Ok(json!(PartSourceTrace {
+                    revision: args.revision,
+                    instance_id: args.instance_id,
+                    publication,
+                    asset_path
+                }))
             }
             "set_parameter" => {
                 let args: SetParameter = parse(arguments)?;
