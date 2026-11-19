@@ -497,6 +497,9 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                     "acceptEdits",
                     "--tools",
                     "",
+                    // Headless Claude cannot prompt to approve Cadpad MCP calls.
+                    "--allowedTools",
+                    "mcp__cadpad__*",
                     "--strict-mcp-config",
                     "--append-system-prompt",
                     &system,
