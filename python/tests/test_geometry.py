@@ -40,6 +40,36 @@ def test_analytic_properties_topology_and_binary_artifacts(tmp_path):
         model.inspect(dict(entities=[dict(refs[0], revision="old")]))
 
 
+def test_planar_tessellation_gap_is_rebuilt_with_the_original_edge_ids(tmp_path, monkeypatch):
+    import numpy as np
+    import ocp_tessellate.tessellator as tessellator
+
+    original = tessellator.tessellate
+    def incomplete_coarse_mesh(*args, **kwargs):
+        mesh = original(*args, **kwargs)
+        if kwargs["quality"] == 0.1:
+            counts = np.asarray(mesh["triangles_per_face"]).copy()
+            counts[0] -= 1
+            mesh = dict(mesh, triangles=mesh["triangles"][3:], triangles_per_face=counts)
+        return mesh
+
+    monkeypatch.setattr(tessellator, "tessellate", incomplete_coarse_mesh)
+    model, result = build(tmp_path, 'import cadquery as cq\nshow(cq.Workplane().box(10,20,6), name="plate")')
+    part = result["parts"][0]
+    mesh = part["mesh"]
+    buffers = mesh["buffers"]
+    vertices = np.fromfile(model.cache / buffers["vertices"]["handle"], dtype="<f4").reshape(-1, 3)
+    triangles = np.fromfile(model.cache / buffers["triangles"]["handle"], dtype="<u4").reshape(-1, 3)
+    counts = np.fromfile(model.cache / buffers["triangles_per_face"]["handle"], dtype="<u4")
+    a, b, c = vertices[triangles[:counts[0]]].transpose(1, 0, 2)
+    area = np.linalg.norm(np.cross(b - a, c - a), axis=1).sum() / 2
+    exact = model.inspect(dict(entities=[
+        dict(revision="r1", instance_id="plate", entity_id=mesh["face_ids"][0]),
+    ]))["entities"][0]
+    assert area == pytest.approx(exact["area"])
+    assert set(mesh["edge_ids"]) == {f"edge:{i}" for i in range(part["edge_count"])}
+
+
 def test_pose_distance_and_step_roundtrip(tmp_path):
     model, result = build(tmp_path, 'import cadquery as cq\nshow(cq.Workplane().box(10,20,30),name="a")\nshow(cq.Workplane().box(10,20,30),name="b",position=(30,0,0))')
     refs = [dict(revision="r1", instance_id=name, entity_id="part:0") for name in ("a", "b")]

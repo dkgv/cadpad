@@ -421,6 +421,11 @@ class Model:
         # Buffers are little-endian f32/u32 artifacts.
         from ocp_tessellate.ocp_utils import get_faces, get_edges
         from ocp_tessellate.tessellator import discretize_edges, tessellate
+        from OCP.BRepAdaptor import BRepAdaptor_Surface
+        from OCP.BRepGProp import BRepGProp
+        from OCP.BRepTools import BRepTools
+        from OCP.GeomAbs import GeomAbs_Plane
+        from OCP.GProp import GProp_GProps
         from OCP.TopAbs import TopAbs_EDGE
         from OCP.TopExp import TopExp_Explorer
         from OCP.TopTools import TopTools_IndexedMapOfShape
@@ -444,8 +449,49 @@ class Model:
                     triangle_mesh = False
                     break
         displayed_edges = [] if triangle_mesh else list(get_edges(shape.wrapped))
-        tess = tessellate(shape.wrapped, cache_key=f"cadpad-mesh-v2:{FINGERPRINT_FORMAT}:{fingerprint}:quality=0.1", deviation=0.1,
-                          quality=0.1, angular_tolerance=0.2, compute_faces=True, compute_edges=bool(displayed_edges))
+        def tessellate_at(deflection):
+            return tessellate(
+                shape.wrapped, cache_key=f"cadpad-mesh-v2:{FINGERPRINT_FORMAT}:{fingerprint}:quality={deflection}",
+                deviation=deflection, quality=deflection, angular_tolerance=0.2,
+                compute_faces=True, compute_edges=bool(displayed_edges),
+            )
+
+        def missing_planar_area(mesh, deflection):
+            counts = mesh["triangles_per_face"]
+            if len(counts) != len(displayed_faces):
+                return float("inf")
+            vertices = np.asarray(mesh["vertices"], dtype=np.float64).reshape(-1, 3)
+            triangles = np.asarray(mesh["triangles"]).reshape(-1, 3)
+            area_props, length_props = GProp_GProps(), GProp_GProps()
+            missing = 0.0
+            start = 0
+            for face, count in zip(displayed_faces, counts):
+                end = start + int(count)
+                if BRepAdaptor_Surface(face).GetType() == GeomAbs_Plane:
+                    a, b, c = vertices[triangles[start:end]].transpose(1, 0, 2)
+                    area = np.linalg.norm(np.cross(b - a, c - a), axis=1).sum() / 2
+                    BRepGProp.SurfaceProperties_s(face, area_props)
+                    exact = area_props.Mass()
+                    deficit = exact - area
+                    if deficit > exact * 1e-5:
+                        # Curved boundaries are approximated by chords. Their
+                        # expected area error scales with perimeter and deflection.
+                        BRepGProp.LinearProperties_s(face, length_props)
+                        if deficit > length_props.Mass() * deflection:
+                            missing += deficit
+                start = end
+            return missing
+
+        tess = tessellate_at(0.1)
+        if not triangle_mesh and displayed_faces:
+            missing = missing_planar_area(tess, 0.1)
+            if missing > 0:
+                # OCCT can leave gaps in planar faces at coarse deflection even
+                # when meshing reports success. Regenerate faces and edges together.
+                BRepTools.Clean_s(shape.wrapped)
+                refined = tessellate_at(0.001)
+                if missing_planar_area(refined, 0.001) < missing:
+                    tess = refined
         # The face tessellator omits standalone edges, including loose wires in
         # compounds that also contain faces. Discretize the original edge list
         # through the publisher's edge API so spans keep exact topology order.

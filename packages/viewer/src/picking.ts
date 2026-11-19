@@ -35,8 +35,15 @@ class PickResources {
   readonly edgeIds:readonly (string|null)[];
   readonly surface:THREE.BufferGeometry;
   readonly lines:THREE.BufferGeometry;
-  readonly surfaceTree:MeshBVH|null;
-  readonly lineTree:LineSegmentsBVH|null;
+  // Build on first use. Indirection preserves published primitive order.
+  private surfaceIndex?:MeshBVH;
+  private lineIndex?:LineSegmentsBVH;
+  get surfaceTree(){
+    return this.surfaceIndex??=new MeshBVH(this.surface,{indirect:true});
+  }
+  get lineTree(){
+    return this.lineIndex??=new LineSegmentsBVH(this.lines,{indirect:true});
+  }
   users=0;
   released=false;
   readonly buffers:MeshBuffers;
@@ -52,14 +59,16 @@ class PickResources {
     this.faceIds=Object.freeze([...(topology?.face_ids??this.faces.ends.map((_,index)=>`face:${index}`))]);
     this.edgeIds=Object.freeze([...(topology?.edge_ids??this.edges.ends.map((_,index)=>`edge:${index}`))]);
     for(const [kind,ids,spans] of [['face',this.faceIds,this.faces],['edge',this.edgeIds,this.edges]] as const){
-      if(ids.length!==spans.ends.length||ids.some(id=>id!==null&&!new RegExp(`^${kind}:[0-9]+$`).test(id))||new Set(ids.filter(id=>id!==null)).size!==ids.filter(id=>id!==null).length)throw new Error('Invalid display topology identities');
+      const pattern=kind==='face'?/^face:[0-9]+$/:/^edge:[0-9]+$/;
+      const seen=new Set<string>();
+      if(ids.length!==spans.ends.length||ids.some(id=>{
+        if(id===null)return false;
+        if(!pattern.test(id)||seen.has(id))return true;
+        seen.add(id);return false;
+      }))throw new Error('Invalid display topology identities');
     }
     this.lines=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(edges,3));
     this.surface=new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(vertices,3)).setIndex(new THREE.BufferAttribute(triangles,1));
-    // Indirection keeps published triangle/edge order and cached bytes intact.
-    // Build once per shared geometry, rather than once per assembly occurrence.
-    this.surfaceTree=triangles.length>=384?new MeshBVH(this.surface,{indirect:true}):null;
-    this.lineTree=edges.length>=768?new LineSegmentsBVH(this.lines,{indirect:true}):null;
   }
   release(){if(--this.users===0){this.released=true;this.surface.dispose();this.lines.dispose();this.onRelease();}}
 }
@@ -81,8 +90,8 @@ export class PickGeometry {
     this.faceIds=resources.faceIds;this.edgeIds=resources.edgeIds;resources.users++;
     this.lines=new THREE.LineSegments(resources.lines,new THREE.LineBasicMaterial());this.lines.matrixAutoUpdate=false;
     this.surface=new THREE.Mesh(resources.surface,new THREE.MeshBasicMaterial({side:THREE.DoubleSide}));this.surface.matrixAutoUpdate=false;
-    if(resources.surfaceTree)this.surface.raycast=(raycaster,hits)=>resources.surfaceTree!.raycastObject3D(this.surface,raycaster,hits);
-    if(resources.lineTree)this.lines.raycast=(raycaster,hits)=>resources.lineTree!.raycastObject3D(this.lines,raycaster,hits);
+    if(this.buffers.triangles?.length>=384)this.surface.raycast=(raycaster,hits)=>resources.surfaceTree.raycastObject3D(this.surface,raycaster,hits);
+    if(this.buffers.edges?.length>=768)this.lines.raycast=(raycaster,hits)=>resources.lineTree.raycastObject3D(this.lines,raycaster,hits);
   }
   /** New index views share immutable vertex bytes; dispose only the overlay. */
   highlight(kind:SelectionMode,index:number):THREE.BufferGeometry|null{
@@ -141,6 +150,9 @@ export function pickTopology(camera:THREE.Camera,ndc:THREE.Vector2,size:{width:n
   }
   const candidates:{instance:PickInstance;edge:number;point:THREE.Vector3;gap:number;depth:number}[]=[];
   const direction=camera.getWorldDirection(new THREE.Vector3());
+  const nearDepth=new THREE.Vector3(0,0,-1).unproject(camera).dot(direction);
+  const farDepth=new THREE.Vector3(0,0,1).unproject(camera).dot(direction);
+  const endpoint=new THREE.Vector3();
   for(const instance of instances){
     const line=instance.geometry.lines;
     if(!line.geometry.boundingSphere)line.geometry.computeBoundingSphere();
@@ -152,20 +164,48 @@ export function pickTopology(camera:THREE.Camera,ndc:THREE.Vector2,size:{width:n
     raycaster.params.Line.threshold=Math.max(1e-8,adjacent.unproject(camera).distanceTo(far)*pixels);
     line.matrixWorld.copy(instance.matrix);
     for(const hit of raycaster.intersectObject(line,false)){
-      const edge=instance.geometry.edges.entity(Math.floor((hit.index??-2)/2));if(edge===null||!instance.geometry.edgeIds[edge])continue;
+      const segment=Math.floor((hit.index??-2)/2);
+      const edge=instance.geometry.edges.entity(segment);if(edge===null||!instance.geometry.edgeIds[edge])continue;
+      const depth=hit.point.dot(direction);
+      const clippedDepth=THREE.MathUtils.clamp(depth,nearDepth,farDepth);
+      if(clippedDepth!==depth){
+        // The closest point on the full segment can lie past a clip plane.
+        // Try the visible endpoint where the segment crosses that plane.
+        const positions=line.geometry.getAttribute('position');
+        const reachesPlane=(vertex:number)=>{
+          endpoint.fromBufferAttribute(positions,vertex).applyMatrix4(instance.matrix);
+          const offset=endpoint.dot(direction)-depth;
+          const fraction=(clippedDepth-depth)/offset;
+          if(fraction<0||fraction>1)return false;
+          hit.point.lerp(endpoint,fraction);
+          return true;
+        };
+        if(!reachesPlane(segment*2)&&!reachesPlane(segment*2+1))continue;
+      }
       const point=hit.point.clone().project(camera);
-      if(point.z< -1||point.z>1)continue;
       const gap=Math.hypot((point.x-ndc.x)*size.width/2,(point.y-ndc.y)*size.height/2);
-      if(gap<=pixels)candidates.push({instance,edge,point:hit.point,gap,depth:hit.distance});
+      if(gap<=pixels)candidates.push({instance,edge,point:hit.point,gap,depth:clippedDepth});
     }
   }
   candidates.sort((a,b)=>a.gap-b.gap||a.depth-b.depth);
+  const normalMatrix=new THREE.Matrix3(),normal=new THREE.Vector3();
   for(const candidate of candidates){
     const projected=candidate.point.clone().project(camera);
     raycaster.setFromCamera(new THREE.Vector2(projected.x,projected.y),camera);
-    const front=raycaster.intersectObjects(meshes,false).find(hit=>{const z=hit.point.clone().project(camera).z;return z>=-1&&z<=1;});
     const distance=raycaster.ray.origin.distanceTo(candidate.point);
-    if(front&&front.distance+2*(candidate.instance.tolerance_mm??0.1)<distance)continue;
+    const tolerance=2*(candidate.instance.tolerance_mm??0.1);
+    const occluded=raycaster.intersectObjects(meshes,false).some(hit=>{
+      const gap=distance-hit.distance;
+      if(gap<=tolerance)return false;
+      const z=hit.point.clone().project(camera).z;
+      if(z< -1||z>1)return false;
+      if(hit.object!==candidate.instance.geometry.surface||!hit.face)return true;
+      // Tessellation error is measured perpendicular to the face. Along a
+      // grazing ray the same error can span a much larger depth interval.
+      normal.copy(hit.face.normal).applyNormalMatrix(normalMatrix.getNormalMatrix(hit.object.matrixWorld));
+      return gap*Math.abs(normal.dot(raycaster.ray.direction))>tolerance;
+    });
+    if(occluded)continue;
     return {instance_id:candidate.instance.instance_id,entity_id:mode==='part'?'part:0':candidate.instance.geometry.edgeIds[candidate.edge]!};
   }
   return null;

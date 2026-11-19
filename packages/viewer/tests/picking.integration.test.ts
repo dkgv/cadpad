@@ -39,6 +39,15 @@ with tempfile.TemporaryDirectory() as directory:
   assert.ok(edge);
   const edgeProperties=data.exact.find((item:{reference:{entity_id:string}})=>item.reference.entity_id===edge.entity_id);
   assert.equal(edgeProperties.curve_type,'LINE');assert.equal(edgeProperties.length,10);assert.deepEqual(edgeProperties.semantic_labels,['top_border']);
+  // From above, the top and bottom edges project to the same line.
+  // Orbiting underneath should select the actual bottom edge at that pixel.
+  camera.position.set(0,0,-50);camera.lookAt(0,0,0);camera.updateMatrixWorld();
+  const underside=pickTopology(camera,new THREE.Vector2(0,0.49),size,'edge',[instance]);
+  assert.ok(underside);
+  const undersideProperties=data.exact.find((item:{reference:{entity_id:string}})=>item.reference.entity_id===underside.entity_id);
+  assert.equal(undersideProperties.world_center[2],-3);
+  assert.equal(undersideProperties.length,10);
+  camera.position.set(0,0,50);camera.lookAt(0,0,0);camera.updateMatrixWorld();
   instance.matrix.makeRotationZ(Math.PI/2).setPosition(5,0,0);
   const moved=pickTopology(camera,new THREE.Vector2(-0.24,0),size,'edge',[instance]);
   assert.deepEqual(moved,edge);

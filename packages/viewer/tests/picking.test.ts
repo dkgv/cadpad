@@ -85,6 +85,21 @@ test('edge candidates behind visible faces are rejected and coplanar edges stay 
   assert.equal(pickTopology(view,new THREE.Vector2(),size,'edge',[edge,front]),null);
   edge.geometry.dispose();front.geometry.dispose();
 });
+test('edge picking accounts for tessellation gaps at grazing angles',()=>{
+  const view=camera();
+  const buffers={
+    vertices:new Float32Array([-5,-1,-5,5,-1,-5,5,1,5,-5,1,5]),
+    triangles:new Uint32Array([0,1,2,0,2,3]),triangles_per_face:new Uint32Array([2]),
+    edges:new Float32Array([-5,0,-0.5,5,0,-0.5]),segments_per_edge:new Uint32Array([1]),
+  };
+  const geometry=new PickGeometry(buffers);
+  const instance={instance_id:'slab',matrix:new THREE.Matrix4(),geometry};
+  const cursor=new THREE.Vector2();
+  assert.deepEqual(pickTopology(view,cursor,size,'edge',[instance]),{instance_id:'slab',entity_id:'edge:0'});
+  const blocker=plate(-0.25);
+  assert.equal(pickTopology(view,cursor,size,'edge',[instance,blocker]),null);
+  geometry.dispose();blocker.geometry.dispose();
+});
 test('face centers follow the indexed face instead of the shared part bounds',()=>{
   const geometry=new PickGeometry({
     vertices:new Float32Array([0,0,0,2,0,0,0,2,0,100,0,0,102,0,0,100,2,0]),
@@ -122,6 +137,35 @@ test('camera near/far clipping excludes invisible topology from picks and occlus
   assert.equal(pickTopology(view,new THREE.Vector2(),size,'face',[face]),null);
   assert.equal(pickTopology(view,new THREE.Vector2(),size,'edge',[edge,face]),null);
   face.geometry.dispose();edge.geometry.dispose();
+});
+
+test('a clipped edge remains pickable next to its visible endpoint',()=>{
+  const geometry=new PickGeometry({
+    edges:new Float32Array([-5,0,5,5,0,-5]),segments_per_edge:new Uint32Array([1]),
+  });
+  const instance={instance_id:'diagonal',matrix:new THREE.Matrix4(),geometry};
+  for(const perspective of [false,true]){
+    const view=camera(perspective);
+    for(const [near,far,offset] of [[20,100,-0.04],[0.1,20,0.04]]){
+      view.near=near;view.far=far;view.updateProjectionMatrix();
+      assert.deepEqual(pickTopology(view,new THREE.Vector2(offset,0),size,'edge',[instance]),
+        {instance_id:'diagonal',entity_id:'edge:0'});
+      assert.equal(pickTopology(view,new THREE.Vector2(offset*2,0),size,'edge',[instance]),null);
+    }
+  }
+  geometry.dispose();
+});
+
+test('overlapping edge picks prefer the front occurrence and fall back past occluded candidates',()=>{
+  const geometry=wire().geometry;
+  const rear={instance_id:'rear',matrix:new THREE.Matrix4(),geometry};
+  const front={instance_id:'front',matrix:new THREE.Matrix4().makeTranslation(0,0,2),geometry:wire().geometry};
+  const view=camera(),cursor=new THREE.Vector2(0.2,0);
+  assert.deepEqual(pickTopology(view,cursor,size,'edge',[rear,front]),{instance_id:'front',entity_id:'edge:2'});
+  const blocker=plate(1);
+  front.matrix.makeTranslation(0,0.4,2);
+  assert.deepEqual(pickTopology(view,cursor,size,'edge',[rear,blocker,front]),{instance_id:'front',entity_id:'edge:2'});
+  geometry.dispose();front.geometry.dispose();blocker.geometry.dispose();
 });
 
 test('display topology maps sparse native identities and skips degenerate pole edges',()=>{
