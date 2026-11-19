@@ -8,12 +8,13 @@ import {Icon,ModelOpening} from './ui';
 import {measureModelOpen} from './model-open-timing';
 import {StlPreview,StlPreviewStream} from './stl-preview';
 import {ProjectEntry,type EntrySelection} from './project-entry';
+import {rememberRecentModel} from './quick-model';
 import {SidebarSections} from './sidebar-sections';
 import {AppAlert} from './app-alert';
 import './workbench.css';
 
 type Area='canvas'|'left'|'right';
-type DocumentTab={kind?:'changes';id:string;workspace:string;name:string;dirty:boolean;pending?:boolean;opening?:boolean;modelEntry?:{entry:string;builder:string;project:string}};
+type DocumentTab={kind?:'changes';id:string;workspace:string;name:string;dirty:boolean;projectHome?:boolean;pending?:boolean;opening?:boolean;modelEntry?:{entry:string;builder:string;project:string}};
 type ModelOpen={identity:string;cancelled:boolean;dropped:boolean;reused:boolean;docClosed:boolean;workspace:string;jobId:string;docId:string;promise:Promise<void>};
 function modelJob(job:unknown):{id:string;state:string}|undefined{
   if(!job||typeof job!=='object')return;
@@ -42,10 +43,17 @@ function modelTabTitle(project:Project|undefined,fallback:string,entry?:{builder
 const toolTabs:Record<ToolTab,DockTab>={model:{id:'model',title:'Explorer',icon:'folder'},move:{id:'move',title:'Move',icon:'motion'},simulate:{id:'simulate',title:'Physics',icon:'physics'},test:{id:'test',title:'Requirements',icon:'tests'},assistant:{id:'assistant',title:'Assistant',icon:'chat'}};
 const toolIds=Object.keys(toolTabs) as ToolTab[];
 const leftTools=new Set<ToolTab>(['model','move','simulate','test']);
+function isProjectHome(project:Project){
+  return !project.model_parent&&(!!project.model_entry||
+    (!project.model.parts.length&&(project.external_tracking||project.saved_revision!=null)&&!project.display_error&&project.activity.at(-1)?.state!=='failed'));
+}
+function projectDocument(project:Project):DocumentTab{
+  return {id:dockId(),workspace:project.workspace_id,name:modelTabTitle(project,project.name||'Untitled'),dirty:hasUnsavedChanges(project),projectHome:isProjectHome(project)};
+}
 function fresh(project:Project):Layout{
-  const tab={id:dockId(),workspace:project.workspace_id,name:modelTabTitle(project,project.name||'Untitled'),dirty:hasUnsavedChanges(project)};
+  const tab=projectDocument(project);
   // Activity-rail tools own the pane exclusively, like VS Code view containers.
-  return {projectWorkspace:project.model_parent||project.workspace_id,canvas:group([tab.id]),left:group(['model']),right:group(['assistant']),documents:[tab],focus:tab.id,leftWidth:320,rightWidth:320,expanded:['model','assistant'],locations:{},sectionWeights:{}};
+  return {projectWorkspace:project.model_parent||project.workspace_id,canvas:group(tab.projectHome?[]:[tab.id]),left:group(['model']),right:group(['assistant']),documents:[tab],focus:tab.id,leftWidth:320,rightWidth:320,expanded:['model','assistant'],locations:{},sectionWeights:{}};
 }
 function exclusiveStack(tabs:string[],expanded:ToolTab[],side:'left'|'right',locations:Partial<Record<ToolTab,Area>>){
   const activity=tabs.filter(id=>side==='left'?leftTools.has(id as ToolTab):id==='assistant') as ToolTab[];
@@ -73,8 +81,12 @@ function restore(project:Project,known:Set<string>):Layout{
     const text=localStorage.getItem(key)??localStorage.getItem('cadpad.dock-layout.v1');if(!text||text.length>64000)return fallback;
     const saved=JSON.parse(text) as Layout;
     const documents=Array.isArray(saved.documents)?saved.documents.filter(doc=>!doc.pending&&doc.kind!=='changes'&&typeof doc.id==='string'&&typeof doc.name==='string'&&/^[\w-]+$/.test(doc.id)&&known.has(doc.workspace)&&(saved.projectWorkspace?known.has(saved.projectWorkspace):doc.workspace===project.workspace_id)).slice(0,32):[];
-    if(saved.projectWorkspace&&!documents.some(doc=>doc.workspace===project.workspace_id))return fallback;
-    const canvas=validateDock(saved.canvas,new Set(documents.map(doc=>doc.id)));
+    const base=fallback.documents[0];
+    const savedRoot=documents.find(doc=>doc.workspace===project.workspace_id&&!doc.modelEntry);
+    if(saved.projectWorkspace&&!documents.some(doc=>doc.workspace===project.workspace_id)&&!(base.projectHome&&saved.projectWorkspace===project.workspace_id))return fallback;
+    const home=base.projectHome?{...base,id:savedRoot?.id??base.id}:undefined;
+    const tabs=home?documents.filter(doc=>doc.workspace!==home.workspace||doc.modelEntry):documents;
+    const canvas=validateDock(saved.canvas,new Set(tabs.map(doc=>doc.id)));
     const seen=new Set<string>(),left=validateDock(saved.left,new Set(toolIds),0,seen),right=validateDock(saved.right,new Set(toolIds),0,seen);
     if(!canvas)return fallback;
     let expanded=(Array.isArray(saved.expanded)?saved.expanded:(left?groups(left):[]).concat(right?groups(right):[]).map(g=>g.active)).filter(id=>toolIds.includes(id as ToolTab)) as ToolTab[];
@@ -84,15 +96,13 @@ function restore(project:Project,known:Set<string>):Layout{
     const rightNorm=exclusiveDock(right??group(['assistant']),expanded,'right',locations);
     expanded=rightNorm.expanded;locations=rightNorm.locations;
     expanded=[...new Set([...expanded,...groups(leftNorm.node).concat(groups(rightNorm.node)).filter(pane=>pane.tabs.length===1).flatMap(pane=>pane.tabs as ToolTab[])])];
-    // An intentionally empty tab set is session-only; relaunch reopens the focused workspace.
     const sectionWeights=saved.sectionWeights&&typeof saved.sectionWeights==='object'?Object.fromEntries(Object.entries(saved.sectionWeights).filter(([id,value])=>toolIds.includes(id as ToolTab)&&Number.isFinite(value)&&Number(value)>0).map(([id,value])=>[id,Number(value)])) as Partial<Record<ToolTab,number>>:{};
-    if(!documents.length)return {...fallback,left:leftNorm.node,right:rightNorm.node,leftWidth:Number.isFinite(saved.leftWidth)?Math.max(220,Math.min(640,saved.leftWidth)):320,rightWidth:Number.isFinite(saved.rightWidth)?Math.max(220,Math.min(640,saved.rightWidth)):320,expanded,locations,sectionWeights};
+    const sidebar={left:leftNorm.node,right:rightNorm.node,leftWidth:Number.isFinite(saved.leftWidth)?Math.max(220,Math.min(640,saved.leftWidth)):320,rightWidth:Number.isFinite(saved.rightWidth)?Math.max(220,Math.min(640,saved.rightWidth)):320,expanded,locations,sectionWeights};
     const used=new Set(groups(canvas).flatMap(g=>g.tabs));
-    const restored=documents.filter(doc=>used.has(doc.id)).map(doc=>{
-      const staleView=!doc.modelEntry&&doc.workspace===project.workspace_id&&!!project.model_entry;
-      return {...doc,opening:false,name:staleView?project.name||'Untitled':modelTabTitle(undefined,doc.name,doc.modelEntry)};
-    });if(!restored.length)return fallback;
-    return {projectWorkspace:saved.projectWorkspace??project.workspace_id,canvas,left:leftNorm.node,right:rightNorm.node,documents:restored,focus:groups(canvas).some(g=>g.active===saved.focus)?saved.focus:groups(canvas).map(g=>g.active).find(Boolean)??restored[0].id,leftWidth:Number.isFinite(saved.leftWidth)?Math.max(220,Math.min(640,saved.leftWidth)):320,rightWidth:Number.isFinite(saved.rightWidth)?Math.max(220,Math.min(640,saved.rightWidth)):320,expanded,locations,sectionWeights};
+    const restored:DocumentTab[]=tabs.filter(doc=>used.has(doc.id)).map(doc=>({...doc,projectHome:false,opening:false,name:modelTabTitle(undefined,doc.name,doc.modelEntry)}));
+    if(home)restored.unshift(home);
+    if(!restored.length)return {...fallback,...sidebar};
+    return {...sidebar,projectWorkspace:saved.projectWorkspace??project.workspace_id,canvas,documents:restored,focus:groups(canvas).some(g=>g.active===saved.focus)?saved.focus:groups(canvas).map(g=>g.active).find(Boolean)??restored[0].id};
   }catch{return fallback;}
 }
 function Slot({host,className}:{host:HTMLElement;className:string}){
@@ -117,7 +127,7 @@ export function Workbench(){
   }
   const [layout,setLayout]=useState<Layout|null>(null),[failure,setFailure]=useState('');
   const [selections,setSelections]=useState<Record<string,SelectionContext>>({});
-  const [known,setKnown]=useState<{workspace_id:string;name:string;running:number;model_parent?:string}[]>([]);
+  const [known,setKnown]=useState<{workspace_id:string;name:string;running:number;model_parent?:string;project_directory?:string|null}[]>([]);
   const state=useRef(layout);state.current=layout;
   const activePane=useRef<HTMLElement|null>(null);
   const chatTabs=useRef(0);
@@ -169,6 +179,11 @@ export function Workbench(){
     publish(layout);
   }).catch(error=>{if(active)setFailure(describeError(error));});return()=>{active=false;};},[]);
   useEffect(()=>{if(!layout)return;const timer=setTimeout(()=>{try{localStorage.setItem(key,JSON.stringify(layout));}catch{}},200);return()=>clearTimeout(timer);},[layout]);
+  const focusDoc=layout?.documents.find(doc=>doc.id===layout.focus);
+  const recentModel=focusDoc?.opening||focusDoc?.pending?undefined:focusDoc?.modelEntry;
+  useEffect(()=>{
+    if(recentModel)rememberRecentModel(recentModel.project,recentModel.entry,recentModel.builder);
+  },[recentModel]);
   useLayoutEffect(()=>{
     const pane=layout?.focus?hosts.current.get(layout.focus)?.closest<HTMLElement>('[data-dock-group]'):null;
     if(pane?.isConnected)activePane.current=pane;
@@ -194,22 +209,33 @@ export function Workbench(){
       return {...current,[area]:updateGroup(current[area],groupId,g=>({...g,active:tab})),focus:area==='canvas'?tab:current.focus};
     });
   }
+  function rememberProject(project:Project){
+    setKnown(current=>{
+      const existing=current.find(ws=>ws.workspace_id===project.workspace_id);
+      const name=project.name||'Untitled';
+      const directory=project.project_directory??existing?.project_directory;
+      if(existing?.name===name&&existing?.project_directory===directory)return current;
+      if(existing)return current.map(ws=>ws===existing?{...ws,name,project_directory:directory}:ws);
+      return [...current,{workspace_id:project.workspace_id,name,running:0,project_directory:directory}];
+    });
+  }
   function openProject(project:Project,options?:{replace?:boolean}){
     projects.current.set(project.workspace_id,project);
-    setKnown(current=>current.some(ws=>ws.workspace_id===project.workspace_id)?current:[...current,{workspace_id:project.workspace_id,name:project.name||'Untitled',running:0}]);
+    rememberProject(project);
     update(current=>{
-      const doc={id:dockId(),workspace:project.workspace_id,name:modelTabTitle(project,project.name||'Untitled'),dirty:hasUnsavedChanges(project)};
+      const doc=projectDocument(project);
       if(options?.replace||!current.documents.length){
         // Reuse the sidebar host session when reopening the same project after closing its canvas tab.
         const kept=current.documents.length===1?current.documents.find(item=>item.workspace===project.workspace_id):undefined;
-        if(kept)return {...current,projectWorkspace:project.workspace_id,documents:[{...kept,name:modelTabTitle(project,kept.name,kept.modelEntry),dirty:hasUnsavedChanges(project)}],canvas:group([kept.id]),focus:kept.id};
-        chatTabs.current=0;return {...current,projectWorkspace:project.workspace_id,documents:[doc],canvas:group([doc.id]),focus:doc.id};
+        if(kept)return {...current,projectWorkspace:project.workspace_id,documents:[{...doc,id:kept.id}],canvas:group(doc.projectHome?[]:[kept.id]),focus:kept.id};
+        chatTabs.current=0;return {...current,projectWorkspace:project.workspace_id,documents:[doc],canvas:group(doc.projectHome?[]:[doc.id]),focus:doc.id};
       }
       const existing=current.documents.find(item=>item.kind!=='changes'&&item.workspace===project.workspace_id);
+      if(existing?.projectHome&&doc.projectHome)return current;
       if(existing){const owner=groups(current.canvas).find(g=>g.tabs.includes(existing.id));return {...current,focus:existing.id,canvas:owner?updateGroup(current.canvas,owner.id,g=>({...g,active:existing.id})):placeTab(current.canvas,existing.id,groups(current.canvas)[0].id)};}
       const target=groups(current.canvas).find(g=>g.tabs.includes(current.focus))||groups(current.canvas)[0];
       const open=new Set(groups(current.canvas).flatMap(pane=>pane.tabs));
-      return {...current,documents:[...current.documents.filter(item=>open.has(item.id)),doc],canvas:placeTab(current.canvas,doc.id,target.id),focus:doc.id};
+      return {...current,documents:[...current.documents.filter(item=>item.projectHome||open.has(item.id)),doc],canvas:doc.projectHome?current.canvas:placeTab(current.canvas,doc.id,target.id),focus:doc.projectHome&&target.active?current.focus:doc.id};
     });
   }
   function focusDocument(id:string){
@@ -359,7 +385,7 @@ export function Workbench(){
     const next={...current,[area]:tree};
     const canvasTabs=groups(next.canvas).flatMap(pane=>pane.tabs);
     // Keep one session alive to host the project's remaining chat tabs.
-    const documents=current.documents.filter(doc=>canvasTabs.includes(doc.id));
+    const documents=current.documents.filter(doc=>doc.projectHome||canvasTabs.includes(doc.id));
     if(!documents.length&&chatTabs.current){
       const session=current.documents.find(doc=>doc.id===current.focus)??current.documents[0];
       if(session)documents.push(session);
@@ -391,7 +417,11 @@ export function Workbench(){
     if(canvas?.active){closeTabs('canvas',[canvas.active]);return;}
     const chat=document.querySelector<HTMLElement>('.docked-sidebar .dock-chats .dock-group.focused')??document.querySelector<HTMLElement>('.docked-sidebar .dock-chats .dock-group');
     const tab=chat?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.dataset.tab;
-    if(tab)chat?.dispatchEvent(new CustomEvent('cadpad-close-chat',{bubbles:true,detail:{chatId:tab}}));
+    if(tab){chat?.dispatchEvent(new CustomEvent('cadpad-close-chat',{bubbles:true,detail:{chatId:tab}}));return;}
+    // An explicit close with no tabs can dismiss the remaining project session.
+    if(current.documents.length&&!chatTabs.current&&!groups(current.canvas).some(pane=>pane.tabs.length)){
+      update(layout=>({...layout,documents:[],focus:''}));
+    }
   }
   useEffect(()=>{
     const remember=(event:Event)=>{
@@ -399,11 +429,10 @@ export function Workbench(){
       if(pane)activePane.current=pane;
     };
     const chatsChanged=(event:Event)=>{
-      chatTabs.current=(event as CustomEvent<{count:number}>).detail.count;
-      const current=state.current;
-      if(current?.documents.length&&!chatTabs.current&&!groups(current.canvas).some(pane=>pane.tabs.length)){
-        update(layout=>({...layout,documents:[],focus:''}));
-      }
+      const previous=chatTabs.current;
+      const {count}=(event as CustomEvent<{count:number}>).detail;
+      chatTabs.current=count;
+      if(previous>0&&count===0&&state.current?.expanded.includes('assistant'))showTool('assistant',true);
     };
     document.addEventListener('pointerdown',remember,true);document.addEventListener('focusin',remember,true);
     document.addEventListener('cadpad-chat-tabs-change',chatsChanged);
@@ -566,7 +595,6 @@ export function Workbench(){
   const docs=Object.fromEntries(layout.documents.map(doc=>[doc.id,{id:doc.id,title:doc.name,dirty:doc.dirty,icon:doc.kind==='changes'?'file' as const:'cube' as const}]));
   const toolHosts=Object.fromEntries(toolIds.map(id=>[id,host(id)])) as Record<ToolTab,HTMLElement>;
   const canvasHosts=Object.fromEntries(layout.documents.map(doc=>[doc.id,host(doc.kind==='changes'?'$changes':doc.id)]));
-  const focusDoc=layout.documents.find(doc=>doc.id===layout.focus);
   const projectWorkspace=layout.projectWorkspace||focusDoc?.workspace||'';
   const focusWorkspace=focusDoc?.workspace||projectWorkspace;
   chromeId.current=pickChrome(layout.documents,layout.projectWorkspace);
@@ -585,7 +613,8 @@ export function Workbench(){
     {!layout.documents.length&&<header className="app-header workbench-empty-header" data-tauri-drag-region/>}
     <div className="docked-main">{!groups(layout.left).some(g=>g.tabs.length)&&<DockOuterTarget area="left" group={groups(layout.left)[0].id}/>} {!groups(layout.right).some(g=>g.tabs.length)&&<DockOuterTarget area="right" group={groups(layout.right)[0].id}/>}<Slot host={rail} className="workbench-rail-slot"/>
       {!!layout.documents.length&&groups(layout.left).some(g=>g.tabs.length)&&<><div className="docked-sidebar left" style={{width:layout.leftWidth}}>{area('left')}</div><WidthDivider side="left" value={layout.leftWidth} onChange={width=>update(current=>({...current,leftWidth:width}))}/></>}
-      <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<AppAlert message={failure} onDismiss={()=>setFailure('')}/>}{!!layout.documents.length&&area('canvas')}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Create a project, open a project folder, or continue a recent project.</p><div className="dock-welcome-actions"><button onClick={()=>void action('new-project')}><Icon name="plus" size={15}/>New project…</button><button className="primary-button" onClick={()=>void action('open')}><Icon name="folder" size={15}/>Open project…</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.filter(ws=>!ws.model_parent).slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span>{ws.name||'Untitled'}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}</div>
+      <div className="docked-center"><Slot host={notices} className="workbench-notices-slot"/>{failure&&<AppAlert message={failure} onDismiss={()=>setFailure('')}/>}{!!layout.documents.length&&(activeGroups.some(pane=>pane.tabs.length)?area('canvas'):
+        <section className="workspace" aria-label="Project canvas"><div className="empty"><h1>No model open</h1><p>Choose a model in Explorer to open it here.</p></div></section>)}{!layout.documents.length&&<div className="dock-welcome"><div className="dock-welcome-card"><h1>Cadpad</h1><p>Create a project, open a project folder, or continue a recent project.</p><div className="dock-welcome-actions"><button onClick={()=>void action('new-project')}><Icon name="plus" size={15}/>New project…</button><button className="primary-button" onClick={()=>void action('open')}><Icon name="folder" size={15}/>Open project…</button></div>{!!known.length&&<div className="dock-welcome-recent"><div className="dock-welcome-recent-heading"><h2>Recent</h2><button type="button" className="subtle-button" onClick={()=>void clearRecent()}>Clear all</button></div><ul>{known.filter(ws=>!ws.model_parent).slice(0,8).map(ws=><li key={ws.workspace_id}><button type="button" className="dock-welcome-open" onClick={()=>void openWorkspace(ws.workspace_id)}><Icon name="cube" size={16}/><span className="dock-welcome-project"><span>{ws.name||'Untitled'}</span>{ws.project_directory&&<span className="dock-welcome-path" title={ws.project_directory}>{ws.project_directory}</span>}</span>{!!ws.running&&<small>Working</small>}</button><button type="button" className="icon-button" aria-label={`Remove ${ws.name||'Untitled'} from recent`} onClick={()=>void forgetRecent(ws.workspace_id)}><Icon name="close" size={14}/></button></li>)}</ul></div>}</div></div>}</div>
       {!!layout.documents.length&&groups(layout.right).some(g=>g.tabs.length)&&<><WidthDivider side="right" value={layout.rightWidth} onChange={width=>update(current=>({...current,rightWidth:width}))}/><div className="docked-sidebar right" style={{width:layout.rightWidth}}>{area('right')}</div></>}
     </div>
     {layout.documents.filter(doc=>doc.opening).map(doc=>{
@@ -610,7 +639,22 @@ export function Workbench(){
         onOpeningSettled:doc.opening?()=>update(current=>({
           ...current,documents:current.documents.map(item=>item.id===doc.id?{...item,opening:false}:item),
         })):undefined,
-        onProject:project=>{projects.current.set(project.workspace_id,project);update(current=>{const prior=current.documents.find(item=>item.id===doc.id);const fallback=prior?.modelEntry?prior.name:project.name||'Untitled';const name=modelTabTitle(project,fallback,prior?.modelEntry);if(prior&&prior.name===name&&prior.dirty===hasUnsavedChanges(project))return current;return {...current,documents:current.documents.map(item=>item.kind!=='changes'&&item.workspace===project.workspace_id?{...item,name:modelTabTitle(project,item.modelEntry?item.name:project.name||'Untitled',item.modelEntry),dirty:hasUnsavedChanges(project)}:item)};});},
+        onProject:project=>{
+          projects.current.set(project.workspace_id,project);
+          if(project.project_directory&&!doc.modelEntry)rememberProject(project);
+          update(current=>{
+            const prior=current.documents.find(item=>item.id===doc.id);
+            if(!prior)return current;
+            const dirty=hasUnsavedChanges(project);
+            const name=modelTabTitle(project,prior.modelEntry?prior.name:project.name||'Untitled',prior.modelEntry);
+            const showModel=prior.projectHome&&!isProjectHome(project);
+            if(!showModel&&prior.name===name&&prior.dirty===dirty)return current;
+            const documents=current.documents.map(item=>item.workspace===project.workspace_id&&item.kind!=='changes'?{...item,name,dirty,projectHome:showModel?false:item.projectHome}:item);
+            if(!showModel)return {...current,documents};
+            const target=groups(current.canvas).find(pane=>pane.tabs.includes(current.focus))??groups(current.canvas)[0];
+            return {...current,documents,canvas:placeTab(current.canvas,prior.id,target.id),focus:prior.id};
+          });
+        },
         connectMenu:channel=>connectMenu(doc.id,channel),connectView:channel=>connectView(doc.id,channel),
       };
       return <DockContent key={doc.id} host={host(doc.id)}><App key={doc.workspace} host={sessionHost}/></DockContent>;

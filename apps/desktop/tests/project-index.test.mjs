@@ -72,15 +72,12 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.equal(document.querySelector('.explorer-parts'),null,'an unloaded project does not present an empty parts count');
   assert.doesNotMatch(document.body.textContent,/Ask the assistant to create a part/);
   assert.match(document.body.textContent,/Models/);
-  const currentFile=()=>document.querySelector('[aria-label="Project source files"] [aria-current="true"]');
   const currentModel=()=>document.querySelector('[aria-label="Indexed models"] [aria-current="true"]');
   assert.equal(currentModel(),null,'a project tab has no active model, even after a catalog click');
   await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:'cad/brake.py',builder:'pin'}})));
   assert.equal(currentModel().textContent,'Pin','the focused model is selected');
   assert.ok(currentModel().closest('details').open,'the active model folder is revealed');
-  assert.equal(currentFile().textContent,'brake.py','Files highlights the active model source');
-  assert.ok(currentFile().closest('details').open,'Files expands the active source folder');
-  await act(async()=>{currentFile().closest('details').open=false;currentModel().closest('details').open=false;});
+  await act(async()=>{currentModel().closest('details').open=false;});
   const modelsSection=currentModel().closest('.sidebar-section');
   await act(async()=>modelsSection.querySelector('.sidebar-section-heading button').click());
   assert.equal(modelsSection.querySelector(':scope > div[id]').hidden,true);
@@ -98,12 +95,8 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.equal(modelsSection.querySelector(':scope > div[id]').hidden,false,'tab focus expands the Models section');
   assert.ok(currentModel().closest('details').open,'tab focus reopens a manually collapsed model folder');
   assert.equal(modelPane.scrollTop,170,'the active entry scrolls into view after its section expands');
-  assert.equal(currentFile().textContent,'brake.py');
-  assert.ok(currentFile().closest('details').open,'switching builders in the same file reveals a collapsed source folder');
   await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:'zoo/nested/yoke.py',builder:'yoke'}})));
   assert.equal(currentModel().textContent,'Yoke','selection follows tab focus into another folder');
-  assert.equal(currentFile().getAttribute('title'),'zoo/nested/yoke.py');
-  for(let parent=currentFile().parentElement;parent;parent=parent.parentElement){if(parent.tagName==='DETAILS')assert.ok(parent.open,'every active source ancestor expands');}
   assert.ok(currentModel().closest('details').open);
   await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:'cad/brake.py',builder:'pin'}})));
   assert.equal(modelPane.scrollTop,20,'an entry above the visible tree scrolls back into view');
@@ -113,7 +106,6 @@ test('source candidates use generic labels and shared Explorer sections',async()
   delete pinRow.getBoundingClientRect;
   await act(async()=>root.render(React.createElement(ProjectExplorer,explorer)));
   assert.equal(currentModel(),null,'returning to the project tab clears the model highlight');
-  assert.equal(currentFile(),null,'returning to the project clears the source file highlight');
   const search=document.querySelector('[aria-label="Search Explorer"]');
   assert.ok(search,'Explorer search is visible before any geometry is loaded');
   const enter=async(value)=>act(async()=>{Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(search,value);search.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});
@@ -134,39 +126,12 @@ test('source candidates use generic labels and shared Explorer sections',async()
   await expandModelFolder('nested');
   assert.deepEqual([...modelsTree.querySelectorAll('.library-part-link')].map(button=>[...button.querySelectorAll('span,small')].map(node=>node.textContent).join('')),['Axle','Brake body','Pin','Yoke'],'Explorer models sort alphabetically');
   assert.equal(calls.filter(call=>call[0]==='project_source_index').length,1,'typing filters the existing index without another worker request');
-  const filesSection=[...document.querySelectorAll('.sidebar-content-sections>.sidebar-section')].find(section=>section.querySelector('.sidebar-section-heading button').textContent==='Files');
-  assert.equal(filesSection.querySelector(':scope > div[id]').hidden,true,'source files are secondary to models');
   assert.ok(document.querySelector('[aria-label="Indexed models"] .library-part-link'));
-  assert.equal(document.querySelector('[aria-label="Indexed models"] .library-file-link'),null);
-  assert.equal(document.querySelector('[aria-label="Project source files"] .library-part-link'),null);
-  await act(async()=>filesSection.querySelector('.sidebar-section-heading button').click());
-  assert.deepEqual([...document.querySelectorAll('[aria-label="Project source files"] .library-file-link')].map(button=>button.textContent),['axle.py','brake.py','yoke.py'],'Explorer files sort alphabetically');
-  await act(async()=>undefined);
-  const sourceFiles=document.querySelector('[aria-label="Project source files"]');
-  const link=name=>[...sourceFiles.querySelectorAll('.library-file-link')].find(node=>node.textContent===name);
-  const folder=name=>[...sourceFiles.querySelectorAll('summary')].find(node=>node.textContent===name);
-  assert.ok(link('brake.py').classList.contains('git-modified'));
-  assert.equal(link('brake.py').getAttribute('aria-label'),'brake.py, Changed');
-  assert.equal(link('brake.py').getAttribute('title'),'cad/brake.py');
-  assert.ok(link('brake.py').querySelector('.git-dot'));
-  assert.ok(link('yoke.py').classList.contains('git-new'));
-  assert.equal(link('yoke.py').getAttribute('aria-label'),'yoke.py, New');
-  assert.equal(link('axle.py').classList.contains('git-new'),false);
-  assert.equal(link('axle.py').querySelector('.git-dot'),null);
-  assert.ok(folder('cad').classList.contains('git-modified'));
-  assert.ok(folder('cad').querySelector('.git-dot'));
-  assert.equal(folder('cad').getAttribute('title'),'Changed');
-  assert.ok(folder('zoo').classList.contains('git-new'));
-  assert.ok(folder('nested').classList.contains('git-new'));
-  assert.equal(document.querySelector('[aria-label="Indexed models"] .git-dot'),null,'model names stay separate from git status');
-  await act(async()=>[...document.querySelectorAll('.library-file-link')].find(button=>button.textContent==='brake.py').click());
-  assert.match(document.querySelector('[aria-label="Source code"]').textContent,/Python source preview/);
-  assert.deepEqual(calls.findLast(call=>call[0]==='read_source'),['read_source',{workspace:'ws',version:'r1',path:'cad/brake.py'}]);
-  await act(async()=>document.querySelector('[aria-label="Close source preview"]').click());
-
+  assert.equal(document.querySelector('[aria-label="Indexed models"] .git-dot'),null);
+  assert.equal(document.querySelector('[aria-label="Project source files"]'),null);
 
   await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,parts:[{instance_id:'plate',name:'Plate',accuracy:'exact'}]})));
-  assert.equal(document.querySelector('.explorer-parts').closest('.sidebar-section').querySelector('.sidebar-section-heading button').textContent,'Objects');
+  assert.equal(document.querySelector('.explorer-parts').closest('.sidebar-section').querySelector('.sidebar-section-heading button').textContent,'Parts');
   const objects=document.querySelector('.explorer-parts').closest('.sidebar-section');
   assert.equal(objects.querySelector(':scope > div[id]').hidden,true,'object controls start collapsed below the model tree');
   assert.equal(document.querySelector('[aria-label="Indexed models"]').closest('.sidebar-section').querySelector('.explorer-parts'),null,'the model tree has no generated geometry block above it');
@@ -178,27 +143,41 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.equal(document.querySelectorAll('.catalog-compact .library-part-link').length,1);
   await act(async()=>document.querySelector('[aria-label="Clear Explorer search"]').click());
 
+  await act(async()=>objects.querySelector('.sidebar-section-heading button').click());
   const content=document.createElement('div');let toggles=0;
   const {createPortal}=await import('react-dom');
   await act(async()=>root.render(React.createElement(React.Fragment,null,
     React.createElement(SidebarSections,{area:'left',group:{kind:'group',id:'explorer',tabs:['model'],active:'model'},tabs:{model:{id:'model',title:'Explorer',icon:'folder'}},hosts:{model:content},expanded:[],weights:{},onToggle:()=>toggles++,onDrop:()=>{},onResize:()=>{}}),
-    createPortal(React.createElement(ProjectExplorer,{...explorer,projectName:'Stringer',parts:[{instance_id:'plate',name:'Plate',accuracy:'exact'}]}),content))));
+    createPortal(React.createElement(ProjectExplorer,{...explorer,parts:[{instance_id:'plate',name:'Plate',accuracy:'exact'}]}),content))));
   assert.equal(document.querySelector('.sidebar-view-heading button').textContent,'Explorer');
   assert.equal(document.querySelector('.sidebar-view-heading button').getAttribute('aria-expanded'),null,'the view title is not a collapsible section');
   assert.ok(![...document.querySelectorAll('.sidebar-section-heading button')].some(button=>button.textContent==='Explorer'),'view title is separate from content sections');
   const sections=[...document.querySelectorAll('.project-explorer>.sidebar-content-sections>.sidebar-section')];
-  assert.deepEqual(sections.map(section=>section.querySelector('.sidebar-section-heading button').textContent),['Models','Files','Objects']);
-  await act(async()=>sections[1].querySelector('.sidebar-section-heading button').click());
-  const resizer=document.querySelector('.sidebar-content-sections [aria-label="Resize Models and Files"]');
+  assert.deepEqual(sections.map(section=>section.querySelector('.sidebar-section-heading button').textContent),['Models','Parts']);
+  assert.equal(sections[1].querySelector(':scope > div[id]').hidden,false,'Parts stays expanded when Explorer remounts');
+  const isFolderOpen=(tree,name)=>[...document.querySelectorAll(`[aria-label="${tree}"] summary`)].find(node=>node.textContent===name)?.parentElement.open;
+  assert.equal(isFolderOpen('Indexed models','nested'),true,'nested model folders survive remounting');
+  const resizer=document.querySelector('.sidebar-content-sections [aria-label="Resize Models and Parts"]');
   assert.ok(resizer,'Explorer uses the shared layout resizer');
   const priorWeight=sections[0].style.getPropertyValue('--section-weight');
   await act(async()=>resizer.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'ArrowDown',bubbles:true})));
   assert.notEqual(sections[0].style.getPropertyValue('--section-weight'),priorWeight);
+  const resizedWeight=sections[0].style.getPropertyValue('--section-weight');
   await act(async()=>sections[0].querySelector('.sidebar-section-heading button').click());
   assert.equal(sections[0].querySelector(':scope > div[id]').hidden,true);
   assert.equal(sections[1].querySelector(':scope > div[id]').hidden,false);
   assert.ok(document.querySelector('.sidebar-view-heading'),'collapsing a section preserves the named view');
   assert.equal(toggles,0);
+
+  const explorerSection=name=>[...document.querySelectorAll('.project-explorer .sidebar-section')].find(section=>section.querySelector('.sidebar-section-heading button').textContent===name);
+  const sectionHidden=name=>explorerSection(name).querySelector(':scope > div[id]').hidden;
+  await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,workspace:'other-project'})));
+  assert.equal(sectionHidden('Parts'),true,'each project starts with its own layout');
+  await act(async()=>root.render(React.createElement(ProjectExplorer,explorer)));
+  assert.equal(sectionHidden('Models'),true);
+  assert.equal(sectionHidden('Parts'),false);
+  await act(async()=>explorerSection('Models').querySelector('.sidebar-section-heading button').click());
+  assert.equal(explorerSection('Models').style.getPropertyValue('--section-weight'),resizedWeight);
 
   const quickChosen=[];
   await act(async()=>root.render(React.createElement(QuickModelSelector,{open:true,workspace:'ws',revision:'r1',activeEntry:'cad/brake.py',activeBuilder:'pin',onClose:()=>{},onChoose:(...args)=>quickChosen.push(args)})));
@@ -223,9 +202,9 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Pin']);
   await act(async()=>document.querySelector('.quick-model-row').click());
   assert.deepEqual(quickChosen,[['cad/brake.py','pin']]);
-  assert.equal(calls.filter(call=>call[0]==='project_source_index').length,1,'quick open reuses the shared source index');
+  assert.equal(calls.filter(([command,args])=>command==='project_source_index'&&args.workspace==='ws').length,1,'quick open reuses the shared source index');
 
-  // The same revision must follow disk changes in both Explorer sections.
+  // The same revision must follow disk changes in the Models section.
   const diskFile={path:'new/nested/added.py',source:'# fresh disk source\n',description:'New',diagnostic:null,builders:[{id:'added',kind:'geometry_candidate',label:'added()',available:true,reason:'',line:1}]};
   const diskCalls=[];let fingerprint='disk-1',hold=false,release;
   globalThis.__indexInvoke=async(command,args)=>{
@@ -241,30 +220,29 @@ test('source candidates use generic labels and shared Explorer sections',async()
   window.setInterval=(callback,ms)=>{const id=++timerId;timers.set(id,{callback,ms});return id;};
   window.clearInterval=id=>timers.delete(id);
   try{
-    await act(async()=>root.render(React.createElement(ProjectExplorer,explorer)));
-    await act(async()=>window.dispatchEvent(new window.Event('focus')));
-    assert.deepEqual([...document.querySelectorAll('[aria-label="Project source files"] .library-file-link')].map(row=>row.title),['new/nested/added.py']);
-    await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:diskFile.path,builder:'added'}})));
-    assert.deepEqual([...document.querySelectorAll('[aria-label="Indexed models"] .library-part-link')].map(row=>row.textContent),['Added']);
-    assert.equal(diskCalls.filter(([command])=>command==='project_source_index').length,1,'Models and Files share an in-flight refresh');
-    await act(async()=>document.querySelector('.library-file-link').click());
-    assert.equal(document.querySelector('[aria-label="Source code"]').textContent,'# fresh disk source\n');
-    const row=document.querySelector('.library-file-link');
+    await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,workspace:'disk-project'})));
+    const diskSearch=document.querySelector('[aria-label="Search Explorer"]');
+    await act(async()=>{
+      Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(diskSearch,'added');
+      diskSearch.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+    });
+    const diskRow=()=>document.querySelector('[aria-label="Indexed models"] .library-part-link');
+    assert.equal(diskRow().textContent,'Added');
+    const row=diskRow();
     assert.equal(timers.size,0,'Explorer installs no polling intervals');
     const watch=diskCalls.find(([command])=>command==='connect_project_files')[1].channel;
     await act(async()=>watch.onmessage({kind:'changed'}));
-    assert.equal(document.querySelector('.library-file-link'),row,'an unchanged disk fingerprint preserves existing rows');
+    assert.equal(diskRow(),row,'an unchanged disk fingerprint preserves existing rows');
     assert.ok(diskCalls.filter(([command])=>command==='project_source_index').at(-1)[1].fingerprint==='disk-1');
     fingerprint='disk-2';diskFile.path='moved/renamed.py';diskFile.source='# edited and moved\n';
     await act(async()=>watch.onmessage({kind:'changed'}));
-    assert.equal(document.querySelector('.library-file-link').title,'moved/renamed.py');
-    assert.equal(document.querySelector('.source-preview-dialog'),null,'a removed path closes its preview');
+    assert.equal(diskRow().title.split(':')[0],'moved/renamed.py');
     fingerprint='disk-3';hold=true;
     await act(async()=>watch.onmessage({kind:'changed'}));
     assert.ok(release,'a source read is in flight');
     fingerprint='disk-4';hold=false;diskFile.path='final/added.py';
     await act(async()=>{watch.onmessage({kind:'changed'});release();});
-    assert.equal(document.querySelector('.library-file-link').title,'final/added.py','a change arriving during a read triggers another read instead of being lost');
+    assert.equal(diskRow().title.split(':')[0],'final/added.py','a change arriving during a read triggers another read instead of being lost');
 
   }finally{window.setInterval=realInterval;window.clearInterval=realClear;}
 

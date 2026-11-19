@@ -44,9 +44,11 @@ before(async()=>{
   await mkdir(path.join(repo,'target'),{recursive:true});directory=await mkdtemp(path.join(repo,'target/ui-tests-'));
   const result=await build({stdin:{contents:`export {App} from './app';export {Workbench} from './workbench';export * from './dock-layout';export {buildErrorInfo} from './build-diagnostics';export {dockEdgeAt} from './dock-drag';export {resetSourceCatalogCache} from './source-catalog';`,resolveDir:path.join(repo,'apps/desktop/src'),loader:'tsx'},bundle:true,platform:'node',format:'esm',jsx:'automatic',write:false,loader:{'.css':'empty'},external:['react','react/jsx-runtime','react-dom'],plugins:[{
     name:'isolated-native-and-webgl',setup(builder){
-      builder.onResolve({filter:/^(@cadpad\/viewer|@tauri-apps\/api\/core)$/},args=>({path:args.path,namespace:'harness'}));
+      builder.onResolve({filter:/^(@cadpad\/viewer(?:\/stl-preview)?|@tauri-apps\/api\/core)$/},args=>({path:args.path,namespace:'harness'}));
       builder.onLoad({filter:/.*/,namespace:'harness'},args=>({loader:'js',resolveDir:repo,contents:args.path.startsWith('@tauri')?
         `export class Channel{id=globalThis.__cadpadNextChannel=(globalThis.__cadpadNextChannel||0)+1;onmessage=null;} export const invoke=(...args)=>globalThis.__cadpadUiHarness.invoke(...args);`:
+        args.path.endsWith('/stl-preview')?
+        `export function stlPreviewViewport(container,onFrame){return {add(chunk){(globalThis.__cadpadUiHarness.previewChunks??=[]).push(chunk.byteLength);onFrame();},dispose(){globalThis.__cadpadUiHarness.previewDisposed=true;}};}`:
         `export {sceneEntity,sameEntity,referenceLetter} from ${JSON.stringify(path.join(repo,'packages/viewer/src/entities.ts'))};
          export {selectedAnchor,selectedCircle} from ${JSON.stringify(path.join(repo,'packages/viewer/src/references.ts'))};
          export {recordedFrameAt,partMotion} from ${JSON.stringify(path.join(repo,'packages/viewer/src/motion.ts'))};
@@ -68,7 +70,10 @@ before(async()=>{
   globalThis.ResizeObserver=class{observe(){} unobserve(){} disconnect(){}};
   globalThis.IS_REACT_ACT_ENVIRONMENT=true;
   globalThis.requestAnimationFrame=callback=>setTimeout(()=>callback(performance.now()),1);globalThis.cancelAnimationFrame=clearTimeout;
-  dom.window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};
+  dom.window.HTMLDialogElement.prototype.showModal=function(){
+    if(!this.isConnected)throw new dom.window.DOMException('Element is not connected.','InvalidStateError');
+    this.open=true;
+  };
   dom.window.HTMLDialogElement.prototype.close=function(){this.open=false;this.dispatchEvent(new dom.window.Event('close'));};
   ({createRoot}=await import('react-dom/client'));(docking=await import(pathToFileURL(file).href),{App,Workbench}=docking);
 });
@@ -97,7 +102,7 @@ beforeEach(async()=>{
     return {id:'job-1',state:'succeeded',diagnostics:{}};
   }};globalThis.__cadpadUiHarness=harness;
   root=createRoot(document.getElementById('root'));await act(async()=>{root.render(React.createElement(App));});await flush();
-  const objects=[...document.querySelectorAll('.sidebar-section-heading button')].find(button=>button.textContent==='Objects');
+  const objects=[...document.querySelectorAll('.sidebar-section-heading button')].find(button=>button.textContent==='Parts');
   if(objects)await click(objects);
 });
 afterEach(async()=>{
@@ -108,53 +113,29 @@ afterEach(async()=>{
 });
 after(async()=>{dom?.window.close();await rm(directory,{recursive:true,force:true});delete globalThis.__cadpadUiHarness;});
 
-test('Explorer shows project parts and assets without exposing Python source',async()=>{
+test('Explorer shows project parts without exposing project files',async()=>{
   const panel=document.getElementById('panel-model');
   assert.equal(panel.getAttribute('aria-label'),'Explorer');
   assert.ok(!panel.querySelector('.explorer-project'),'Explorer does not repeat the document title');
   assert.doesNotMatch(panel.textContent,/Rail assembly/);
-  assert.equal(panel.querySelector('.explorer-parts').closest('.sidebar-section').querySelector('.sidebar-section-heading button').textContent,'Objects');
+  assert.equal(panel.querySelector('.explorer-parts').closest('.sidebar-section').querySelector('.sidebar-section-heading button').textContent,'Parts');
   assert.equal(panel.querySelector('.explorer-parts').closest('details'),null,'loaded objects are not nested under an In canvas group');
   assert.doesNotMatch(panel.textContent,/model\.py|rail\.py|# fixture|Source/);
-  assert.match(panel.textContent,/bracket\.step/);
+  assert.doesNotMatch(panel.textContent,/bracket\.step/);
   assert.equal(panel.querySelectorAll('.part-row').length,2);
   assert.ok([...panel.querySelectorAll('.sidebar-section-heading button')].some(button=>button.textContent==='Parameters'));
-  assert.ok([...panel.querySelectorAll('.sidebar-section-heading button')].some(button=>button.textContent==='Reference files'));
+  assert.deepEqual([...panel.querySelectorAll('.sidebar-section-heading button')].map(button=>button.textContent),['Models','Parts','Parameters']);
+  assert.equal(harness.calls.some(([name])=>name==='project_meshes'),false);
   const search=panel.querySelector('[aria-label="Search Explorer"]');
   await setValue(search,'carriage');
   assert.equal(panel.querySelectorAll('.part-row').length,1);
   await click(panel.querySelector('.part-select'));
   assert.ok(harness.viewer.some(([name,id])=>name==='select'&&id==='carriage'));
   await setValue(search,'not a part');
-  assert.match(panel.textContent,/No matching objects/);
+  assert.match(panel.textContent,/No matching parts/);
   await setValue(search,'');
   assert.equal(panel.querySelectorAll('.part-row').length,2);
   assert.equal(harness.calls.some(([name])=>name==='read_source'),false);
-});
-test('Explorer lists project STL files and inspects a mesh',async()=>{
-  const original=harness.invoke.bind(harness);
-  harness.invoke=async(command,args)=>{
-    if(command==='project_meshes'||command==='inspect_project_mesh')harness.calls.push([command,args]);
-    if(command==='project_meshes')return {files:['refs/arm.stl','assets/bracket.stl']};
-    if(command==='inspect_project_mesh')return {path:args.path,bytes:150,format:'binary',triangles:12,min:[0,0,0],max:[10,20,30],size:[10,20,30]};
-    return original(command,args);
-  };
-  await act(async()=>root.unmount());
-  root=createRoot(document.getElementById('root'));
-  await act(async()=>{root.render(React.createElement(App));});
-  await flush(30);
-  const panel=document.getElementById('panel-model');
-  assert.match(panel.textContent,/arm\.stl/);
-  assert.match(panel.textContent,/bracket\.step/);
-  const mesh=[...panel.querySelectorAll('.explorer-mesh')].find(button=>button.textContent.includes('arm.stl'));
-  await click(mesh);
-  await flush(20);
-  const dialog=document.querySelector('.mesh-inspect');
-  assert.ok(dialog?.open,'STL inspection opens from the Explorer');
-  assert.match(dialog.textContent,/refs\/arm\.stl/);
-  assert.match(dialog.textContent,/12/);
-  assert.ok(harness.calls.some(([name,args])=>name==='inspect_project_mesh'&&args.path==='refs/arm.stl'));
-  assert.equal(harness.calls.some(([name])=>name==='import_stl'||name==='import_model'),false);
 });
 test('model inspector preserves part selection, exact properties and visibility actions',async()=>{
   assert.ok(harness.viewer.some(call=>call[0]==='load'&&call[2]===harness.project.revision&&call[4]===harness.project.workspace_id),'revision-byte reuse must receive the current workspace scope');
@@ -1703,7 +1684,7 @@ test('Cmd+W preserves vertical navigation and sidebar panels after a click on pa
   assert.equal(document.querySelector('.dock-welcome'),null);
 });
 
-test('closing every canvas tab keeps the project alive until the last chat tab closes',async()=>{
+test('closing the last chat keeps the project open with an empty canvas',async()=>{
   await mountWorkbench();
   await act(async()=>harness.menu.onmessage('split-right'));await flush();
   await setValue(document.getElementById('model-prompt'),'Keep this draft');
@@ -1718,7 +1699,13 @@ test('closing every canvas tab keeps the project alive until the last chat tab c
   assert.equal(document.getElementById('model-prompt').value,'Keep this draft');
   await dockPointer(document.querySelector('.assistant-chat-pane .conversation'),'pointerdown',100,100);
   await cmdW();
-  assert.ok(document.querySelector('.dock-welcome'));
+  assert.equal(document.querySelectorAll('.assistant-chat-dock [role="tab"]').length,0);
+  assert.equal(document.getElementById('tab-assistant').getAttribute('aria-expanded'),'false');
+  assert.equal(canvasTabs().length,0);
+  assert.equal(document.querySelector('.dock-welcome'),null);
+  assert.equal(document.querySelector('.document-name')?.textContent,'Rail assembly');
+  await act(async()=>harness.menu.onmessage(`workspace:${harness.project.workspace_id}`));await flush();
+  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly']);
 });
 
 test('native Close Tab and Cmd+W both close the active chat without closing the model',async()=>{
@@ -1730,8 +1717,9 @@ test('native Close Tab and Cmd+W both close the active chat without closing the 
       harness.calls.push([command,args]);
       if(args.action==='remove'){chats=chats.filter(chat=>chat.id!==args.chatId);activeId=chats[0]?.id??'empty';}
       if(args.action==='select')activeId=args.chatId;
+      if(args.action==='new'){activeId='fresh-chat';chats.push({id:activeId,title:'New chat',created_at:3,updated_at:3,message_count:0});}
     }
-    if(command==='agent_conversation'||command==='agent_chat')return {active_chat_id:activeId,chats:structuredClone(chats),messages:chats.length?[{role:'user',text:'Hello'}]:[],turn:null};
+    if(command==='agent_conversation'||command==='agent_chat')return {active_chat_id:activeId,chats:structuredClone(chats),messages:chats.some(chat=>chat.id===activeId&&chat.message_count)?[{role:'user',text:'Hello'}]:[],turn:null};
     return original(command,args);
   };
   await mountWorkbench();
@@ -1745,14 +1733,23 @@ test('native Close Tab and Cmd+W both close the active chat without closing the 
   await dockPointer(document.querySelector('.assistant-chat-pane[data-chat-id="chat-2"] .conversation'),'pointerdown',100,100);
   await act(async()=>harness.menu.onmessage('close-tab'));await flush();
   assert.deepEqual(chats.map(chat=>chat.id),['chat-1']);
+  assert.equal(document.getElementById('tab-assistant').getAttribute('aria-expanded'),'true');
   await cmdW();
   assert.deepEqual(chats,[]);
-  assert.ok(document.querySelector('[data-sidebar-section="assistant"]'),'Closing chats preserves the Assistant panel');
+  assert.equal(document.getElementById('tab-assistant').getAttribute('aria-expanded'),'false');
   assert.ok(document.querySelector('[data-sidebar-section="model"]'));
   assert.ok(document.getElementById('tab-model'));
   assert.equal(document.querySelectorAll('.assistant-chat-dock [role="tab"]').length,0);
   assert.equal(canvasTabs().length,1);
   assert.equal(document.querySelector('.dock-welcome'),null);
+  await click(document.getElementById('tab-assistant'));
+  assert.equal(document.getElementById('tab-assistant').getAttribute('aria-expanded'),'true');
+  assert.deepEqual([...document.querySelectorAll('.assistant-chat-dock [role="tab"]')].map(tab=>tab.dataset.tab),['fresh-chat']);
+  assert.equal(document.getElementById('model-prompt').value,'');
+  await click(document.getElementById('tab-assistant'));
+  await click(document.getElementById('tab-assistant'));
+  assert.equal(document.querySelector('.assistant-chat-dock [role="tab"]').dataset.tab,'fresh-chat');
+  assert.equal(harness.calls.filter(([command,args])=>command==='agent_chat'&&args.action==='new').length,1);
   assert.deepEqual(harness.calls.filter(([command,args])=>command==='agent_chat'&&args.action==='remove').map(([,args])=>args.chatId),['chat-2','chat-1']);
 });
 
@@ -1806,6 +1803,12 @@ test('canvas tabs retain independent sessions and focus routes save to the selec
   await click(canvasTabs()[1]);await flush();
   await act(async()=>harness.menu.onmessage('save'));await flush();
   assert.equal(harness.calls.findLast(([name])=>name==='save_project')[1].workspace,'workspace-2');
+  await click(document.querySelector('[aria-label="Close Rail assembly tab"]'));await flush();
+  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Clamp']);
+  await click(document.querySelector('.composer-settings'));
+  assert.ok(document.querySelector('.settings-dialog[open]'));
+  await click(document.querySelector('[aria-label="Close settings"]'));
+  assert.equal(document.querySelector('.settings-dialog[open]'),null);
 });
 
 test('right-clicking a tab can close it, the other tabs in its strip, or the whole strip',async()=>{
@@ -1946,7 +1949,7 @@ test('closing all tabs shows recent models and relaunch reopens the focused work
 
 test('welcome recent list can remove one workspace or clear all',async()=>{
   const original=harness.invoke.bind(harness);
-  const second={workspace_id:'workspace-2',name:'Clamp',running:0};
+  const second={workspace_id:'workspace-2',name:'Clamp',running:0,project_directory:'/projects/fixtures/Clamp'};
   harness.invoke=async(command,args)=>{
     if(command==='workspaces')return [{workspace_id:harness.project.workspace_id,name:harness.project.name,running:0},second];
     if(command==='forget_workspace'){harness.calls.push([command,args]);return;}
@@ -1957,6 +1960,10 @@ test('welcome recent list can remove one workspace or clear all',async()=>{
   await click(document.querySelector('.dock-canvas .tab-close'));await flush();
   await closeWorkbenchTabs();
   assert.equal(document.querySelectorAll('.dock-welcome-recent .dock-welcome-open').length,2);
+  const path=document.querySelector('.dock-welcome-path');
+  assert.equal(path.textContent,second.project_directory);
+  assert.equal(path.title,second.project_directory);
+  assert.equal(document.querySelectorAll('.dock-welcome-path').length,1);
   await click(document.querySelector('[aria-label="Remove Clamp from recent"]'));await flush();
   assert.equal(harness.calls.some(([name,args])=>name==='forget_workspace'&&args.workspace==='workspace-2'),true);
   assert.equal(document.querySelectorAll('.dock-welcome-recent .dock-welcome-open').length,1);
@@ -2296,6 +2303,11 @@ test('Explorer has independent CAD sections in the actual docked view',async()=>
   await click(project);
   assert.equal(document.getElementById(project.getAttribute('aria-controls')).hidden,false);
   assert.equal(document.getElementById(model.getAttribute('aria-controls')).hidden,true);
+  await click(project);
+  await click(model);
+  await mountWorkbench();
+  assert.ok(document.querySelector('#panel-model [aria-label="Expand Models section"]'));
+  assert.ok(document.querySelector('#panel-model [aria-label="Collapse Files section"]'));
 });
 
 test('external file changes open a workspace tab with filters and conflict resolution',async()=>{
@@ -2544,11 +2556,33 @@ test('boot keeps a generated project adapter out of the canvas and Explorer sele
   };
   localStorage.setItem('cadpad.dock-layout.v2',JSON.stringify({projectWorkspace:project.workspace_id,documents:[{id:'doc-root',workspace:project.workspace_id,name:'Chassis',dirty:false}],canvas:{kind:'group',id:'g',tabs:['doc-root'],active:'doc-root'},left:{kind:'group',id:'l',tabs:['model'],active:'model'},right:{kind:'group',id:'r',tabs:['assistant'],active:'assistant'},focus:'doc-root',leftWidth:320,rightWidth:320,expanded:['model','assistant'],locations:{},sectionWeights:{}}));
   await mountWorkbench();await flush(30);
-  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['stringer'],'a generated view stored on the project is not restored as a model tab');
+  assert.equal(canvasTabs().length,0);
   assert.equal(document.querySelector('[aria-label="Indexed models"] [aria-current="true"]'),null);
-  assert.ok(document.querySelector('.project-library'),'the project opens in the library');
-  assert.equal(document.querySelector('.library-back'),null);
+  const empty=document.querySelector('[aria-label="Project canvas"]');
+  assert.match(empty.textContent,/No model open/);
+  assert.equal(empty.querySelector('button'),null);
+  assert.equal(document.querySelector('[aria-label="canvas tabs"]'),null);
   assert.equal(harness.viewer.some(call=>call[0]==='load'&&call[1].parts?.some(part=>part.name==='model')),false);
+});
+
+test('opening a project with no model shows a canvas message without tabs or buttons',async()=>{
+  const original=harness.invoke.bind(harness),empty=fixture();
+  empty.workspace_id='empty-project';empty.name='Empty project';empty.saved_revision=empty.revision;empty.external_tracking=true;
+  empty.motion={...empty.motion,workspace_id:empty.workspace_id};
+  empty.model.parts=[];
+  harness.invoke=async(command,args)=>{
+    if(command==='open_project')return {project:structuredClone(empty),job:null};
+    if(command==='project'&&args.workspace===empty.workspace_id)return structuredClone(empty);
+    return original(command,args);
+  };
+  await mountWorkbench();
+  await act(async()=>harness.menu.onmessage('open'));await flush();
+  const canvas=document.querySelector('[aria-label="Project canvas"]');
+  assert.match(canvas.textContent,/No model open/);
+  assert.equal(canvas.querySelector('button'),null);
+  assert.equal(canvasTabs().length,0);
+  assert.equal(document.querySelector('.document-name')?.textContent,'Empty project');
+  assert.equal(document.querySelector('.dock-welcome'),null);
 });
 
 test('sidebar models open independent project tabs and clicking again focuses the existing tab',async()=>{
@@ -2642,6 +2676,7 @@ test('boot resolves a focused model-view workspace back to the project and resto
   const original=harness.invoke.bind(harness),views=new Map();
   const files=[{path:'alpha/hook_rack/mono_parts.py',description:'Hook rack',diagnostic:null,builders:[{id:'axle_carrier',label:'axle_carrier()',kind:'geometry_candidate',available:true,reason:'',line:1}]}];
   const root=fixture();root.name='stringer';root.model.parts=[{...root.model.parts[0],id:'model',instance_id:'model',name:'model'}];
+  root.model_entry={entry:files[0].path,builder:'axle_carrier'};
   harness.project=root;
   harness.invoke=async(command,args)=>{
     if(command==='project_source_index')return {files};
@@ -2666,14 +2701,17 @@ test('boot resolves a focused model-view workspace back to the project and resto
   await mountWorkbench();await flush(20);
   await expandModelFolders('alpha','hook_rack');
   await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent==='Axle carrier'));await flush(25);
-  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Model','Axle carrier']);
+  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Axle carrier']);
   await flush(500);
   await mountWorkbench();await flush(40);
-  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Model','Axle carrier'],'model tabs survive a relaunch that resumes from the focused view workspace');
+  assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Axle carrier'],'model tabs survive a relaunch that resumes from the focused view workspace');
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Axle carrier');
   assert.equal(document.querySelector('.document-name')?.textContent,'stringer');
   assert.equal(document.querySelector('[aria-label="Indexed models"] [aria-current="true"]')?.textContent,'Axle carrier');
   assert.ok(document.querySelector('[aria-label="Indexed models"] [aria-current="true"]')?.closest('details')?.open);
+  await click(document.querySelector('[aria-label="Close Axle carrier tab"]'));
+  assert.match(document.querySelector('[aria-label="Project canvas"]').textContent,/No model open/);
+  assert.equal(document.querySelector('.dock-welcome'),null);
 });
 
 test('Cmd+Shift+O opens a quick model selector from the current project',async()=>{
@@ -2703,6 +2741,9 @@ test('Cmd+Shift+O opens a quick model selector from the current project',async()
   assert.equal(document.querySelector('[aria-label="Quick model selector"]'),null);
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Pin']);
   assert.deepEqual(harness.calls.filter(([name])=>name==='open_project_model').map(([,args])=>[args.entry,args.builder]),[['cad/widgets.py','pin']]);
+  await click(document.querySelector('[aria-label="Close Pin tab"]'));await flush();
+  await act(async()=>window.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'O',code:'KeyO',metaKey:true,shiftKey:true,bubbles:true})));await flush();
+  assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Pin','Wheel']);
 });
 
 test('opening an Explorer model shows progress until its geometry finishes building',async()=>{
@@ -2775,7 +2816,7 @@ test('project STL opens in one selectable viewer and attaches a surface to the A
   const log=t.mock.method(console,'info',()=>{});
   Object.defineProperty(document,'hidden',{value:false,configurable:true});
   const original=harness.invoke.bind(harness);
-  let accept;
+  let accept,preview;
   harness.load=async(model,revision,artifact,workspace,onStage)=>{
     if(workspace==='view-bracket'&&model.parts.length){onStage('buffers');onStage('draw');}
   };
@@ -2787,7 +2828,7 @@ test('project STL opens in one selectable viewer and attaches a surface to the A
   project.activity=[{id:'build-bracket',state:'queued',diagnostics:{}}];
   harness.invoke=async(command,args)=>{
     if(command==='project_source_index')return {files:[{path:'cad/bracket.stl',builders:[{id:'$file',label:'bracket.stl',kind:'model_file',available:true,line:1}]}]};
-    if(command==='open_project_model')return new Promise(resolve=>{accept=resolve;});
+    if(command==='open_project_model'){preview=args.preview;return new Promise(resolve=>{accept=resolve;});}
     if(command==='project'&&args.workspace===project.workspace_id)return structuredClone(project);
     return original(command,args);
   };
@@ -2795,7 +2836,10 @@ test('project STL opens in one selectable viewer and attaches a surface to the A
   await expandModelFolders('cad');
   const before=harness.constructions;
   await click(document.querySelector('#panel-model .library-part-link'));await flush();
-  assert.equal(harness.constructions,before,'no viewer is mounted during the native open request');
+  assert.equal(harness.constructions,before,'the interactive viewer waits for the native open request');
+  await act(async()=>{preview.onmessage(new ArrayBuffer(36));preview.onmessage(new ArrayBuffer(72));});
+  assert.deepEqual(harness.previewChunks,[36,72]);
+  assert.equal(performance.getEntriesByName('cadpad.stl.open-to-preview').length,1);
   await act(async()=>accept({project:structuredClone(project),job:project.activity[0]}));await flush(20);
   assert.equal(log.mock.callCount(),0,'the empty scene does not count as a model frame');
   project.model.parts=fixture().model.parts.map(part=>({...part,accuracy:'mesh'}));
@@ -2813,6 +2857,8 @@ test('project STL opens in one selectable viewer and attaches a surface to the A
   const sample=JSON.parse(json);
   assert.equal(sample.entry,'cad/bracket.stl');
   assert.equal(sample.reusedWorkspace,false);
+  assert.ok(sample.elapsedMs.preview<=sample.elapsedMs.backend);
+  assert.ok(harness.previewDisposed);
   assert.equal(document.querySelector('[data-model-open-time]').textContent,
     `Opened in ${sample.elapsedMs.frame.toLocaleString()} ms`);
   assert.ok(sample.elapsedMs.frame>=sample.elapsedMs.draw&&sample.elapsedMs.draw>=sample.elapsedMs.backend);

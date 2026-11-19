@@ -3,6 +3,22 @@ import {createPortal} from 'react-dom';
 import {Icon,errorSummary} from './ui';
 import {indexedModels,loadSourceIndex,modelCaption,useSourceCatalogEpoch,type IndexedModel} from './source-catalog';
 
+const recentKey=(workspace:string)=>`cadpad.recent-models.v1:${workspace}`;
+const modelKey=(entry:string,builder:string)=>JSON.stringify([entry,builder]);
+
+function recentModels(workspace:string):string[]{
+  try{
+    const stored:unknown=JSON.parse(window.localStorage.getItem(recentKey(workspace))??'[]');
+    return Array.isArray(stored)?stored.filter((key):key is string=>typeof key==='string'):[];
+  }catch{return [];}
+}
+
+export function rememberRecentModel(workspace:string,entry:string,builder:string){
+  const key=modelKey(entry,builder);
+  const recent=[key,...recentModels(workspace).filter(item=>item!==key)].slice(0,32);
+  try{window.localStorage.setItem(recentKey(workspace),JSON.stringify(recent));}catch{}
+}
+
 function normalizeSearch(value:string){
   return value.toLowerCase().replace(/[_\s]+/g,' ');
 }
@@ -18,8 +34,8 @@ function fuzzyGap(query:string,value:string){
   return gap;
 }
 
-export function QuickModelSelector({open,workspace,revision,activeEntry,activeBuilder,busy,onClose,onChoose}:{
-  open:boolean;workspace:string;revision:string;activeEntry?:string;activeBuilder?:string;busy?:boolean;onClose:()=>void;onChoose:(path:string,builder:string)=>void;
+export function QuickModelSelector({open,workspace,revision,historyWorkspace=workspace,activeEntry,activeBuilder,busy,onClose,onChoose}:{
+  open:boolean;workspace:string;revision:string;historyWorkspace?:string;activeEntry?:string;activeBuilder?:string;busy?:boolean;onClose:()=>void;onChoose:(path:string,builder:string)=>void;
 }){
   const [query,setQuery]=useState(''),[highlight,setHighlight]=useState(0),[loading,setLoading]=useState(false),[error,setError]=useState('');
   const [models,setModels]=useState<IndexedModel[]>([]);
@@ -29,8 +45,13 @@ export function QuickModelSelector({open,workspace,revision,activeEntry,activeBu
   const id=useId();
   const catalogEpoch=useSourceCatalogEpoch();
   const search=normalizeSearch(query.trim());
+  const recentRanks=useMemo(()=>new Map((open?recentModels(historyWorkspace):[]).map((key,index)=>[key,index])),[open,historyWorkspace]);
   const matches=useMemo(()=>{
-    if(!search)return models;
+    if(!search){
+      if(!recentRanks.size)return models;
+      const rank=({file,builder}:IndexedModel)=>recentRanks.get(modelKey(file.path,builder.id))??recentRanks.size;
+      return [...models].sort((a,b)=>rank(a)-rank(b));
+    }
     const literal:IndexedModel[]=[];
     const fuzzy:{model:IndexedModel;gap:number}[]=[];
     for(const model of models){
@@ -44,7 +65,7 @@ export function QuickModelSelector({open,workspace,revision,activeEntry,activeBu
       if(Number.isFinite(gap))fuzzy.push({model,gap});
     }
     return [...literal,...fuzzy.sort((a,b)=>a.gap-b.gap).map(({model})=>model)];
-  },[models,search]);
+  },[models,search,recentRanks]);
   useEffect(()=>{
     if(!open)return;
     let active=true;setQuery('');setHighlight(0);setLoading(true);setError('');setModels([]);

@@ -8,6 +8,14 @@ export type Builder={id:string;label:string;available:boolean;reason:string;line
 export type SourceFile={path:string;description:string;builders:Builder[];diagnostic:string|null;recommended?:string|null;source?:string};
 export type IndexedModel={file:SourceFile;builder:Builder};
 type SourceIndex={files:SourceFile[];fingerprint?:string};
+type BranchOverrides=Record<string,{context:string;open:boolean}>;
+function readBranches(key:string):BranchOverrides{
+  try{
+    const saved:unknown=JSON.parse(window.localStorage.getItem(key)??'null');
+    if(!saved||typeof saved!=='object'||Array.isArray(saved))return {};
+    return Object.fromEntries(Object.entries(saved).filter(([,value])=>typeof value?.context==='string'&&typeof value.open==='boolean'));
+  }catch{return {};}
+}
 const indexes=new Map<string,Promise<SourceIndex>>();
 const refreshing=new Map<string,{promise:Promise<SourceIndex>;reading:boolean;dirty:boolean}>();
 const locations=new Map<string,string>();
@@ -124,8 +132,13 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const gitProject=useRef(''),git=useMemo(()=>indexGit(gitEntries),[gitEntries]);
   const lazyModels=compact&&compactView==='models';
   const showGit=compact?compactView==='files':view==='files';
-  const [branches,setBranches]=useState<Record<string,{context:string;open:boolean}>>({});
-  useEffect(()=>setBranches({}),[requestId,workspace]);
+  const branchStorage=compact&&workspace?`cadpad.explorer-folders.v1:${compactView}:${workspace}`:'';
+  const [branches,setBranches]=useState(()=>branchStorage?readBranches(branchStorage):{});
+  const [searchBranches,setSearchBranches]=useState<BranchOverrides>({});
+  useEffect(()=>{
+    setBranches(branchStorage?readBranches(branchStorage):{});
+    setSearchBranches({});
+  },[branchStorage,requestId]);
   const key=requestId||workspace||'';
   const catalogEpoch=useSourceCatalogEpoch();
   const location=useSyncExternalStore(subscribe,()=>locations.get(key)||'');
@@ -170,6 +183,7 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
     if(!compact||!highlighted)return;
     const row=catalog.current?.querySelector<HTMLElement>('[aria-current="true"]');
     for(let parent=row?.parentElement;parent&&parent!==catalog.current;parent=parent.parentElement){
+      if(parent.hasAttribute('data-manually-collapsed'))return;
       if(parent.tagName==='DETAILS')(parent as HTMLDetailsElement).open=true;
     }
     // Only scroll the tree's own pane, after the section is actually expanded.
@@ -213,13 +227,21 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const sortedFolders=(node:Tree)=>[...node.folders].sort(([a],[b])=>byName(a,b));
   const sortedFiles=(node:Tree)=>[...node.files].sort((a,b)=>byName(a.path,b.path));
   const sortedModels=(node:Tree)=>sortedFiles(node).flatMap(file=>file.builders.map(builder=>({file,builder}))).sort((a,b)=>byName(caption(a.builder),caption(b.builder))||byName(a.file.path,b.file.path)||byName(a.builder.id,b.builder.id));
-  const branchContext=search||JSON.stringify([highlighted?.entry,highlighted?.builder,location]);
-  const branch=(id:string,automatic:boolean,summary:React.ReactNode,render:()=>React.ReactNode)=>{
-    const override=branches[id];
-    const open=override?.context===branchContext?override.open:automatic||!!override?.open;
-    return <details open={open}>
-      <summary onClick={event=>{event.preventDefault();setBranches(current=>({...current,[id]:{context:branchContext,open:!open}}));}}>{summary}</summary>
-      {open&&render()}
+  const branchContext=search||JSON.stringify([highlighted?.entry,highlighted?.builder]);
+  const branch=(id:string,automatic:boolean,summary:React.ReactNode,render:()=>React.ReactNode,attributes?:React.HTMLAttributes<HTMLElement>)=>{
+    const override=(search?searchBranches:branches)[id];
+    const manual=override?.context===branchContext;
+    const open=manual?override.open:automatic||!!override?.open;
+    return <details open={open} data-manually-collapsed={manual&&!open?'':undefined}>
+      <summary {...attributes} onClick={event=>{
+        event.preventDefault();
+        const change={context:branchContext,open:!open};
+        if(search){setSearchBranches(current=>({...current,[id]:change}));return;}
+        const next={...branches,[id]:change};
+        setBranches(next);
+        if(branchStorage)try{window.localStorage.setItem(branchStorage,JSON.stringify(next));}catch{}
+      }}>{summary}</summary>
+      {(open||!lazyModels)&&render()}
     </details>;
   };
   const modelTree=(node:Tree,prefix:string)=>{
@@ -250,7 +272,9 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
     const path=prefix+name,change=showGit?folderGit(path,git):undefined,mark=gitMark(change);
     const automatic=!!search||activeFolder===path||activeFolder.startsWith(path+'/')||folder===path||folder.startsWith(path+'/');
     const summary=<><Icon name="folder" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</>;
-    return <li key={name}>{lazyModels?branch(`folder:${path}`,automatic,summary,()=>fileTree(child,path+'/')):
+    return <li key={name}>{compact?branch(`folder:${path}`,automatic,summary,()=>fileTree(child,path+'/'),{
+      className:mark||undefined,title:change?GIT_LABEL[change]:undefined,'aria-label':change?`${name}, ${GIT_LABEL[change]}`:undefined,
+    }):
       <details open={automatic}><summary className={mark||undefined} title={change?GIT_LABEL[change]:undefined}
         aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}>{summary}</summary>{fileTree(child,path+'/')}</details>}</li>;
   })}{lazyModels?modelTree(node,prefix):sortedFiles(node).map(file=>{
