@@ -111,6 +111,7 @@ export class CadViewport {
   private primaryAnchor:{parent:THREE.Object3D;anchor:THREE.Vector3}|null=null;
   private badgeRenderFrame=-1;
   private hoverFrame:number|null=null;
+  private cameraFrame:number|null=null;
   private hoverEvent:PointerEvent|null=null;
   private revision = '';
   private model: SceneModel = { parts: [] };
@@ -200,7 +201,7 @@ export class CadViewport {
       container.addEventListener('pointermove',this.pointerMove,true);
       container.addEventListener('pointercancel',this.pointerCancel,true);
       container.addEventListener('pointerleave',this.pointerLeave,true);
-      container.addEventListener('wheel',this.pointerLeave,{capture:true,passive:true});
+      container.addEventListener('wheel',this.wheel,{capture:true,passive:true});
       container.addEventListener('lostpointercapture',this.pointerCancel,true);
       this.resize = allocatedResize = new ResizeObserver(() => this.resizeViewport());
       this.resize.observe(container);
@@ -247,7 +248,7 @@ export class CadViewport {
   suspend(){
     if(this.disposed||this.suspended)return;
     if(this.presented)this.rememberCamera();
-    this.suspended=true;this.presented=false;this.cancelLoad();
+    this.suspended=true;this.presented=false;this.cancelLoad();this.cancelCameraFrame();
     this.clearPressMarker();this.cancelDrag();this.cancelSimulationFrame();this.cancelHover();
     this.hovered=null;this.clearHighlights();this.clearBadges();this.clearAnnotations();
     this.renderStorage?.dispose();this.renderStorage=null;
@@ -268,7 +269,7 @@ export class CadViewport {
     event.preventDefault();
     if(this.disposed||this.contextLost)return;
     if(this.presented)this.rememberCamera();
-    this.contextLost=true;this.presented=false;this.cancelLoad();
+    this.contextLost=true;this.presented=false;this.cancelLoad();this.cancelCameraFrame();
     this.clearPressMarker();this.cancelDrag();this.cancelSimulationFrame();this.cancelHover();this.hovered=null;
     if(this.viewer.hasAnimationLoop)this.viewer.toggleAnimationLoop(false);
     this.clearHighlights();this.clearBadges();this.clearAnnotations();
@@ -324,7 +325,7 @@ export class CadViewport {
     const selected=preserve?this.selectedEntity:null;
     const retainedSelection=selected&&!hidden.has(selected.instance_id)?sceneEntity(model,revision,selected):null;
     const clearSelection=!preserve||!!selected&&!retainedSelection;
-    this.presented=false;
+    this.presented=false;this.cancelCameraFrame();
     this.clearHighlights();this.clearBadges();this.cancelHover();
     // References are revision scoped; the owner re-sends whatever survives.
     if(revision!==this.revision)this.references=this.references.filter(entity=>entity.revision===revision);
@@ -353,6 +354,9 @@ export class CadViewport {
     }catch(error){bufferPlan.discard();throw error;}finally{this.preparingRender=false;this.renderStorage?.finishSwap();}
     if(this.contextLost){bufferPlan.discard();throw new Error('The graphics connection was interrupted while preparing the view.');}
     this.presented=true;
+    const controls=this.viewer.rendered.controls;
+    controls.removeChangeListener();
+    controls.addChangeListener(this.queueCameraFrame);
     this.viewer.scene.add(this.annotationGroup);
     // A repair resumes at the current canonical pose; it must not replay a
     // paused simulation's previous interpolation interval.
@@ -367,6 +371,7 @@ export class CadViewport {
     this.drawMotionHints();
     this.drawReferences();
     this.refreshAnnotations();
+    this.cancelCameraFrame();
     this.viewer.update(true);
     onStage?.('draw');
     bufferPlan.commit();bufferPlan.discard();if(this.cancelBufferPlan===releasePlan)this.cancelBufferPlan=null;
@@ -508,9 +513,24 @@ export class CadViewport {
       if(point)badge.element.style.transform=`translate(${point.x+canvas.left-host.left}px, ${point.y+canvas.top-host.top}px) translate(-50%, -50%)`;
     }
   }
-  private setHover(entity:Entity|null){
+  private queueCameraFrame=()=>{
+    if(!this.presented||this.cameraFrame!==null)return;
+    this.cameraFrame=requestAnimationFrame(()=>{
+      this.cameraFrame=null;
+      if(this.presented)this.viewer.update(true);
+    });
+  };
+  private cancelCameraFrame(){
+    if(this.cameraFrame!==null)cancelAnimationFrame(this.cameraFrame);
+    this.cameraFrame=null;
+  }
+  private wheel=()=>{
+    this.cancelHover();
+    if(this.hovered)this.setHover(null,this.queueCameraFrame);
+  };
+  private setHover(entity:Entity|null,paint=()=>this.viewer.update(true)){
     if(entity?.instance_id===this.hovered?.instance_id&&entity?.entity_id===this.hovered?.entity_id)return;
-    this.hovered=entity;this.updateMotionStatus(entity);this.highlight(sameEntity(entity,this.selectedEntity)||this.references.some(item=>sameEntity(item,entity))?null:entity,true);if(this.presented)this.viewer.update(true);
+    this.hovered=entity;this.updateMotionStatus(entity);this.highlight(sameEntity(entity,this.selectedEntity)||this.references.some(item=>sameEntity(item,entity))?null:entity,true);if(this.presented)paint();
   }
   private cancelHover(){if(this.hoverFrame!==null)cancelAnimationFrame(this.hoverFrame);this.hoverFrame=null;this.hoverEvent=null;}
   private pointerLeave=()=>{this.cancelHover();this.setHover(null);this.updateMotionStatus(null);if(!this.drag){this.manipulationCursor('');if(!this.marquee)this.clearPressMarker();}};
@@ -956,12 +976,12 @@ export class CadViewport {
     this.container.removeEventListener('pointermove',this.pointerMove,true);
     this.container.removeEventListener('pointercancel',this.pointerCancel,true);
     this.container.removeEventListener('pointerleave',this.pointerLeave,true);
-    this.container.removeEventListener('wheel',this.pointerLeave,true);
+    this.container.removeEventListener('wheel',this.wheel,true);
     this.container.removeEventListener('lostpointercapture',this.pointerCancel,true);
   }
 
   dispose() {
-    this.cancelLoad();this.revisionBytes.clear();
+    this.cancelLoad();this.cancelCameraFrame();this.revisionBytes.clear();
     this.renderStorage?.dispose();this.renderStorage=null;
     this.disposed = true;this.presented=false;this.repairCamera=null; this.loadSequence++;this.cancelSimulationFrame();this.cancelHover();
     this.renderedBuffers?.dispose();this.renderedBuffers=null;

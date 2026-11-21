@@ -61,7 +61,7 @@ beforeEach(()=>{
           if(this.failNext){this.failNext=false;throw new Error('Synthetic render setup failure');}
           const nestedGroup=new dependency.NestedGroup(tree,800,600,'#666',false,1,.15,.65,0);nestedGroup.assignIds=true;nestedGroup.render();
           const camera=new dependency.Camera(800,600,100,[0,0,0],true,'Z'),target=new THREE.Vector3();
-          const controls={getTarget:()=>target,setTarget:value=>target.copy(value),setCamera(){},update(){camera.getCamera().lookAt(target);camera.getCamera().updateMatrixWorld(true);}};
+          const controls={addChangeListener(callback){this.change=callback;},removeChangeListener(){this.change=null;},getTarget:()=>target,setTarget:value=>target.copy(value),setCamera(){},update(){camera.getCamera().lookAt(target);camera.getCamera().updateMatrixWorld(true);}};
           this.state.set('ortho',true);this.rendered={nestedGroup,camera,controls,gridHelper:{scaleLabels(){},update(){}}};this.ready=true;notify({target0:[0,0,0]});
         },
         update(){if(this.rendered){this.camera.getCamera().updateMatrixWorld(true);for(const object of Object.values(this.nestedGroup.groups))object.updateMatrixWorld(true);}},
@@ -75,6 +75,24 @@ beforeEach(()=>{
 });
 afterEach(()=>{viewport.dispose();container.remove();delete globalThis.__cadpadViewportHarness;});
 after(async()=>{dom.window.close();await fs.rm(directory,{recursive:true,force:true});});
+
+test('rapid camera changes redraw the existing scene once per frame',async()=>{
+  const initial=model();
+  await viewport.load(initial.scene,'r1',initial.artifact,'workspace-1');
+  const original=viewer.nestedGroup;
+  let paints=0;
+  const update=viewer.update.bind(viewer);
+  viewer.update=(...args)=>{paints++;update(...args);};
+  for(let i=0;i<12;i++)viewer.rendered.controls.change();
+  assert.equal(paints,0);
+  const [id,paint]=[...frames].at(-1);
+  frames.delete(id);paint(16);
+  assert.equal(paints,1);
+  assert.equal(viewer.nestedGroup,original);
+  viewer.rendered.controls.change();
+  viewport.suspend();
+  assert.equal(frames.size,0);
+});
 
 test('first frame centers and fits a small part away from the origin',async()=>{
   const initial=model();
