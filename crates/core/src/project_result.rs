@@ -225,6 +225,7 @@ pub struct Project {
     pub external_tracking: bool,
     pub recordings: Vec<playback::Metadata>,
     pub name: Option<String>,
+    pub project_directory: Option<String>,
     pub saved_revision: Option<String>,
     pub unsaved_changes: bool,
     pub dirty: bool,

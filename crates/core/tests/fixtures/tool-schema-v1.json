@@ -525,6 +525,12 @@
               "parameters": {
                 "$ref": "#/$defs/Source_Map_of_ParameterValue"
               },
+              "project_directory": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "protocol_version": {
                 "format": "uint32",
                 "minimum": 0,
@@ -578,6 +584,7 @@
               "external_tracking",
               "recordings",
               "name",
+              "project_directory",
               "saved_revision",
               "unsaved_changes",
               "dirty"
