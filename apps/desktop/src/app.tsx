@@ -228,10 +228,12 @@ export function App({host}:{host?:SessionHost}={}) {
   },[selectionNotice]);
   const [cleaningCache,setCleaningCache]=useState(false);
   const [workspaces,setWorkspaces]=useState<{workspace_id:string;name:string;running:number;model_parent?:string}[]>([]);
-  const [external,setExternal] = useState<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}|null>(null);
+  const [externalScan,setExternal] = useState<{workspace:string;revision:string;savedRevision:string|null;changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}|null>(null);
+  const external=externalScan&&externalScan.workspace===project?.workspace_id&&externalScan.revision===project.revision&&externalScan.savedRevision===project.saved_revision?externalScan:null;
   const [externalReviewOpen,setExternalReviewOpen]=useState(false);
   const [externalReloadFailed,setExternalReloadFailed]=useState(false);
   const externalReloadAttempt=useRef('');
+  const externalReloadTask=useRef<Promise<void>|undefined>(undefined);
   useEffect(()=>setExternalReviewOpen(false),[project?.workspace_id]);
 
   const [externalResolutions,setExternalResolutions]=useState<Record<string,'keep_cadpad'|'use_external'>>({});
@@ -640,7 +642,7 @@ export function App({host}:{host?:SessionHost}={}) {
       }
     }finally{sendingMotion.current=false;scheduleTarget();}
   }
-  function adopt(next:Project) { if(!sessionAlive.current)return; if(hostRef.current&&next.workspace_id!==hostRef.current.workspaceId){hostRef.current.onOpen(next);return;} if(!next||typeof next.workspace_id!=='string'||typeof next.revision!=='string'||!Array.isArray(next.model?.parts)||!Array.isArray(next.activity)||!next.parameters||typeof next.parameters!=='object')throw new Error('The workspace reply is invalid. Open another project or rebuild this workspace; existing projects are unchanged.'); const switching=currentProject.current?.workspace_id!==next.workspace_id;const rebuilding=currentProject.current?.revision!==next.revision;activeWorkspace.current=next.workspace_id;currentProject.current=next;setProject(next);hostRef.current?.onProject(next);if(switching||rebuilding){for(const timer of settleTimers.current.values())window.clearTimeout(timer);settleTimers.current.clear();if(interactiveThrottle.current!==null){window.clearTimeout(interactiveThrottle.current);interactiveThrottle.current=null;}if(draftUiFrame.current!==null){cancelAnimationFrame(draftUiFrame.current);draftUiFrame.current=null;}if(motionUiFrame.current!==null){cancelAnimationFrame(motionUiFrame.current);motionUiFrame.current=null;}pendingTargets.current.clear();draftCoordinates.current.clear();currentMotion.current=null;setManipulating(false);setSimulationRunning(false);setSimulationDynamic({});setPlaybackRunning(false);timeline.current=null;}receiveMotion(next.motion);if(switching)setJob(next.activity.find(job=>['queued','running'].includes(job.state))||next.activity.at(-1)||null); }
+  function adopt(next:Project) { if(!sessionAlive.current)return; if(!next||typeof next.workspace_id!=='string'||typeof next.revision!=='string'||!Array.isArray(next.model?.parts)||!Array.isArray(next.activity)||!next.parameters||typeof next.parameters!=='object')throw new Error('The workspace reply is invalid. Open another project or rebuild this workspace; existing projects are unchanged.'); if(hostRef.current&&next.workspace_id!==hostRef.current.workspaceId)return; const switching=currentProject.current?.workspace_id!==next.workspace_id;const rebuilding=currentProject.current?.revision!==next.revision;activeWorkspace.current=next.workspace_id;currentProject.current=next;setProject(next);hostRef.current?.onProject(next);if(switching||rebuilding){for(const timer of settleTimers.current.values())window.clearTimeout(timer);settleTimers.current.clear();if(interactiveThrottle.current!==null){window.clearTimeout(interactiveThrottle.current);interactiveThrottle.current=null;}if(draftUiFrame.current!==null){cancelAnimationFrame(draftUiFrame.current);draftUiFrame.current=null;}if(motionUiFrame.current!==null){cancelAnimationFrame(motionUiFrame.current);motionUiFrame.current=null;}pendingTargets.current.clear();draftCoordinates.current.clear();currentMotion.current=null;setManipulating(false);setSimulationRunning(false);setSimulationDynamic({});setPlaybackRunning(false);timeline.current=null;}receiveMotion(next.motion);if(switching)setJob(next.activity.find(job=>['queued','running'].includes(job.state))||next.activity.at(-1)||null); }
   useEffect(()=>{invoke<{workspace_id:string;name:string;running:number;model_parent?:string}[]>('workspaces').then(setWorkspaces).catch(e=>setError(message(e)));},[project?.workspace_id,project?.name,job?.state]);
   async function switchWorkspace(workspace:string){
     if(hostRef.current){hostRef.current.onOpenWorkspace(workspace);return;}
@@ -942,6 +944,7 @@ export function App({host}:{host?:SessionHost}={}) {
   },[job,project?.workspace_id]);
   const agentWorking=!!agentTurn&&['running','cancelling'].includes(agentTurn.state);
   const working = busy || agentSending || agentWorking || !!job && ['queued','running'].includes(job.state);
+  const modelPickerBusy=host?(busy&&!externalReloadTask.current)||agentSending||agentWorking:working;
   const simulationUnavailable=motion?.simulation_unavailable_reason||(motion&&motion.simulation_unavailable_reason===undefined&&(motion.constraints||motion.joints.some(joint=>joint.kind==='path'))?'Simulation for this mechanism is not available yet':null);
   const [importCandidates,setImportCandidates]=useState<string[]>([]);
   const [importChoice,setImportChoice]=useState('');
@@ -975,8 +978,7 @@ export function App({host}:{host?:SessionHost}={}) {
   }
   async function openModelEntry(entry:string,builder:string){
     if(!hostRef.current?.onOpenModel){await run('work_on_project_builder',{entry,builder});return;}
-    // Leave the Explorer row clickable. The canvas shows loading immediately, and a later click cancels this open.
-    await hostRef.current.onOpenModel(entry,builder);
+    await hostRef.current.onOpenModel(entry,builder,externalReloadTask.current);
   }
   async function download(format:string) {
     if(!project)return;
@@ -1080,15 +1082,20 @@ export function App({host}:{host?:SessionHost}={}) {
     if(!trackExternal||!project?.external_tracking){setExternal(null);return;}
     let active=true;
     let pending=false,again=false;reviewFingerprint.current='';
-    const workspace=project.workspace_id;
+    const {workspace_id:workspace,revision,saved_revision:savedRevision}=project;
     const check=async()=>{
       if(pending){again=true;return;}
       pending=true;
       do{
         again=false;
         try {
-          const next=await invoke<{changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}>('check_external',{workspace});
-          if(active && activeWorkspace.current===workspace){if(reviewFingerprint.current!==next.fingerprint){reviewFingerprint.current=next.fingerprint;setExternalResolutions({});setExternalReloadFailed(false);}setExternal(next);}
+          const next=await invoke<{revision?:string;changed:boolean;fingerprint:string;changes:Record<string,string>;conflicts?:string[];source_kind?:string}>('check_external',{workspace});
+          const current=currentProject.current;
+          if(active&&activeWorkspace.current===workspace&&current?.workspace_id===workspace&&current.revision===revision&&current.saved_revision===savedRevision&&(!next.revision||next.revision===revision)){
+            if(reviewFingerprint.current!==next.fingerprint){reviewFingerprint.current=next.fingerprint;setExternalResolutions({});setExternalReloadFailed(false);}
+            if(!next.changed)externalReloadAttempt.current='';
+            setExternal({...next,workspace,revision,savedRevision});
+          }
         }catch(e){if(active)setError(message(e));}
       }while(active&&again);
       pending=false;
@@ -1099,32 +1106,36 @@ export function App({host}:{host?:SessionHost}={}) {
   },[project?.workspace_id,project?.revision,project?.saved_revision,project?.external_tracking,trackExternal]);
   async function reloadExternal(automatic=false){
     const current=currentProject.current,observed=externalNow.current;
-    if(!current||!observed?.changed||mutationBusy.current)return;
+    if(!current||!observed?.changed||observed.workspace!==activeWorkspace.current||observed.workspace!==current.workspace_id||observed.revision!==current.revision||observed.savedRevision!==current.saved_revision||mutationBusy.current)return;
     if(liveJob.current&&['queued','running'].includes(liveJob.current.state))return;
-    if(automatic&&observed.conflicts?.length)return;
+    if(automatic&&(observed.conflicts?.length||hostRef.current?.openingModel))return;
     const workspace=current.workspace_id;
-    externalReloadAttempt.current=JSON.stringify([workspace,current.revision,observed.fingerprint]);
+    externalReloadAttempt.current=JSON.stringify([workspace,observed.fingerprint]);
     mutationBusy.current=true;setBusy(true);setExternalReloadFailed(false);
-    try{
-      // The shared header belongs to this project, even when a child model has focus.
-      const next=await invoke<Job>('reload_project',{workspace,revision:current.revision,fingerprint:observed.fingerprint,resolutions:automatic?{}:externalResolutions});
-      if(activeWorkspace.current!==workspace)return;
-      liveJob.current=next;setJob(next);
-      if(next.state==='succeeded'){
-        const refreshed=await invoke<Project>('project',{workspace});
-        if(activeWorkspace.current===workspace)adopt(refreshed);
-      }else if(next.state==='failed')setExternalReloadFailed(true);
-    }catch(error){if(activeWorkspace.current===workspace){setExternalReloadFailed(true);setError(message(error));}}
-    finally{mutationBusy.current=false;if(activeWorkspace.current===workspace)setBusy(false);}
+    const task=(async()=>{
+      try{
+        // The shared header belongs to this project, even when a child model has focus.
+        const next=await invoke<Job>('reload_project',{workspace,revision:current.revision,fingerprint:observed.fingerprint,resolutions:automatic?{}:externalResolutions});
+        if(activeWorkspace.current!==workspace)return;
+        liveJob.current=next;setJob(next);
+        if(next.state==='succeeded'){
+          const refreshed=await invoke<Project>('project',{workspace});
+          if(activeWorkspace.current===workspace)adopt(refreshed);
+        }else if(next.state==='failed')setExternalReloadFailed(true);
+      }catch(error){if(activeWorkspace.current===workspace){setExternalReloadFailed(true);setError(message(error));}}
+      finally{externalReloadTask.current=undefined;mutationBusy.current=false;if(activeWorkspace.current===workspace)setBusy(false);}
+    })();
+    externalReloadTask.current=task;
+    await task;
   }
   useEffect(()=>{
-    if(!trackExternal||!project||!external?.changed||external.conflicts?.length||working)return;
-    const key=JSON.stringify([project.workspace_id,project.revision,external.fingerprint]);
+    if(!trackExternal||!project||!external?.changed||external.conflicts?.length||working||host?.openingModel)return;
+    const key=JSON.stringify([project.workspace_id,external.fingerprint]);
     if(externalReloadAttempt.current===key)return;
     // Coalesce editor saves and wait until any Cadpad mutation has finished.
     const timer=window.setTimeout(()=>void reloadExternal(true),350);
     return()=>window.clearTimeout(timer);
-  },[project?.workspace_id,project?.revision,external,working,trackExternal]);
+  },[project?.workspace_id,project?.revision,external?.changed,external?.fingerprint,external?.conflicts?.length,working,trackExternal,host?.openingModel]);
   useEffect(()=>{if(job?.state==='failed'&&external?.changed)setExternalReloadFailed(true);},[job?.state,external?.changed]);
   function prepareMotionTest(intent:string,id?:string){
     const request=(id?`Edit the saved CAD requirement with ID ${id}. List saved requirements and inspect its existing definition first.\n`:'Create a saved CAD requirement from this free-text requirement:\n')+intent+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';
@@ -1258,7 +1269,7 @@ export function App({host}:{host?:SessionHost}={}) {
             {!host&&<PanelResizeHandle panel="model" value={panelSizes.model} onChange={value=>resizePanel('model',value)}/>}
             {!host&&<header className="dock-heading"><strong>Explorer</strong><button className="icon-button" aria-label="Close Explorer" onClick={()=>{setModelOpen(false);requestAnimationFrame(()=>document.getElementById('tab-model')?.focus());}}><Icon name="close" size={16}/></button></header>}
             <div className="model-browser-content">
-          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':selectedMesh&&selection.entity_id.startsWith('face:')?'Surface':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">{selectedMesh?'Measured from STL triangles.':'Measured on the current model.'}</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={host?busy||agentSending||agentWorking:working} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its models and parts.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
+          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':selectedMesh&&selection.entity_id.startsWith('face:')?'Surface':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">{selectedMesh?'Measured from STL triangles.':'Measured on the current model.'}</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={modelPickerBusy} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its models and parts.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
 
         </div>
           </aside>);
@@ -1373,7 +1384,7 @@ export function App({host}:{host?:SessionHost}={}) {
         {!!imageDropDepth&&<div className="assistant-image-drop" aria-hidden="true">Drop image to attach</div>}
       </aside>);
   const externalReview=(<>{(host?.chrome||externalReviewOpen)&&<ExternalChangesPanel changes={external?.changed?external.changes:{}} conflicts={external?.changed?external.conflicts:[]} resolutions={externalResolutions} reloadFailed={externalReloadFailed} busy={working} onResolve={(path,value)=>setExternalResolutions(values=>({...values,[path]:value}))} onClose={()=>{if(host)host.closeChanges();else setExternalReviewOpen(false);}} onReload={()=>{void reloadExternal();}}/>}</>);
-  const dialogs=(<>{error&&<AppAlert message={error} active={!host||host.active} onDismiss={()=>setError('')}/>}{project&&<QuickModelSelector open={quickModelOpen} workspace={project.workspace_id} revision={project.revision} historyWorkspace={host?.projectWorkspace} activeEntry={host?.modelEntry?.entry} activeBuilder={host?.modelEntry?.builder} busy={host?busy||agentSending||agentWorking:working} onClose={()=>setQuickModelOpen(false)} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/>}    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}</>);
+  const dialogs=(<>{error&&<AppAlert message={error} active={!host||host.active} onDismiss={()=>setError('')}/>}{project&&<QuickModelSelector open={quickModelOpen} workspace={project.workspace_id} revision={project.revision} historyWorkspace={host?.projectWorkspace} activeEntry={host?.modelEntry?.entry} activeBuilder={host?.modelEntry?.builder} busy={modelPickerBusy} onClose={()=>setQuickModelOpen(false)} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/>}    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}</>);
   const providerDialog=(<SettingsDialog
       open={providerOpen}
       dialogRef={settingsDialog}

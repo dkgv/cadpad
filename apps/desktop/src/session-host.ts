@@ -5,7 +5,7 @@ import type {Entity} from '@cadpad/viewer';
 export type SelectionContext={workspace:string;revision:string;entities:Entity[];omitted:Set<string>;capture:()=>string|null;toggleOmitted:(entity:Entity)=>void;clear:()=>void};
 export type ToolTab='model'|'move'|'simulate'|'test'|'assistant';
 export type SessionHost={
-  workspaceId:string;modelEntry?:{entry:string;builder:string};onOpenModel?:(entry:string,builder:string)=>Promise<void>;
+  workspaceId:string;modelEntry?:{entry:string;builder:string};onOpenModel?:(entry:string,builder:string,sourceReload?:Promise<void>)=>Promise<void>;
   /** Focused canvas session — owns menus, save, motion panels, and dialogs. */
   active:boolean;
   /** Sticky shared shell — owns header, rail, Explorer, and Assistant. */

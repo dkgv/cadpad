@@ -2987,6 +2987,63 @@ test('filesystem notifications refresh Explorer meshes and external review throu
 });
 
 
+test('a disk reload waits for an STL open and leaves the model tab focused',async()=>{
+  const original=harness.invoke.bind(harness),root=harness.project,view=fixture();
+  root.external_tracking=true;root.saved_revision=root.revision;root.model.parts=[];
+  view.workspace_id='view-stl';view.model_parent=root.workspace_id;
+  let accept,reloads=0;
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files:[{path:'bracket.stl',builders:[{id:'$file',label:'bracket.stl',kind:'model_file',available:true,line:1}]}]};
+    if(command==='open_project_model')return new Promise(resolve=>{accept=resolve;});
+    if(command==='project'&&args.workspace===view.workspace_id)return structuredClone(view);
+    if(command==='check_external')return {revision:root.revision,changed:reloads===0,fingerprint:'disk',changes:{'model.py':'modified'}};
+    if(command==='reload_project'){
+      reloads++;
+      root.revision='r2';root.saved_revision='r2';root.model.parts=fixture().model.parts;
+      return {id:'reload',state:'succeeded',diagnostics:{}};
+    }
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(20);
+  await click(document.querySelector('#panel-model .library-part-link'));
+  await flush(425);
+  assert.equal(reloads,0);
+  assert.equal(document.querySelector('#panel-model .library-part-link').disabled,false);
+  await act(async()=>accept({project:view}));await flush(425);
+  assert.equal(reloads,1);
+  assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true')?.textContent,'bracket.stl');
+});
+
+test('Explorer accepts a model click during a disk reload and opens against the new revision',async()=>{
+  const original=harness.invoke.bind(harness),root=harness.project;
+  root.external_tracking=true;
+  let finishReload,openArgs;
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files:[{path:'bracket.stl',builders:[{id:'$file',label:'bracket.stl',kind:'model_file',available:true,line:1}]}]};
+    if(command==='check_external')return {changed:root.revision==='r1',fingerprint:'disk',changes:{'model.py':'modified'}};
+    if(command==='reload_project')return new Promise(resolve=>{finishReload=()=>{
+      root.revision='r2';root.saved_revision='r2';
+      resolve({id:'reload',state:'succeeded',diagnostics:{}});
+    };});
+    if(command==='open_project_model'){
+      openArgs=args;
+      return {project:{...fixture(),workspace_id:'view-bracket',model_parent:root.workspace_id}};
+    }
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(425);
+  assert.ok(finishReload);
+  const row=document.querySelector('#panel-model .library-part-link');
+  assert.equal(row.disabled,false);
+  await click(row);
+  assert.equal(row.getAttribute('aria-busy'),'true');
+  assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true')?.textContent,'bracket.stl');
+  assert.equal(openArgs,undefined);
+  await act(async()=>finishReload());await flush(30);
+  assert.equal(openArgs.revision,'r2');
+  assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true')?.textContent,'bracket.stl');
+});
+
 test('disk changes reload automatically once and clear the stale change indicator',async()=>{
   const original=harness.invoke.bind(harness);
   harness.project.external_tracking=true;
@@ -3007,6 +3064,24 @@ test('disk changes reload automatically once and clear the stale change indicato
   assert.equal(document.querySelector('[aria-label="Review files changed outside Cadpad"]'),null);
   await flush(450);
   assert.equal(harness.calls.filter(([name])=>name==='reload_project').length,1);
+});
+
+test('an unchanged disk fingerprint cannot trigger a rebuild loop after a new revision',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.project.external_tracking=true;
+  let reloads=0;
+  harness.invoke=async(command,args)=>{
+    if(command==='check_external')return {changed:true,fingerprint:'same-disk',changes:{'model.py':'modified'}};
+    if(command==='reload_project'){
+      reloads++;
+      harness.project.revision=`r${reloads+1}`;
+      harness.project.saved_revision=harness.project.revision;
+      return {id:'reload',state:'succeeded',diagnostics:{}};
+    }
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(425);await flush(425);
+  assert.equal(reloads,1);
 });
 
 test('failed automatic reload offers an explicit retry without a build loop',async()=>{

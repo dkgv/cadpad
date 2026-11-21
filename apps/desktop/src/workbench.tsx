@@ -14,7 +14,7 @@ import {AppAlert} from './app-alert';
 import './workbench.css';
 
 type Area='canvas'|'left'|'right';
-type DocumentTab={kind?:'changes';id:string;workspace:string;name:string;dirty:boolean;projectHome?:boolean;pending?:boolean;opening?:boolean;modelEntry?:{entry:string;builder:string;project:string}};
+type DocumentTab={kind?:'changes';id:string;workspace:string;name:string;dirty:boolean;projectHome?:boolean;pending?:boolean;opening?:boolean;checkingSource?:boolean;modelEntry?:{entry:string;builder:string;project:string}};
 type ModelOpen={identity:string;cancelled:boolean;dropped:boolean;reused:boolean;docClosed:boolean;workspace:string;jobId:string;docId:string;promise:Promise<void>};
 function modelJob(job:unknown):{id:string;state:string}|undefined{
   if(!job||typeof job!=='object')return;
@@ -99,7 +99,7 @@ function restore(project:Project,known:Set<string>):Layout{
     const sectionWeights=saved.sectionWeights&&typeof saved.sectionWeights==='object'?Object.fromEntries(Object.entries(saved.sectionWeights).filter(([id,value])=>toolIds.includes(id as ToolTab)&&Number.isFinite(value)&&Number(value)>0).map(([id,value])=>[id,Number(value)])) as Partial<Record<ToolTab,number>>:{};
     const sidebar={left:leftNorm.node,right:rightNorm.node,leftWidth:Number.isFinite(saved.leftWidth)?Math.max(220,Math.min(640,saved.leftWidth)):320,rightWidth:Number.isFinite(saved.rightWidth)?Math.max(220,Math.min(640,saved.rightWidth)):320,expanded,locations,sectionWeights};
     const used=new Set(groups(canvas).flatMap(g=>g.tabs));
-    const restored:DocumentTab[]=tabs.filter(doc=>used.has(doc.id)).map(doc=>({...doc,projectHome:false,opening:false,name:modelTabTitle(undefined,doc.name,doc.modelEntry)}));
+    const restored:DocumentTab[]=tabs.filter(doc=>used.has(doc.id)).map(doc=>({...doc,projectHome:false,opening:false,checkingSource:false,name:modelTabTitle(undefined,doc.name,doc.modelEntry)}));
     if(home)restored.unshift(home);
     if(!restored.length)return {...fallback,...sidebar};
     return {...sidebar,projectWorkspace:saved.projectWorkspace??project.workspace_id,canvas,documents:restored,focus:groups(canvas).some(g=>g.active===saved.focus)?saved.focus:groups(canvas).map(g=>g.active).find(Boolean)??restored[0].id};
@@ -264,7 +264,7 @@ export function Workbench(){
     if(jobId)void invoke('stop',{workspace,jobId}).catch(()=>{});
     void invoke('forget_workspace',{workspace}).catch(()=>{});
   }
-  async function openModel(document:string,entry:string,builder:string){
+  async function openModel(document:string,entry:string,builder:string,sourceReload?:Promise<void>){
     const started=performance.now();
     const current=state.current,source=current?.documents.find(doc=>doc.id===document)
       ??(chromeDocument.current?.document.id===document?chromeDocument.current.document:undefined);
@@ -284,12 +284,13 @@ export function Workbench(){
     }
     const allocating=[...openingModels.current.values()].filter(open=>!open.cancelled&&!open.docId).length;
     if(!existing&&current.documents.length+allocating>=32){setFailure('Close a model tab before opening another.');return;}
-    const sourceProject=projects.current.get(project)||projects.current.get(root.workspace)||projects.current.get(source.workspace);
-    if(!sourceProject)return;
+    const sourceSnapshot=()=>projects.current.get(project)||projects.current.get(root.workspace)||projects.current.get(source.workspace);
+    const initialSource=sourceSnapshot();
+    if(!initialSource)return;
     if(existing){
       focusDocument(existing.id);
       const view=projects.current.get(existing.workspace);
-      if(builder!=='$file'||!/\.stl$/i.test(entry)||!sourceProject.external_tracking||
+      if(builder!=='$file'||!/\.stl$/i.test(entry)||!initialSource.external_tracking||
         existing.opening||existing.dirty||!view||view.activity.some(job=>job.state==='queued'||job.state==='running'))return;
     }
     const open:ModelOpen={identity,cancelled:false,dropped:false,reused:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
@@ -311,8 +312,13 @@ export function Workbench(){
       const target=groups(layout.canvas).find(pane=>pane.tabs.includes(layout.focus))||groups(layout.canvas)[0];
       return {...layout,documents:[...layout.documents,placeholder],canvas:placeTab(layout.canvas,placeholder.id,target.id),focus:placeholder.id};
     });
+    else update(layout=>({...layout,documents:layout.documents.map(doc=>doc.id===open.docId?{...doc,checkingSource:true}:doc)}));
     const task=(async()=>{
       try{
+        if(sourceReload)await sourceReload;
+        if(open.cancelled||state.current?.projectWorkspace!==current.projectWorkspace||
+          !state.current?.documents.some(doc=>doc.id===open.docId))return;
+        const sourceProject=sourceSnapshot()??initialSource;
         const cached=modelViews.current.get(identity);
         const cachedWorkspace=existing?.workspace??(cached?.sourceRevision===sourceProject.revision?cached.workspace:undefined);
         let result:{project:Project;job?:unknown}|undefined;
@@ -344,7 +350,10 @@ export function Workbench(){
         if(!open.cancelled&&state.current?.projectWorkspace===project)setFailure(describeError(error));
         if(!existing)closeDocument(open.docId);
       }finally{
-        if(openingModels.current.get(identity)===open)openingModels.current.delete(identity);
+        if(openingModels.current.get(identity)===open){
+          openingModels.current.delete(identity);
+          if(existing)update(layout=>({...layout,documents:layout.documents.map(doc=>doc.id===open.docId?{...doc,checkingSource:false}:doc)}));
+        }
       }
     })();
     open.promise=task;
@@ -629,15 +638,15 @@ export function Workbench(){
       return mounted.current.has(doc.id);
     }).map(doc=>{
       const sessionHost:SessionHost={
-        workspaceId:doc.workspace,modelEntry:doc.modelEntry,onOpenModel:(entry,builder)=>openModel(doc.id,entry,builder),
+        workspaceId:doc.workspace,modelEntry:doc.modelEntry,onOpenModel:(entry,builder,sourceReload)=>openModel(doc.id,entry,builder,sourceReload),
         openTiming:openTimings.current.get(doc.id),
         active:doc.id===layout.focus,chrome:doc.id===chromeId.current,visible:visible.has(doc.id),
-        projectWorkspace,focusWorkspace,focusModelEntry:focusDoc?.modelEntry,openingModel:focusDoc?.opening?focusDoc.modelEntry:undefined,focusSelection:selections[focusWorkspace],
+        projectWorkspace,focusWorkspace,focusModelEntry:focusDoc?.modelEntry,openingModel:focusDoc?.opening||focusDoc?.checkingSource?focusDoc.modelEntry:undefined,focusSelection:selections[focusWorkspace],
         onSelection:context=>setSelections(current=>({...current,[context.workspace]:context})),initialProject:projects.current.get(doc.workspace),
         changes:host('$changes'),openChanges,closeChanges,
         header,rail,notices,tools:toolHosts,visibleTools,showTool,onOpen:openProject,onOpenWorkspace:workspace=>void openWorkspace(workspace),
         onOpeningSettled:doc.opening?()=>update(current=>({
-          ...current,documents:current.documents.map(item=>item.id===doc.id?{...item,opening:false}:item),
+          ...current,documents:current.documents.map(item=>item.id===doc.id&&item.workspace===doc.workspace?{...item,opening:false}:item),
         })):undefined,
         onProject:project=>{
           projects.current.set(project.workspace_id,project);
@@ -652,7 +661,8 @@ export function Workbench(){
             const documents=current.documents.map(item=>item.workspace===project.workspace_id&&item.kind!=='changes'?{...item,name,dirty,projectHome:showModel?false:item.projectHome}:item);
             if(!showModel)return {...current,documents};
             const target=groups(current.canvas).find(pane=>pane.tabs.includes(current.focus))??groups(current.canvas)[0];
-            return {...current,documents,canvas:placeTab(current.canvas,prior.id,target.id),focus:prior.id};
+            const canvas=placeTabs(current.canvas,[prior.id],target.id,'center',undefined,target.active||prior.id);
+            return {...current,documents,canvas,focus:target.active?current.focus:prior.id};
           });
         },
         connectMenu:channel=>connectMenu(doc.id,channel),connectView:channel=>connectView(doc.id,channel),
