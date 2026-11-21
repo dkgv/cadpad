@@ -202,6 +202,24 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.deepEqual([...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent),['Pin']);
   await act(async()=>document.querySelector('.quick-model-row').click());
   assert.deepEqual(quickChosen,[['cad/brake.py','pin']]);
+  window.localStorage.setItem('cadpad.recent-models.v1:ws',JSON.stringify([
+    JSON.stringify(['cad/brake.py','pin']),JSON.stringify(['cad/axle.py','axle']),
+  ]));
+  await act(async()=>root.render(null));
+  await act(async()=>root.render(React.createElement(QuickModelSelector,{open:true,workspace:'ws',revision:'r1',onClose:()=>{},onChoose:(...args)=>quickChosen.push(args)})));
+  const quickInput=document.querySelector('[aria-label="Search models"]');
+  const quickNames=()=>[...document.querySelectorAll('.quick-model-row strong')].map(node=>node.textContent);
+  const setQuickQuery=value=>act(async()=>{
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(quickInput,value);
+    quickInput.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
+  });
+  assert.deepEqual(quickNames(),['Pin','Axle','Yoke','Brake body']);
+  await setQuickQuery('brake');
+  assert.deepEqual(quickNames(),['Brake body','Pin'],'a model name match outranks a shared file match and recent history');
+  await act(async()=>quickInput.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true})));
+  assert.deepEqual(quickChosen.at(-1),['cad/brake.py','brake_body']);
+  await setQuickQuery('');
+  assert.deepEqual(quickNames(),['Pin','Axle','Yoke','Brake body']);
   assert.equal(calls.filter(([command,args])=>command==='project_source_index'&&args.workspace==='ws').length,1,'quick open reuses the shared source index');
 
   // The same revision must follow disk changes in the Models section.

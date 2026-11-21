@@ -34,6 +34,18 @@ function fuzzyGap(query:string,value:string){
   return gap;
 }
 
+function searchRank(query:string,value:string){
+  const field=normalizeSearch(value);
+  if(field===query)return {tier:0,gap:0};
+  if(field.startsWith(query))return {tier:1,gap:0};
+  if(field.includes(query))return {tier:2,gap:0};
+  return {tier:3,gap:fuzzyGap(query,field)};
+}
+
+function compareRank(a:{tier:number;gap:number},b:{tier:number;gap:number}){
+  return a.tier-b.tier||a.gap-b.gap;
+}
+
 export function QuickModelSelector({open,workspace,revision,historyWorkspace=workspace,activeEntry,activeBuilder,busy,onClose,onChoose}:{
   open:boolean;workspace:string;revision:string;historyWorkspace?:string;activeEntry?:string;activeBuilder?:string;busy?:boolean;onClose:()=>void;onChoose:(path:string,builder:string)=>void;
 }){
@@ -52,19 +64,19 @@ export function QuickModelSelector({open,workspace,revision,historyWorkspace=wor
       const rank=({file,builder}:IndexedModel)=>recentRanks.get(modelKey(file.path,builder.id))??recentRanks.size;
       return [...models].sort((a,b)=>rank(a)-rank(b));
     }
-    const literal:IndexedModel[]=[];
-    const fuzzy:{model:IndexedModel;gap:number}[]=[];
+    const ranked:{model:IndexedModel;tier:number;gap:number}[]=[];
     for(const model of models){
       const {file,builder}=model;
-      const fields=[modelCaption(builder),builder.label,file.path,file.description];
-      if(normalizeSearch(fields.join(' ')).includes(search)){
-        literal.push(model);
-        continue;
+      let rank=searchRank(search,modelCaption(builder));
+      for(const field of [builder.label,file.path,file.description]){
+        const candidate=searchRank(search,field);
+        // A shared file match should rank below a match in the displayed model name.
+        candidate.tier+=4;
+        if(Number.isFinite(candidate.gap)&&(!Number.isFinite(rank.gap)||compareRank(candidate,rank)<0))rank=candidate;
       }
-      const gap=Math.min(...fields.map(value=>fuzzyGap(search,normalizeSearch(value))));
-      if(Number.isFinite(gap))fuzzy.push({model,gap});
+      if(Number.isFinite(rank.gap))ranked.push({model,...rank});
     }
-    return [...literal,...fuzzy.sort((a,b)=>a.gap-b.gap).map(({model})=>model)];
+    return ranked.sort(compareRank).map(({model})=>model);
   },[models,search,recentRanks]);
   useEffect(()=>{
     if(!open)return;
