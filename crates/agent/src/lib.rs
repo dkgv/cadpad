@@ -2,6 +2,7 @@
 //! all project mutations, geometry, revisions and actor cancellation. CLI backends
 //! reuse Claude / Codex / Cursor / OpenCode auth and call Cadpad through MCP.
 pub mod cli;
+pub mod cloud;
 pub mod credentials;
 pub mod provider;
 pub mod references;

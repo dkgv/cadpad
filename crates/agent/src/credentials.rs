@@ -23,42 +23,13 @@ pub struct SystemCredentials;
 #[cfg(target_os = "macos")]
 impl Credentials for SystemCredentials {
     fn get(&self) -> Result<Option<Secret>> {
-        let entry =
-            keyring::Entry::new("app.cadpad.desktop", "anthropic-api-key").map_err(|_| {
-                Error::domain(
-                    "CREDENTIAL_UNAVAILABLE",
-                    "Could not open the system keychain",
-                )
-            })?;
-        match entry.get_password() {
-            Ok(value) => Ok(Some(Secret::new(value)?)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(Error::domain(
-                "CREDENTIAL_UNAVAILABLE",
-                "Allow Cadpad access to its API key in the system keychain",
-            )),
-        }
+        keychain_get("anthropic-api-key")
     }
     fn set(&self, secret: Secret) -> Result<()> {
-        keyring::Entry::new("app.cadpad.desktop", "anthropic-api-key")
-            .and_then(|entry| entry.set_password(secret.expose()))
-            .map_err(|_| {
-                Error::domain(
-                    "CREDENTIAL_UNAVAILABLE",
-                    "Could not store the API key in the system keychain",
-                )
-            })
+        keychain_set("anthropic-api-key", secret)
     }
     fn delete(&self) -> Result<()> {
-        match keyring::Entry::new("app.cadpad.desktop", "anthropic-api-key")
-            .and_then(|entry| entry.delete_credential())
-        {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(Error::domain(
-                "CREDENTIAL_UNAVAILABLE",
-                "Could not remove the API key from the system keychain",
-            )),
-        }
+        keychain_delete("anthropic-api-key")
     }
 }
 #[cfg(not(target_os = "macos"))]
@@ -74,5 +45,75 @@ impl Credentials for SystemCredentials {
     }
     fn delete(&self) -> Result<()> {
         self.get().map(|_| ())
+    }
+}
+
+/// Cadpad cloud API key (`cpd_…`) for image→CAD generation.
+pub struct CadpadCloudCredentials;
+#[cfg(target_os = "macos")]
+impl Credentials for CadpadCloudCredentials {
+    fn get(&self) -> Result<Option<Secret>> {
+        keychain_get("cadpad-api-key")
+    }
+    fn set(&self, secret: Secret) -> Result<()> {
+        keychain_set("cadpad-api-key", secret)
+    }
+    fn delete(&self) -> Result<()> {
+        keychain_delete("cadpad-api-key")
+    }
+}
+#[cfg(not(target_os = "macos"))]
+impl Credentials for CadpadCloudCredentials {
+    fn get(&self) -> Result<Option<Secret>> {
+        Err(Error::domain(
+            "UNSUPPORTED_OPERATION",
+            "Native credential storage is currently implemented for macOS",
+        ))
+    }
+    fn set(&self, _: Secret) -> Result<()> {
+        self.get().map(|_| ())
+    }
+    fn delete(&self) -> Result<()> {
+        self.get().map(|_| ())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_get(account: &str) -> Result<Option<Secret>> {
+    let entry = keyring::Entry::new("app.cadpad.desktop", account).map_err(|_| {
+        Error::domain(
+            "CREDENTIAL_UNAVAILABLE",
+            "Could not open the system keychain",
+        )
+    })?;
+    match entry.get_password() {
+        Ok(value) => Ok(Some(Secret::new(value)?)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err(Error::domain(
+            "CREDENTIAL_UNAVAILABLE",
+            "Allow Cadpad access to its API key in the system keychain",
+        )),
+    }
+}
+#[cfg(target_os = "macos")]
+fn keychain_set(account: &str, secret: Secret) -> Result<()> {
+    keyring::Entry::new("app.cadpad.desktop", account)
+        .and_then(|entry| entry.set_password(secret.expose()))
+        .map_err(|_| {
+            Error::domain(
+                "CREDENTIAL_UNAVAILABLE",
+                "Could not store the API key in the system keychain",
+            )
+        })
+}
+#[cfg(target_os = "macos")]
+fn keychain_delete(account: &str) -> Result<()> {
+    match keyring::Entry::new("app.cadpad.desktop", account).and_then(|entry| entry.delete_credential())
+    {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(_) => Err(Error::domain(
+            "CREDENTIAL_UNAVAILABLE",
+            "Could not remove the API key from the system keychain",
+        )),
     }
 }
