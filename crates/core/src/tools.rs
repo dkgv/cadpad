@@ -325,6 +325,17 @@ pub struct Undo {
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct CheckPrintability {
+    pub workspace_id: String,
+    /// Must be the current committed revision.
+    pub revision: String,
+    pub pose_version: Option<u64>,
+    /// fdm | resin | sla | generic. Defaults to fdm.
+    pub process: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetSelection {
     pub workspace_id: String,
 }
@@ -512,11 +523,19 @@ fn build_definitions() -> Vec<ToolSpec> {
             "undo",
             "Build a previous successful input state as a new revision, preserving history and current geometry on failure.",
         ),
+        spec::<crate::mesh_ops::TransformMesh>(
+            "transform_mesh",
+            "Apply a rigid transform (translate mm, rotate axis+angle_deg, per-axis scale, mirror_axis) to a managed STL mesh asset, then rebuild as a new revision. Use for simple dimensional tweaks on STL assets — inspect get_project's assets map for the asset key. Only .stl assets qualify; CadQuery/BRep parts must be edited through source or set_parameter. Returns a build job; poll get_job.",
+        ),
+        spec::<CheckPrintability>(
+            "check_printability",
+            "Run heuristic printability checks on the current revision: watertight/manifold edges, degenerate triangles, build-volume fit, minimum feature size and overhang fraction for a process preset (fdm default, resin, sla, generic). Works on STL mesh projects and CadQuery projects (tessellated through export). Results are estimates for triage — not a slicer. Requires the current revision; pass pose_version for a posed mechanism.",
+        ),
     ];
     for tool in &mut tools {
         tool.output_schema = match tool.name.as_str() {
             "set_annotation" | "delete_annotation" | "build" | "repair_display" | "get_job"
-            | "cancel_job" | "set_parameter" | "define_mechanism" | "undo" => {
+            | "cancel_job" | "set_parameter" | "define_mechanism" | "undo" | "transform_mesh" => {
                 Some(result_schema::<crate::Job>())
             }
             "get_motion" | "control_simulation" => Some(result_schema::<crate::motion::Snapshot>()),
@@ -534,6 +553,9 @@ fn build_definitions() -> Vec<ToolSpec> {
             "match_mesh_edge" => Some(result_schema::<MeshEdgeMatchResult>()),
             "trace_part_source" => Some(result_schema::<PartSourceTrace>()),
             "inspect" => Some(result_schema::<crate::geometry::InspectionReply>()),
+            "check_printability" => {
+                Some(result_schema::<crate::printability::PrintabilityReport>())
+            }
             "check_interference" => Some(result_schema::<crate::geometry::InterferenceReply>()),
             "capture_views" => Some(result_schema::<crate::views::CaptureToolReply>()),
             "compare_views" => Some(result_schema::<crate::views::ViewsReply>()),
@@ -931,6 +953,23 @@ impl Core {
                         &args.expected_base_revision,
                         &args.draft_id,
                         &context.actor
+                    )
+                    .await?
+                ))
+            }
+            "transform_mesh" => {
+                let args: crate::mesh_ops::TransformMesh = parse(arguments)?;
+                Ok(json!(self.transform_mesh(&context.actor, args).await?))
+            }
+            "check_printability" => {
+                let args: CheckPrintability = parse(arguments)?;
+                Ok(json!(
+                    self.check_printability(
+                        &context.actor,
+                        &args.workspace_id,
+                        &args.revision,
+                        args.pose_version,
+                        args.process
                     )
                     .await?
                 ))
