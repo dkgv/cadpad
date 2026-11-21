@@ -572,3 +572,16 @@ details.step-summary{border-color:var(--line)}
 .external-review-body ul{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}.external-review-body li{padding:10px 0;border-bottom:1px solid var(--line)}.external-review-file{display:flex;align-items:center;gap:10px}.external-review-icon{display:flex;color:var(--muted);flex:none}.external-review-path{display:flex;gap:10px;align-items:baseline;flex:1;min-width:0;flex-wrap:wrap;overflow-wrap:anywhere}.external-review-path strong{font-size:12px;font-weight:500}.external-review-path small{font-size:11px;color:var(--muted)}.external-review-badge{font-size:11px;flex:none;color:var(--change-color)}
 .external-review-conflict{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin:10px 0 0 28px;font-size:11px;color:var(--muted)}.external-review-conflict select{font-size:11px;max-width:240px;background:var(--surface)}.external-review-hint,.external-review-empty{font-size:12px;color:var(--muted)}
 .external-changes-panel>footer{display:flex;justify-content:flex-end;gap:8px;flex:none;padding:12px 24px;border-top:1px solid var(--line)}.external-changes-panel>footer:empty{display:none}
+
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.assistant-chat-pane .inspector-page,
+input,
+textarea,
+[contenteditable]:not([contenteditable="false"]) {
+  -webkit-user-select: text;
+  user-select: text;
+}
