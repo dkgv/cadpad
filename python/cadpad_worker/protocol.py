@@ -59,12 +59,15 @@ def main():
             revision = request["revision"]
             method = request["method"]
             args = request.get("params", {})
-            if method not in ("build", "analyze_entry", "index_sources") and (model is None or revision != model.revision):
+            if method not in ("build", "analyze_entry", "index_sources", "find_symbol") and (model is None or revision != model.revision):
                 raise DomainError("STALE_ENTITY", "Worker retains a different revision")
             with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
                 if method == "index_sources":
                     from .entrypoint import index_sources
                     result = index_sources(args)
+                elif method == "find_symbol":
+                    from .entrypoint import find_symbol
+                    result = find_symbol(args)
                 elif method == "analyze_entry":
                     from .entrypoint import analyze
                     result = analyze(args)
@@ -75,6 +78,12 @@ def main():
                     result = model.build(args, revision)
                 elif method == "inspect":
                     result = model.inspect(args)
+                elif method == "trace_cad_edge":
+                    from .edge_trace import trace_native_edges
+                    result = trace_native_edges(model, args)
+                elif method == "match_mesh_edge":
+                    from .edge_trace import match_mesh_segments
+                    result = match_mesh_segments(model, args)
                 elif method == "remesh":
                     result = model.remesh(args)
                 elif method == "export":

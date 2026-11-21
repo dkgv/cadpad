@@ -42,6 +42,19 @@ async fn multi_view_baselines_reuse_cameras_and_enforce_scope_and_retention() {
     let actor = ToolContext {
         actor: "user".into(),
     };
+    let camera = json!({"position":[8.0,10.0,10.0],"target":[0.0,0.0,0.0],"quaternion":[0.0,0.0,0.0,1.0],"zoom":2.0,"orthographic":true});
+    let standalone = core
+        .dispatch(
+            &actor,
+            "capture_views",
+            json!({"workspace_id":ws,"revision":rev,"single":true,"camera":camera,
+                "width":1,"height":1,"dimensions":true}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(standalone["camera"], camera);
+    assert_eq!(standalone["image"]["data"], PNG);
+    assert!(standalone.get("capture_id").is_none());
     let baseline = core
         .dispatch(
             &actor,

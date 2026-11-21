@@ -52,7 +52,7 @@ impl ServerHandler for Bridge {
                 .build(),
         );
         info.server_info = Implementation::new("cadpad-mcp", env!("CARGO_PKG_VERSION"));
-        info.instructions=Some("Cadpad connects to a running desktop app. Call get_project to discover workspace IDs, then use an explicit workspace_id and expected revision. Use search_source to locate text in large Python files and read_source_lines to read around a match or a component source location. Use trace_mesh_edges for selected STL edge adjacency and trace_part_source for component publication or asset paths. Stage Python with update_source, build the draft, poll get_job, inspect exact geometry, and repair failed drafts. Never infer exact dimensions from pixels. Python cached_shape(unique_name,builder), also context.cached_shape, optionally reuses deterministic CadQuery Shapes (.val() for Workplanes). Callbacks must depend only on project source, published parameters, managed assets and pinned dependencies; never cache I/O, time/randomness, side effects or mutable external state. Source still executes and invalid caches rebuild. No shell or independent headless workspace is exposed.".into());
+        info.instructions=Some("Cadpad connects to a running desktop app. Call get_project to discover workspace IDs, then use an explicit workspace_id and expected revision. Use find_symbol to locate Python definitions, imports and calls across a project. Use search_source to locate text in large Python files and read_source with start_line to read around a match or a component source location. Use trace_mesh_edges for selected STL edge adjacency and trace_part_source for component publication or asset paths. Use match_mesh_edge with a corresponding CAD model, then trace_cad_edge for native adjacency and source evidence. Stage Python with update_source, build the draft, poll get_job, inspect exact geometry, and repair failed drafts. Never infer exact dimensions from pixels. Python cached_shape(unique_name,builder), also context.cached_shape, optionally reuses deterministic CadQuery Shapes (.val() for Workplanes). Callbacks must depend only on project source, published parameters, managed assets and pinned dependencies; never cache I/O, time/randomness, side effects or mutable external state. Source still executes and invalid caches rebuild. No shell or independent headless workspace is exposed.".into());
         info
     }
     async fn list_tools(
@@ -107,7 +107,12 @@ impl ServerHandler for Bridge {
         let args = Value::Object(request.arguments.clone().unwrap_or_default());
         let result = match self.app().await {
             Ok(client) => match self.live_definitions().await {
-                Ok(definitions) if definitions.iter().any(|tool| tool.name == request.name) => {
+                Ok(definitions)
+                    if definitions.iter().any(|tool| {
+                        tool.name == request.name
+                            || tool.name == tools::canonical_name(&request.name)
+                    }) =>
+                {
                     client.call(&request.name, args).await
                 }
                 Ok(_) => {
@@ -119,7 +124,7 @@ impl ServerHandler for Bridge {
                 Err(error) => Err(error),
             },
             Err(error) => {
-                if tools::definition(&request.name).is_none() {
+                if tools::definition(tools::canonical_name(&request.name)).is_none() {
                     return Err(ErrorData::invalid_params(
                         "Unknown Cadpad tool",
                         Some(json!({"code":"UNSUPPORTED_OPERATION"})),

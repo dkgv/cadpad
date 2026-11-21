@@ -11,17 +11,14 @@ fn validator(name: &str) -> jsonschema::Validator {
 }
 #[test]
 fn advertised_output_schemas_are_valid_and_accept_both_execution_error_forms() {
-    let covered: Vec<_> = tools::definitions_ref()
-        .iter()
-        .filter(|tool| tool.output_schema.is_some())
-        .collect();
-    assert_eq!(covered.len(), 25);
+    let covered = tools::definitions_ref();
+    assert!(covered.iter().all(|tool| tool.output_schema.is_some()));
     assert_eq!(
         covered
             .iter()
             .filter(|tool| tool.mcp_output_schema.is_some())
             .count(),
-        4
+        3
     );
     for tool in covered {
         for schema in tool

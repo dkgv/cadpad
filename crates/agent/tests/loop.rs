@@ -130,8 +130,8 @@ impl Provider for Script {
                     .into();
                 assert_eq!(result["verification"]["entities"][0]["volume"], 6000.0);
                 (
-                    "capture_view",
-                    json!({"workspace_id":ws,"revision":revision,"pose_version":0,"dimensions":true}),
+                    "capture_views",
+                    json!({"workspace_id":ws,"revision":revision,"pose_version":0,"dimensions":true,"single":true}),
                 )
             }
             5 => {
@@ -784,8 +784,8 @@ impl Provider for CaptureWait {
         Ok(ProviderReply {
             content: vec![Block::ToolUse {
                 id: "waiting-capture".into(),
-                name: "capture_view".into(),
-                input: json!({"workspace_id":context["workspace_id"],"revision":context["revision"]}),
+                name: "capture_views".into(),
+                input: json!({"workspace_id":context["workspace_id"],"revision":context["revision"],"single":true}),
             }],
             stop: StopReason::ToolUse,
         })

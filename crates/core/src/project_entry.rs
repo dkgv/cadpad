@@ -869,6 +869,15 @@ impl Core {
     }
     async fn entry_analysis_request(&self, method: &str, params: Value) -> Result<Value> {
         let (_send, cancel) = tokio::sync::watch::channel(false);
+        self.entry_analysis_with_cancel(method, params, cancel).await
+    }
+
+    pub(crate) async fn entry_analysis_with_cancel(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Value> {
         let (admission, _construction) = self.native_construction(cancel.clone()).await?;
         let cache = self.root.join("entry-analysis").join(crate::id());
         let mut config = self.config.clone();

@@ -211,7 +211,7 @@ pub struct Request<'a> {
     pub entities: &'a [Entity],
     pub chips: &'a [ChatReference],
     pub image: Option<String>,
-    /// CLI backends receive text only; they can call capture_view themselves.
+    /// CLI backends receive text only; they can call capture_views with single=true.
     pub image_supported: bool,
 }
 pub async fn resolve(tools: &dyn ToolExecutor, request: Request<'_>) -> Result<Resolved> {
@@ -304,7 +304,7 @@ face/edge provenance is not recorded, so match exact properties to the code that
                 text.push_str(&format!(
                     "<source path=\"{file}\" revision=\"{revision}\"{}>\n{shown}\n</source>\n",
                     if cut {
-                        " truncated=\"true; use search_source or read_source_lines for the rest\""
+                        " truncated=\"true; use search_source or paged read_source for the rest\""
                     } else {
                         ""
                     }
@@ -318,7 +318,7 @@ face/edge provenance is not recorded, so match exact properties to the code that
     }
     let image = if image_supported { image } else { None };
     if image.is_none() && chips.len() > 1 {
-        text.push_str("No screenshot is attached; capture_view shows the same lettered badges.\n");
+        text.push_str("No screenshot is attached; capture_views with single=true shows the same lettered badges.\n");
     }
     Ok(Resolved { text, image })
 }

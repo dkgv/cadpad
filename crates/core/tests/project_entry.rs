@@ -681,6 +681,7 @@ async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
     assert_eq!(done(&core, &source, job).await.state, JobState::Succeeded);
     let current = core.get_project(&source).await.unwrap();
     let revision = current["revision"].as_str().unwrap();
+    let native_revision = revision;
 
     let context = cadpad_core::tools::ToolContext { actor: "user".into() };
     let native_part = &current["model"]["parts"][0];
@@ -745,6 +746,15 @@ async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
             .unwrap();
         assert_eq!(trace["asset_path"], entry);
         assert!(trace["publication"].is_null());
+        if extension == "step" {
+            let cad_revision = &model["revision"];
+            let imported = core.dispatch(&context, "trace_cad_edge", serde_json::json!({
+                "workspace_id":tab,"revision":cad_revision,
+                "entities":[{"revision":cad_revision,"instance_id":"model","entity_id":"edge:0"}]
+            })).await.unwrap();
+            assert_eq!(imported["edges"][0]["incident_face_count"], 2);
+            assert!(imported["edges"][0]["operation"].is_null());
+        }
         if extension == "STL" {
             let state: Value = serde_json::from_slice(
                 &std::fs::read(
@@ -769,6 +779,20 @@ async fn nested_step_and_stl_exports_are_discovered_and_open_in_model_tabs() {
             let revision = model["revision"].as_str().unwrap();
             let edge =
                 serde_json::json!({"revision":revision,"instance_id":"model","entity_id":"edge:0"});
+            let matched = core.dispatch(&context, "match_mesh_edge", serde_json::json!({
+                "workspace_id":tab,"revision":revision,"entities":[edge],
+                "target_workspace_id":source,"target_revision":native_revision,"target_instance_id":native_part["instance_id"]
+            })).await.unwrap();
+            assert_eq!(matched["matches"][0]["candidate_count"], 1);
+            let candidate = &matched["matches"][0]["candidates"][0];
+            assert!(candidate["max_sample_distance_mm"].as_f64().unwrap() < 1e-6);
+            let native_trace = core.dispatch(&context, "trace_cad_edge", serde_json::json!({
+                "workspace_id":source,"revision":native_revision,"entities":[candidate["reference"]]
+            })).await.unwrap();
+            assert_eq!(native_trace["edges"][0]["incident_face_count"], 2);
+            assert_eq!(native_trace["edges"][0]["operation"], serde_json::json!({
+                "file":"geometry.py","line":2,"operation":"box"
+            }));
             let trace_args = serde_json::json!({"workspace_id":tab,"revision":revision,"entities":[edge]});
             let trace = core.dispatch(&context, "trace_mesh_edges", trace_args.clone()).await.unwrap();
             assert_eq!(trace["accuracy"], "mesh");

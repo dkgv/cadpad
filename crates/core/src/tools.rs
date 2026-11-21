@@ -16,19 +16,14 @@ pub struct ToolContext {
 pub struct GetProject {
     pub workspace_id: Option<String>,
 }
-#[derive(Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ReadSource {
-    pub workspace_id: String,
-    pub version: String,
-    pub path: String,
-}
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ReadSourceLines {
+struct ReadSource {
     workspace_id: String,
     version: String,
     path: String,
+    /// Request a bounded page even when no pagination arguments are supplied.
+    paged: Option<bool>,
     /// One-based first line. Defaults to 1.
     start_line: Option<usize>,
     /// Maximum lines to read (1–200). Defaults to 80.
@@ -79,6 +74,54 @@ struct SourceMatches {
     next_line: Option<usize>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FindSymbol {
+    workspace_id: String,
+    version: String,
+    /// Exact, case-sensitive Python identifier, for example make_slab.
+    symbol: String,
+    /// Optional project-relative Python path to search.
+    path: Option<String>,
+    kind: Option<SymbolKind>,
+    /// Maximum matches (1–50). Defaults to 20.
+    max_matches: Option<usize>,
+    /// Use next_cursor with the same version, symbol, path and kind.
+    cursor: Option<SymbolCursor>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SymbolKind {
+    Definition,
+    Import,
+    Call,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SymbolCursor {
+    path: String,
+    skip: usize,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+struct SymbolHit {
+    path: String,
+    line: usize,
+    /// Zero-based UTF-8 byte column.
+    byte_column: usize,
+    kind: SymbolKind,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+struct SymbolReply {
+    matches: Vec<SymbolHit>,
+    /// Up to 20 parser diagnostics from the scanned portion of the page.
+    diagnostics: Vec<String>,
+    next_cursor: Option<SymbolCursor>,
+}
+
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateSource {
@@ -93,6 +136,13 @@ pub struct SourceContent {
     pub source: String,
     pub hash: String,
 }
+#[derive(Serialize, JsonSchema)]
+#[serde(untagged)]
+enum SourceReply {
+    Page(SourceLines),
+    Full(SourceContent),
+}
+
 #[derive(Deserialize, Serialize, JsonSchema)]
 pub struct ChangedSource {
     pub path: String,
@@ -164,6 +214,89 @@ struct PartSourceTrace {
     publication: Option<crate::geometry::SourceLocation>,
     /// Asset path when the linked source is a mesh or CAD exchange file.
     asset_path: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TraceCadEdge {
+    workspace_id: String,
+    revision: String,
+    /// Pass the current pose version for a moving model.
+    pose_version: Option<u64>,
+    /// One to sixteen native edge references.
+    entities: Vec<Entity>,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MatchMeshEdge {
+    /// Workspace containing the selected STL edges.
+    workspace_id: String,
+    revision: String,
+    entities: Vec<Entity>,
+    /// Workspace containing the corresponding native CAD model or STEP file.
+    target_workspace_id: String,
+    target_revision: String,
+    target_instance_id: String,
+    target_pose_version: Option<u64>,
+    /// Maximum sampled point-to-curve distance, in millimetres. Defaults to 0.15.
+    tolerance_mm: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct CadOperationSite {
+    file: String,
+    line: u64,
+    operation: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct CadIncidentFace {
+    face_id: String,
+    surface_type: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct CadEdgeTrace {
+    reference: Entity,
+    curve_type: String,
+    length_mm: f64,
+    incident_face_count: usize,
+    incident_faces: Vec<CadIncidentFace>,
+    /// Observed operation whose returned edge shares the published topology identity.
+    operation: Option<CadOperationSite>,
+    publication: Option<crate::geometry::SourceLocation>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct CadEdgeTraceReply {
+    revision: String,
+    accuracy: crate::geometry::Accuracy,
+    units: crate::geometry::Units,
+    edges: Vec<CadEdgeTrace>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct CadEdgeCandidate {
+    reference: Entity,
+    max_sample_distance_mm: f64,
+    curve_type: String,
+    operation: Option<CadOperationSite>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct MeshEdgeMatch {
+    candidate_count: usize,
+    candidates: Vec<CadEdgeCandidate>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct MeshEdgeMatchResult {
+    target_revision: String,
+    target_pose_version: u64,
+    tolerance_mm: f64,
+    /// One result per source entity, in the same order. Multiple candidates mean the match is ambiguous.
+    matches: Vec<MeshEdgeMatch>,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -267,13 +400,9 @@ fn build_definitions() -> Vec<ToolSpec> {
             "get_selection",
             "Get the current revision-scoped selection, semantic labels, units and bounded exact part context. Entities are in the user's selection order; with several, the viewport badges them A, B, C…. Parts include the component source file and show() line when known. Expired references are reported instead of relocated silently.",
         ),
-        spec::<crate::views::Capture>(
-            "capture_view",
-            "Capture a bounded PNG from the connected viewport with explicit workspace, revision, pose, camera and dimension options. Includes numeric context; images are not authoritative measurements.",
-        ),
         spec::<crate::views::CaptureViews>(
             "capture_views",
-            "Capture one to four views (default iso/front/right/top) and save a temporary baseline. Returns labeled PNGs, exact camera/pose context and capture_id. Before editing, save this ID for compare_views. Requires the connected viewport. Last eight sets retained across the app; not persisted. Images are not authoritative measurements.",
+            "Capture PNGs from the connected viewport at the explicit workspace, revision and pose. By default capture one to four preset views (default iso/front/right/top, 640×480) and save a temporary baseline. Returns labeled images, camera/pose context and capture_id for compare_views; only the last eight sets are retained across the app. Set single=true for a standalone PNG with numeric context and no baseline. In single mode omit views, optionally pass camera or camera_preset, or use the current camera; default size is 1024×768. Both modes accept width, height and dimension visibility options. Images are not authoritative measurements.",
         ),
         spec::<crate::views::CompareViews>(
             "compare_views",
@@ -285,15 +414,15 @@ fn build_definitions() -> Vec<ToolSpec> {
         ),
         spec::<ReadSource>(
             "read_source",
-            "Read a relative Python source path from a revision, editable draft, or immutable job snapshot_id, including its content hash. For large files use search_source and read_source_lines.",
+            "Read a project-relative Python file from a revision, editable draft, or immutable job snapshot, with its content hash. With no paging options, return the full file. For large files or a known line, set paged=true or pass start_line, max_lines, or byte_offset to read up to 8 KiB (default starting line 1 and 80 lines, maximum 200 lines). Continue with next_line as start_line and next_byte_offset as byte_offset; null next_line means the end. Use search_source to locate literal text first.",
         ),
         spec::<SearchSource>(
             "search_source",
-            "Find a part name, builder name, or other case-sensitive literal in one project-relative Python file. Use the revision, draft ID, or job snapshot ID as version. Returns one hit per matching line with a short excerpt. Pass next_line as start_line to continue, or use read_source_lines to inspect a hit in context.",
+            "Find a part name, builder name, or other case-sensitive literal in one project-relative Python file. Use the revision, draft ID, or job snapshot ID as version. Returns one hit per matching line with a short excerpt. Pass next_line as start_line to continue, or use read_source with start_line to inspect a hit in context.",
         ),
-        spec::<ReadSourceLines>(
-            "read_source_lines",
-            "Read up to 8 KiB of a project-relative Python file from a revision, draft, or job snapshot. Use one-based start_line to read around a search hit or publication line. Continue with next_line as start_line and next_byte_offset as byte_offset. A null next_line means there is no next page.",
+        spec::<FindSymbol>(
+            "find_symbol",
+            "Find an exact Python identifier across a project revision, draft, or job snapshot. Reports function/class definitions, imports including aliases, and calls by name or attribute, without executing project code. Optional path and kind narrow the search. Results are syntactic candidates and do not resolve dynamic dispatch. Use read_source with start_line at a hit and pass next_cursor as cursor to scan more files or matches, even if the current page has no hits.",
         ),
         spec::<SetAnnotation>(
             "set_annotation",
@@ -331,9 +460,17 @@ fn build_definitions() -> Vec<ToolSpec> {
             "trace_mesh_edges",
             "Use when the user asks what selected STL edges separate. Pass one to sixteen edge references from the message or get_selection, in the same order and with their current revision. Returns endpoints in part-local millimetres, incident face IDs and normals, and the unsigned angle between two incident facet planes in degrees. Classifies each edge as open, coplanar, crease, or non-manifold. The result describes mesh topology and cannot establish which CAD operation made the edge.",
         ),
+        spec::<MatchMeshEdge>(
+            "match_mesh_edge",
+            "Match selected STL segments against one instance in a corresponding native CAD or STEP revision. Pass STL edge references, an explicit target workspace, revision and instance, and its current pose version if moving. The mesh and posed CAD model must already share millimetre coordinates. Ranks up to five candidates by the maximum of five sampled distances to exact curves. Zero candidates means no match within tolerance; multiple candidates are ambiguous. A geometric match does not establish shared build history. Candidates include an observed Python operation site when available. Use trace_cad_edge for native face adjacency.",
+        ),
+        spec::<TraceCadEdge>(
+            "trace_cad_edge",
+            "Trace selected native CAD edges to their incident BRep faces and any observed Python operation that returned the surviving edge topology. Use edge references from get_selection or match_mesh_edge. A null operation means no reliable operation site was captured, for example with imported STEP, cached geometry, or unsupported operations. The publication location, when available, is the part's show() site. Use read_source with start_line to inspect either location.",
+        ),
         spec::<TracePartSource>(
             "trace_part_source",
-            "Use when the user asks where a selected face, edge, or part comes from. Pass its instance_id and current revision from the message or get_selection. Returns a Python show() file and line when known, or the path of a linked STL or STEP asset. Use read_source_lines around the publication line, then search_source for the builder. This traces the containing part. Individual face and edge creation history is unavailable.",
+            "Use when the user asks where a selected face, edge, or part comes from. Pass its instance_id and current revision from the message or get_selection. Returns a Python show() file and line when known, or the path of a linked STL or STEP asset. Use read_source with start_line around the publication line, then find_symbol for the builder. This traces the containing part. Individual face and edge creation history is unavailable.",
         ),
         spec::<SetParameter>(
             "set_parameter",
@@ -386,25 +523,27 @@ fn build_definitions() -> Vec<ToolSpec> {
             "set_joint_coordinate" => Some(result_schema::<crate::motion::CoordinateResult>()),
             "control_playback" => Some(result_schema::<crate::playback::Reply>()),
             "control_motion_tests" => Some(result_schema::<crate::motion_tests::Reply>()),
-            "read_source" => Some(result_schema::<SourceContent>()),
+            "read_source" => Some(result_schema::<SourceReply>()),
+            "find_symbol" => Some(result_schema::<SymbolReply>()),
             "search_source" => Some(result_schema::<SourceMatches>()),
-            "read_source_lines" => Some(result_schema::<SourceLines>()),
             "update_source" => Some(result_schema::<SourceUpdate>()),
             "set_dimensions" => Some(result_schema::<crate::views::DimensionsReply>()),
             "get_selection" => Some(result_schema::<crate::geometry::SelectionReply>()),
             "trace_mesh_edges" => Some(result_schema::<crate::stl_model::EdgeTraceReply>()),
+            "trace_cad_edge" => Some(result_schema::<CadEdgeTraceReply>()),
+            "match_mesh_edge" => Some(result_schema::<MeshEdgeMatchResult>()),
             "trace_part_source" => Some(result_schema::<PartSourceTrace>()),
             "inspect" => Some(result_schema::<crate::geometry::InspectionReply>()),
             "check_interference" => Some(result_schema::<crate::geometry::InterferenceReply>()),
-            "capture_view" => Some(result_schema::<crate::views::CaptureReply>()),
-            "capture_views" | "compare_views" => Some(result_schema::<crate::views::ViewsReply>()),
+            "capture_views" => Some(result_schema::<crate::views::CaptureToolReply>()),
+            "compare_views" => Some(result_schema::<crate::views::ViewsReply>()),
             "export" => Some(result_schema::<crate::artifacts::ExportReply>()),
             "get_project" => Some(result_schema::<crate::project_result::Reply>()),
             _ => None,
         };
         tool.mcp_output_schema = match tool.name.as_str() {
-            "capture_view" => Some(result_schema::<crate::views::CaptureMetadata>()),
-            "capture_views" | "compare_views" => {
+            "capture_views" => Some(result_schema::<crate::views::CaptureToolMetadata>()),
+            "compare_views" => {
                 Some(result_schema::<crate::views::ViewsMetadata>())
             }
             "export" => Some(result_schema::<crate::artifacts::McpExportReply>()),
@@ -436,6 +575,14 @@ pub fn input_definitions() -> Vec<ToolSpec> {
 }
 pub fn definition(name: &str) -> Option<&'static ToolSpec> {
     definitions_ref().iter().find(|tool| tool.name == name)
+}
+/// Legacy names remain callable for clients with a cached tool catalog.
+pub fn canonical_name(name: &str) -> &str {
+    match name {
+        "read_source_lines" => "read_source",
+        "capture_view" => "capture_views",
+        _ => name,
+    }
 }
 fn parse<T: for<'de> Deserialize<'de>>(arguments: Value) -> Result<T> {
     serde_json::from_value(arguments)
@@ -584,10 +731,68 @@ impl Core {
                 let args: crate::views::SetDimensions = parse(arguments)?;
                 self.set_dimensions(&context.actor, args).await
             }
-            "read_source" => {
-                let args: ReadSource = parse(arguments)?;
-                self.read_source(&args.workspace_id, &args.version, &args.path)
-                    .await
+            "find_symbol" => {
+                let args: FindSymbol = parse(arguments)?;
+                let limit = source_limit(args.max_matches, 20, 50, "max_matches")?;
+                if args.symbol.is_empty() || args.symbol.len() > 256 {
+                    return Err(Error::domain(
+                        "INVALID_REQUEST",
+                        "symbol must be 1–256 UTF-8 bytes",
+                    ));
+                }
+                let files = self
+                    .source_files_at(&args.workspace_id, &args.version)
+                    .await?;
+                if let Some(path) = &args.path {
+                    crate::validate_path(path)?;
+                    if !files.contains_key(path) {
+                        return Err(Error::domain("INVALID_REQUEST", "Unknown source file"));
+                    }
+                }
+                let skip = if let Some(cursor) = &args.cursor {
+                    if !files.contains_key(&cursor.path)
+                        || args.path.as_ref().is_some_and(|path| path != &cursor.path)
+                    {
+                        return Err(Error::domain(
+                            "INVALID_REQUEST",
+                            "Unknown symbol cursor path",
+                        ));
+                    }
+                    cursor.skip
+                } else {
+                    0
+                };
+                let mut sources = BTreeMap::new();
+                let mut bytes = 0;
+                let mut next_batch = None;
+                for (path, source) in &files {
+                    if args.path.as_ref().is_some_and(|filter| filter != path)
+                        || args
+                            .cursor
+                            .as_ref()
+                            .is_some_and(|cursor| path < &cursor.path)
+                    {
+                        continue;
+                    }
+                    // Keep the request below 64 MiB even with worst-case JSON escaping.
+                    if !sources.is_empty() && bytes + source.len() + path.len() > 8 * 1024 * 1024 {
+                        next_batch = Some(SymbolCursor {
+                            path: path.clone(),
+                            skip: 0,
+                        });
+                        break;
+                    }
+                    bytes += source.len() + path.len();
+                    sources.insert(path, source);
+                }
+                let data = self.entry_analysis_with_cancel(
+                    "find_symbol",
+                    json!({"sources": sources, "symbol": args.symbol, "kind": args.kind, "limit": limit, "skip": skip}),
+                    self.actor_signal(&context.actor),
+                ).await?;
+                let mut result: SymbolReply = serde_json::from_value(data)?;
+                result.next_cursor = result.next_cursor.or(next_batch);
+                Ok(json!(result))
             }
             "search_source" => {
                 let args: SearchSource = parse(arguments)?;
@@ -634,19 +839,30 @@ impl Core {
                     next_line: hits.next().map(|(line, _, _)| line),
                 }))
             }
-            "read_source_lines" => {
-                let args: ReadSourceLines = parse(arguments)?;
+            "read_source" | "read_source_lines" => {
+                let args: ReadSource = parse(arguments)?;
+                if name == "read_source"
+                    && !args.paged.unwrap_or(false)
+                    && args.start_line.is_none()
+                    && args.max_lines.is_none()
+                    && args.byte_offset.is_none()
+                {
+                    return Ok(json!(SourceReply::Full(
+                        self.source_content(&args.workspace_id, &args.version, &args.path)
+                            .await?
+                    )));
+                }
                 let start = source_limit(args.start_line, 1, usize::MAX, "start_line")?;
                 let limit = source_limit(args.max_lines, 80, 200, "max_lines")?;
                 let file = self
                     .source_content(&args.workspace_id, &args.version, &args.path)
                     .await?;
-                Ok(json!(source_page(
+                Ok(json!(SourceReply::Page(source_page(
                     file,
                     start,
                     limit,
                     args.byte_offset.unwrap_or(0)
-                )?))
+                )?)))
             }
             "set_annotation" => {
                 let args: SetAnnotation = parse(arguments)?;
@@ -759,6 +975,51 @@ impl Core {
                     json!({"entities": args.entities}),
                 )
                 .await
+            }
+            "trace_cad_edge" => {
+                let args: TraceCadEdge = parse(arguments)?;
+                let reply: CadEdgeTraceReply = serde_json::from_value(
+                    self.query_as_actor(
+                        &context.actor,
+                        &args.workspace_id,
+                        &args.revision,
+                        "trace_cad_edge",
+                        json!({"entities": args.entities, "pose_version": args.pose_version}),
+                    )
+                    .await?,
+                )?;
+                Ok(json!(reply))
+            }
+            "match_mesh_edge" => {
+                let args: MatchMeshEdge = parse(arguments)?;
+                let tolerance = args.tolerance_mm.unwrap_or(0.15);
+                if !(1e-6..=5.).contains(&tolerance) {
+                    return Err(Error::domain(
+                        "INVALID_REQUEST",
+                        "tolerance_mm must be between 0.000001 and 5 mm",
+                    ));
+                }
+                let segments = self
+                    .query_as_actor(
+                        &context.actor,
+                        &args.workspace_id,
+                        &args.revision,
+                        "mesh_edge_segments",
+                        json!({"entities": args.entities}),
+                    )
+                    .await?;
+                let reply: MeshEdgeMatchResult = serde_json::from_value(
+                    self.query_as_actor(
+                        &context.actor,
+                        &args.target_workspace_id,
+                        &args.target_revision,
+                        "match_mesh_edge",
+                        json!({"segments": segments, "instance_id": args.target_instance_id,
+                           "pose_version": args.target_pose_version, "tolerance_mm": tolerance}),
+                    )
+                    .await?,
+                )?;
+                Ok(json!(reply))
             }
             "trace_part_source" => {
                 let args: TracePartSource = parse(arguments)?;

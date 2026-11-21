@@ -79,7 +79,7 @@ async fn authenticated_connections_share_real_projects_and_revoke_pending_work()
     }
     let definitions = client.definitions().await.unwrap();
     let legacy: Vec<LegacyTool> = serde_json::from_value(definitions.clone()).unwrap();
-    for name in ["capture_view", "export"] {
+    for name in ["capture_views", "export"] {
         assert!(
             legacy
                 .iter()
@@ -333,8 +333,11 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
         .unwrap();
     assert_eq!(invalid_job.is_error, Some(true));
     assert!(job_validator.is_valid(invalid_job.structured_content.as_ref().unwrap()));
+    assert!(live_tools.tools.iter().all(|tool| {
+        tool.name != "read_source_lines" && tool.name != "capture_view"
+    }));
     let base = project["revision"].as_str().unwrap();
-    let draft=sdk(mcp.peer(),"update_source",json!({"workspace_id":ws,"expected_base_revision":base,"changes":{"model.py":"import cadquery as cq\nwidth=parameter('width',50,minimum=1,maximum=100)\nshow(cq.Workplane().box(width,20,6),name='plate')"}})).await;
+    let draft=sdk(mcp.peer(),"update_source",json!({"workspace_id":ws,"expected_base_revision":base,"changes":{"model.py":"import cadquery as cq\nwidth=parameter('width',50,minimum=1,maximum=100)\nshow(cq.Workplane().box(width,20,6),name='plate')","z_helpers.py":"from cadquery import Workplane as show\ndef show(): pass\nraise RuntimeError('symbol search must not execute Python source')"}})).await;
     let source = sdk(
         mcp.peer(),
         "read_source",
@@ -352,17 +355,39 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
     assert_eq!(hits["matches"][0]["line"], 3);
     let page = sdk(
         mcp.peer(),
-        "read_source_lines",
+        "read_source",
         json!({"workspace_id":ws,"version":draft["id"],"path":"model.py","start_line":hits["matches"][0]["line"]}),
     )
     .await;
     assert_eq!(page["source"], "show(cq.Workplane().box(width,20,6),name='plate')");
     assert_eq!(page["hash"], source["hash"]);
+    let legacy_page = sdk(
+        mcp.peer(),
+        "read_source_lines",
+        json!({"workspace_id":ws,"version":draft["id"],"path":"model.py","start_line":3}),
+    )
+    .await;
+    assert_eq!(legacy_page, page);
+    let mut symbol_args = json!({
+        "workspace_id": ws, "version": draft["id"], "symbol": "show", "max_matches": 1
+    });
+    let symbols = sdk(mcp.peer(), "find_symbol", symbol_args.clone()).await;
+    assert_eq!(symbols["matches"][0], json!({
+        "path": "model.py", "line": 3, "byte_column": 0, "kind": "call"
+    }));
+    symbol_args["cursor"] = symbols["next_cursor"].clone();
+    symbol_args["max_matches"] = json!(2);
+    let more = sdk(mcp.peer(), "find_symbol", symbol_args).await;
+    assert_eq!(more["matches"][0]["path"], "z_helpers.py");
+    assert_eq!(more["matches"][0]["kind"], "import");
+    assert_eq!(more["matches"][1]["kind"], "definition");
+    assert!(more["next_cursor"].is_null());
     for (name, result) in [
         ("update_source", &draft),
         ("read_source", &source),
         ("search_source", &hits),
-        ("read_source_lines", &page),
+        ("read_source", &page),
+        ("find_symbol", &symbols),
     ] {
         let schema = serde_json::to_value(
             live_tools
@@ -426,10 +451,21 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
     .await;
     assert_eq!(publication["publication"], json!({"file":"model.py","line":3}));
     assert!(live_tools.tools.iter().any(|tool| tool.name == "trace_mesh_edges"));
+    assert!(live_tools.tools.iter().any(|tool| tool.name == "match_mesh_edge"));
+    let cad_trace = sdk(
+        mcp.peer(),
+        "trace_cad_edge",
+        json!({"workspace_id":ws,"revision":revision,
+            "entities":[{"revision":revision,"instance_id":"plate","entity_id":"edge:0"}]}),
+    )
+    .await;
+    assert_eq!(cad_trace["edges"][0]["incident_face_count"], 2);
+    assert_eq!(cad_trace["edges"][0]["operation"]["operation"], "box");
     for (name, result) in [
         ("inspect", &measured),
         ("get_selection", &selection),
         ("trace_part_source", &publication),
+        ("trace_cad_edge", &cad_trace),
     ] {
         let schema = serde_json::to_value(
             live_tools
@@ -465,8 +501,8 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
     let capture = mcp
         .peer()
         .call_tool(
-            CallToolRequestParams::new("capture_view").with_arguments(
-                json!({"workspace_id":ws,"revision":revision})
+            CallToolRequestParams::new("capture_views").with_arguments(
+                json!({"workspace_id":ws,"revision":revision,"single":true})
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -480,14 +516,14 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
         live_tools
             .tools
             .iter()
-            .find(|tool| tool.name == "capture_view")
+            .find(|tool| tool.name == "capture_views")
             .unwrap()
             .output_schema
             .as_ref()
             .unwrap(),
     )
     .unwrap();
-    let capture_contract = cadpad_core::tools::definition("capture_view").unwrap();
+    let capture_contract = cadpad_core::tools::definition("capture_views").unwrap();
     assert_eq!(
         &capture_schema,
         capture_contract.mcp_output_schema.as_ref().unwrap()

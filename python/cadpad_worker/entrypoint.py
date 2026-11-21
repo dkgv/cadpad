@@ -32,6 +32,51 @@ def index_sources(args):
     return dict(files=files)
 
 
+
+def symbol_positions(tree, symbol, kind):
+    for node in ast.walk(tree):
+        if kind in (None, 'definition') and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name == symbol:
+                yield node.lineno, node.col_offset, 'definition'
+        if kind in (None, 'import') and isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if symbol == alias.asname or symbol in alias.name.split('.'):
+                    yield alias.lineno, alias.col_offset, 'import'
+        if kind in (None, 'call') and isinstance(node, ast.Call):
+            target = node.func
+            if ((isinstance(target, ast.Name) and target.id == symbol) or
+                    (isinstance(target, ast.Attribute) and target.attr == symbol)):
+                yield target.lineno, target.col_offset, 'call'
+
+
+def find_symbol(args):
+    """Search Python syntax without importing or evaluating project modules."""
+    from keyword import iskeyword
+    from unicodedata import normalize
+    from .errors import DomainError
+
+    symbol = args['symbol']
+    if not symbol.isidentifier() or iskeyword(symbol):
+        raise DomainError('INVALID_REQUEST', 'symbol must be a Python identifier')
+    symbol = normalize('NFKC', symbol)
+    matches, diagnostics = [], []
+    for index, (path, source) in enumerate(sorted(args['sources'].items())):
+        skip = args['skip'] if index == 0 else 0
+        try:
+            tree = ast.parse(source, filename=path)
+        except (SyntaxError, RecursionError) as error:
+            if len(diagnostics) < 20:
+                message = syntax_diagnostic(path, error) if isinstance(error, SyntaxError) else f'{path}: AST nesting limit exceeded'
+                diagnostics.append(message[:512])
+            continue
+        positions = sorted(symbol_positions(tree, symbol, args['kind']))
+        for offset, (line, column, kind) in enumerate(positions[skip:], start=skip):
+            if len(matches) == args['limit']:
+                return dict(matches=matches, diagnostics=diagnostics,
+                            next_cursor=dict(path=path, skip=offset))
+            matches.append(dict(path=path, line=line, byte_column=column, kind=kind))
+    return dict(matches=matches, diagnostics=diagnostics, next_cursor=None)
+
 def adapter_source(entry, name, context=False, variable=False, producer=None, group=None):
     # User paths and symbol names are encoded as literals, never interpolated as code.
     parts = entry[:-3].split('/')

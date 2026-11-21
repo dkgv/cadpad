@@ -529,3 +529,36 @@ def test_scaffold_entry_accepts_empty_model_with_existing_project_files(tmp_path
     model = Model(tmp_path / 'cache')
     result = model.build(dict(source_root=str(source), parameters={}), 'r1')
     assert result['parts'] == []
+
+
+def test_edge_trace_keeps_retained_topology_with_its_original_operation(tmp_path):
+    from cadpad_worker.edge_trace import trace_native_edges
+
+    model, result = build(tmp_path, """import cadquery as cq
+base = cq.Workplane().box(10, 10, 10)
+tool = cq.Workplane().center(5, 5).box(3, 3, 20)
+notched = base.cut(tool)
+show(notched, name="part")
+""")
+    refs = [dict(revision="r1", instance_id="part", entity_id=f"edge:{index}")
+            for index in range(result["parts"][0]["edge_count"])]
+    traces = [row for start in range(0, len(refs), 16)
+              for row in trace_native_edges(model, dict(entities=refs[start:start + 16]))["edges"]]
+    operations = {(row["operation"]["operation"], row["operation"]["line"])
+                  for row in traces if row["operation"]}
+    assert {("box", 2), ("cut", 4)} <= operations
+
+
+def test_mesh_match_reports_ambiguity_and_unmatched_segments(tmp_path):
+    from cadpad_worker.edge_trace import match_mesh_segments
+
+    model, _ = build(tmp_path, 'import cadquery as cq\nshow(cq.Workplane().box(0.1, 3, 4), name="thin")')
+    reply = match_mesh_segments(model, dict(
+        tolerance_mm=0.06, instance_id="thin", poses={}, pose_version=0,
+        segments=[[[0, -1.5, -2], [0, -1.5, 2]], [[500, 0, 0], [501, 0, 0]]],
+    ))
+    ambiguous, unmatched = reply["matches"]
+    assert ambiguous["candidate_count"] == 2
+    assert all(candidate["max_sample_distance_mm"] == pytest.approx(0.05)
+               for candidate in ambiguous["candidates"])
+    assert unmatched == dict(candidate_count=0, candidates=[])

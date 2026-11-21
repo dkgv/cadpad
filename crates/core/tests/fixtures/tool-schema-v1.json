@@ -4565,7 +4565,7 @@
       }
     },
     {
-      "description": "Capture a bounded PNG from the connected viewport with explicit workspace, revision, pose, camera and dimension options. Includes numeric context; images are not authoritative measurements.",
+      "description": "Capture PNGs from the connected viewport at the explicit workspace, revision and pose. By default capture one to four preset views (default iso/front/right/top, 640×480) and save a temporary baseline. Returns labeled images, camera/pose context and capture_id for compare_views; only the last eight sets are retained across the app. Set single=true for a standalone PNG with numeric context and no baseline. In single mode omit views, optionally pass camera or camera_preset, or use the current camera; default size is 1024×768. Both modes accept width, height and dimension visibility options. Images are not authoritative measurements.",
       "input_schema": {
         "$defs": {
           "Camera": {
@@ -4615,907 +4615,6 @@
             ],
             "type": "object"
           },
-          "Preset": {
-            "enum": [
-              "iso",
-              "front",
-              "rear",
-              "top",
-              "bottom",
-              "left",
-              "right"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "additionalProperties": false,
-        "properties": {
-          "camera": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Camera"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "camera_preset": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/Preset"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "dimensions": {
-            "type": [
-              "boolean",
-              "null"
-            ]
-          },
-          "height": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "pose_version": {
-            "format": "uint64",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "revision": {
-            "type": "string"
-          },
-          "width": {
-            "format": "uint32",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
-            ]
-          },
-          "workspace_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "workspace_id",
-          "revision"
-        ],
-        "title": "Capture",
-        "type": "object"
-      },
-      "mcp_output_schema": {
-        "$defs": {
-          "Accuracy": {
-            "enum": [
-              "exact",
-              "mesh"
-            ],
-            "type": "string"
-          },
-          "Bounds": {
-            "properties": {
-              "max": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "min": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "size": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "min",
-              "max",
-              "size"
-            ],
-            "type": "object"
-          },
-          "Camera": {
-            "additionalProperties": false,
-            "properties": {
-              "orthographic": {
-                "type": "boolean"
-              },
-              "position": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "quaternion": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 4,
-                "minItems": 4,
-                "type": "array"
-              },
-              "target": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "zoom": {
-                "format": "double",
-                "type": "number"
-              }
-            },
-            "required": [
-              "position",
-              "quaternion",
-              "target",
-              "zoom",
-              "orthographic"
-            ],
-            "type": "object"
-          },
-          "CaptureMetadata": {
-            "description": "MCP keeps the PNG in a content block; all numeric metadata stays structured.",
-            "properties": {
-              "accuracy": {
-                "$ref": "#/$defs/Accuracy"
-              },
-              "camera": {
-                "$ref": "#/$defs/Camera"
-              },
-              "height": {
-                "format": "uint32",
-                "maximum": 1200,
-                "minimum": 1,
-                "type": "integer"
-              },
-              "joint_states": {
-                "items": {
-                  "$ref": "#/$defs/JointState"
-                },
-                "type": "array"
-              },
-              "numeric_context": {
-                "items": {
-                  "$ref": "#/$defs/CapturePart"
-                },
-                "maxItems": 128,
-                "type": "array"
-              },
-              "pose_version": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "poses": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/Pose"
-                },
-                "type": "object"
-              },
-              "revision": {
-                "type": "string"
-              },
-              "units": {
-                "$ref": "#/$defs/Units"
-              },
-              "visible_part_ids": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "width": {
-                "format": "uint32",
-                "maximum": 1600,
-                "minimum": 1,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "revision",
-              "pose_version",
-              "accuracy",
-              "units",
-              "camera",
-              "poses",
-              "joint_states",
-              "visible_part_ids",
-              "width",
-              "height",
-              "numeric_context"
-            ],
-            "type": "object"
-          },
-          "CapturePart": {
-            "properties": {
-              "bounds": {
-                "$ref": "#/$defs/Bounds"
-              },
-              "coordinate_space": {
-                "$ref": "#/$defs/CoordinateSpace"
-              },
-              "instance_id": {
-                "type": "string"
-              },
-              "volume": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "instance_id",
-              "bounds",
-              "volume",
-              "coordinate_space"
-            ],
-            "type": "object"
-          },
-          "CoordinateSpace": {
-            "enum": [
-              "part_local"
-            ],
-            "type": "string"
-          },
-          "JointState": {
-            "properties": {
-              "axis_world": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "child": {
-                "type": "string"
-              },
-              "coordinate": {
-                "format": "double",
-                "type": "number"
-              },
-              "drivable": {
-                "type": "boolean"
-              },
-              "id": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string"
-              },
-              "limits": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 2,
-                "minItems": 2,
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "origin_mm": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "parent": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "path": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/State"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "unit": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "parent",
-              "child",
-              "kind",
-              "coordinate",
-              "unit",
-              "limits",
-              "axis_world",
-              "origin_mm",
-              "drivable"
-            ],
-            "type": "object"
-          },
-          "Pose": {
-            "additionalProperties": false,
-            "properties": {
-              "position": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "quaternion": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 4,
-                "minItems": 4,
-                "type": "array"
-              }
-            },
-            "required": [
-              "position",
-              "quaternion"
-            ],
-            "type": "object"
-          },
-          "Sample": {
-            "properties": {
-              "coordinate_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "position_mm": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "coordinate_m",
-              "position_mm"
-            ],
-            "type": "object"
-          },
-          "State": {
-            "properties": {
-              "closed": {
-                "type": "boolean"
-              },
-              "frame_rule": {
-                "type": "string"
-              },
-              "length_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "samples": {
-                "items": {
-                  "$ref": "#/$defs/Sample"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "length_m",
-              "closed",
-              "frame_rule",
-              "samples"
-            ],
-            "type": "object"
-          },
-          "ToolFailure": {
-            "description": "Machine-readable execution failure. Non-domain errors omit details.",
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "details": true,
-              "message": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "code",
-              "message"
-            ],
-            "type": "object"
-          },
-          "Units": {
-            "enum": [
-              "mm"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "anyOf": [
-          {
-            "$ref": "#/$defs/CaptureMetadata"
-          },
-          {
-            "$ref": "#/$defs/ToolFailure"
-          }
-        ],
-        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
-        "title": "StructuredResult",
-        "type": "object"
-      },
-      "name": "capture_view",
-      "output_schema": {
-        "$defs": {
-          "Accuracy": {
-            "enum": [
-              "exact",
-              "mesh"
-            ],
-            "type": "string"
-          },
-          "Bounds": {
-            "properties": {
-              "max": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "min": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "size": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "min",
-              "max",
-              "size"
-            ],
-            "type": "object"
-          },
-          "Camera": {
-            "additionalProperties": false,
-            "properties": {
-              "orthographic": {
-                "type": "boolean"
-              },
-              "position": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "quaternion": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 4,
-                "minItems": 4,
-                "type": "array"
-              },
-              "target": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "zoom": {
-                "format": "double",
-                "type": "number"
-              }
-            },
-            "required": [
-              "position",
-              "quaternion",
-              "target",
-              "zoom",
-              "orthographic"
-            ],
-            "type": "object"
-          },
-          "CaptureImage": {
-            "properties": {
-              "data": {
-                "type": "string"
-              },
-              "mime_type": {
-                "$ref": "#/$defs/ImageMime"
-              }
-            },
-            "required": [
-              "mime_type",
-              "data"
-            ],
-            "type": "object"
-          },
-          "CapturePart": {
-            "properties": {
-              "bounds": {
-                "$ref": "#/$defs/Bounds"
-              },
-              "coordinate_space": {
-                "$ref": "#/$defs/CoordinateSpace"
-              },
-              "instance_id": {
-                "type": "string"
-              },
-              "volume": {
-                "format": "double",
-                "type": [
-                  "number",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "instance_id",
-              "bounds",
-              "volume",
-              "coordinate_space"
-            ],
-            "type": "object"
-          },
-          "CaptureReply": {
-            "description": "Native dispatch always includes the image, including for the built-in agent.",
-            "properties": {
-              "accuracy": {
-                "$ref": "#/$defs/Accuracy"
-              },
-              "camera": {
-                "$ref": "#/$defs/Camera"
-              },
-              "height": {
-                "format": "uint32",
-                "maximum": 1200,
-                "minimum": 1,
-                "type": "integer"
-              },
-              "image": {
-                "$ref": "#/$defs/CaptureImage"
-              },
-              "joint_states": {
-                "items": {
-                  "$ref": "#/$defs/JointState"
-                },
-                "type": "array"
-              },
-              "numeric_context": {
-                "items": {
-                  "$ref": "#/$defs/CapturePart"
-                },
-                "maxItems": 128,
-                "type": "array"
-              },
-              "pose_version": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "poses": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/Pose"
-                },
-                "type": "object"
-              },
-              "revision": {
-                "type": "string"
-              },
-              "units": {
-                "$ref": "#/$defs/Units"
-              },
-              "visible_part_ids": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "width": {
-                "format": "uint32",
-                "maximum": 1600,
-                "minimum": 1,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "revision",
-              "pose_version",
-              "accuracy",
-              "units",
-              "camera",
-              "poses",
-              "joint_states",
-              "visible_part_ids",
-              "width",
-              "height",
-              "numeric_context",
-              "image"
-            ],
-            "type": "object"
-          },
-          "CoordinateSpace": {
-            "enum": [
-              "part_local"
-            ],
-            "type": "string"
-          },
-          "ImageMime": {
-            "enum": [
-              "image/png"
-            ],
-            "type": "string"
-          },
-          "JointState": {
-            "properties": {
-              "axis_world": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "child": {
-                "type": "string"
-              },
-              "coordinate": {
-                "format": "double",
-                "type": "number"
-              },
-              "drivable": {
-                "type": "boolean"
-              },
-              "id": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string"
-              },
-              "limits": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 2,
-                "minItems": 2,
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "origin_mm": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "parent": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "path": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/State"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "unit": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "parent",
-              "child",
-              "kind",
-              "coordinate",
-              "unit",
-              "limits",
-              "axis_world",
-              "origin_mm",
-              "drivable"
-            ],
-            "type": "object"
-          },
-          "Pose": {
-            "additionalProperties": false,
-            "properties": {
-              "position": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "quaternion": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 4,
-                "minItems": 4,
-                "type": "array"
-              }
-            },
-            "required": [
-              "position",
-              "quaternion"
-            ],
-            "type": "object"
-          },
-          "Sample": {
-            "properties": {
-              "coordinate_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "position_mm": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "coordinate_m",
-              "position_mm"
-            ],
-            "type": "object"
-          },
-          "State": {
-            "properties": {
-              "closed": {
-                "type": "boolean"
-              },
-              "frame_rule": {
-                "type": "string"
-              },
-              "length_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "samples": {
-                "items": {
-                  "$ref": "#/$defs/Sample"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "length_m",
-              "closed",
-              "frame_rule",
-              "samples"
-            ],
-            "type": "object"
-          },
-          "ToolFailure": {
-            "description": "Machine-readable execution failure. Non-domain errors omit details.",
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "details": true,
-              "message": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "code",
-              "message"
-            ],
-            "type": "object"
-          },
-          "Units": {
-            "enum": [
-              "mm"
-            ],
-            "type": "string"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "anyOf": [
-          {
-            "$ref": "#/$defs/CaptureReply"
-          },
-          {
-            "$ref": "#/$defs/ToolFailure"
-          }
-        ],
-        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
-        "title": "StructuredResult",
-        "type": "object"
-      }
-    },
-    {
-      "description": "Capture one to four views (default iso/front/right/top) and save a temporary baseline. Returns labeled PNGs, exact camera/pose context and capture_id. Before editing, save this ID for compare_views. Requires the connected viewport. Last eight sets retained across the app; not persisted. Images are not authoritative measurements.",
-      "input_schema": {
-        "$defs": {
           "Preset": {
             "enum": [
               "iso",
@@ -5533,6 +4632,28 @@
         "additionalProperties": false,
         "description": "Capture before editing; compare_views reuses these exact cameras after editing.",
         "properties": {
+          "camera": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Camera"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit camera for a standalone capture."
+          },
+          "camera_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Preset"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Preset camera for a standalone capture."
+          },
           "dimensions": {
             "type": [
               "boolean",
@@ -5557,6 +4678,13 @@
           },
           "revision": {
             "type": "string"
+          },
+          "single": {
+            "description": "Standalone single capture without saving a baseline.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "views": {
             "description": "Defaults to iso, front, right, top. One to four distinct views.",
@@ -5779,6 +4907,16 @@
               "coordinate_space"
             ],
             "type": "object"
+          },
+          "CaptureToolMetadata": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CaptureMetadata"
+              },
+              {
+                "$ref": "#/$defs/ViewsMetadata"
+              }
+            ]
           },
           "ComparedView": {
             "properties": {
@@ -6040,7 +5178,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "anyOf": [
           {
-            "$ref": "#/$defs/ViewsMetadata"
+            "$ref": "#/$defs/CaptureToolMetadata"
           },
           {
             "$ref": "#/$defs/ToolFailure"
@@ -6144,6 +5282,21 @@
             ],
             "type": "object"
           },
+          "CaptureImage": {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "mime_type": {
+                "$ref": "#/$defs/ImageMime"
+              }
+            },
+            "required": [
+              "mime_type",
+              "data"
+            ],
+            "type": "object"
+          },
           "CaptureMetadata": {
             "description": "MCP keeps the PNG in a content block; all numeric metadata stays structured.",
             "properties": {
@@ -6243,6 +5396,93 @@
               "coordinate_space"
             ],
             "type": "object"
+          },
+          "CaptureReply": {
+            "description": "Native dispatch always includes the image, including for the built-in agent.",
+            "properties": {
+              "accuracy": {
+                "$ref": "#/$defs/Accuracy"
+              },
+              "camera": {
+                "$ref": "#/$defs/Camera"
+              },
+              "height": {
+                "format": "uint32",
+                "maximum": 1200,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "image": {
+                "$ref": "#/$defs/CaptureImage"
+              },
+              "joint_states": {
+                "items": {
+                  "$ref": "#/$defs/JointState"
+                },
+                "type": "array"
+              },
+              "numeric_context": {
+                "items": {
+                  "$ref": "#/$defs/CapturePart"
+                },
+                "maxItems": 128,
+                "type": "array"
+              },
+              "pose_version": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "poses": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/Pose"
+                },
+                "type": "object"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "units": {
+                "$ref": "#/$defs/Units"
+              },
+              "visible_part_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "width": {
+                "format": "uint32",
+                "maximum": 1600,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "revision",
+              "pose_version",
+              "accuracy",
+              "units",
+              "camera",
+              "poses",
+              "joint_states",
+              "visible_part_ids",
+              "width",
+              "height",
+              "numeric_context",
+              "image"
+            ],
+            "type": "object"
+          },
+          "CaptureToolReply": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CaptureReply"
+              },
+              {
+                "$ref": "#/$defs/ViewsReply"
+              }
+            ]
           },
           "ComparedView": {
             "properties": {
@@ -6536,7 +5776,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "anyOf": [
           {
-            "$ref": "#/$defs/ViewsReply"
+            "$ref": "#/$defs/CaptureToolReply"
           },
           {
             "$ref": "#/$defs/ToolFailure"
@@ -7641,13 +6881,47 @@
       }
     },
     {
-      "description": "Read a relative Python source path from a revision, editable draft, or immutable job snapshot_id, including its content hash. For large files use search_source and read_source_lines.",
+      "description": "Read a project-relative Python file from a revision, editable draft, or immutable job snapshot, with its content hash. With no paging options, return the full file. For large files or a known line, set paged=true or pass start_line, max_lines, or byte_offset to read up to 8 KiB (default starting line 1 and 80 lines, maximum 200 lines). Continue with next_line as start_line and next_byte_offset as byte_offset; null next_line means the end. Use search_source to locate literal text first.",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "properties": {
+          "byte_offset": {
+            "description": "UTF-8 byte offset within the first line. Use next_byte_offset from a previous page.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_lines": {
+            "description": "Maximum lines to read (1–200). Defaults to 80.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "paged": {
+            "description": "Request a bounded page even when no pagination arguments are supplied.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "path": {
             "type": "string"
+          },
+          "start_line": {
+            "description": "One-based first line. Defaults to 1.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "version": {
             "type": "string"
@@ -7686,6 +6960,62 @@
             ],
             "type": "object"
           },
+          "SourceLines": {
+            "properties": {
+              "byte_offset": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "hash": {
+                "type": "string"
+              },
+              "next_byte_offset": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "next_line": {
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "start_line": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "hash",
+              "source",
+              "start_line",
+              "byte_offset",
+              "next_line",
+              "next_byte_offset"
+            ],
+            "type": "object"
+          },
+          "SourceReply": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SourceLines"
+              },
+              {
+                "$ref": "#/$defs/SourceContent"
+              }
+            ]
+          },
           "ToolFailure": {
             "description": "Machine-readable execution failure. Non-domain errors omit details.",
             "properties": {
@@ -7707,7 +7037,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "anyOf": [
           {
-            "$ref": "#/$defs/SourceContent"
+            "$ref": "#/$defs/SourceReply"
           },
           {
             "$ref": "#/$defs/ToolFailure"
@@ -7719,7 +7049,7 @@
       }
     },
     {
-      "description": "Find a part name, builder name, or other case-sensitive literal in one project-relative Python file. Use the revision, draft ID, or job snapshot ID as version. Returns one hit per matching line with a short excerpt. Pass next_line as start_line to continue, or use read_source_lines to inspect a hit in context.",
+      "description": "Find a part name, builder name, or other case-sensitive literal in one project-relative Python file. Use the revision, draft ID, or job snapshot ID as version. Returns one hit per matching line with a short excerpt. Pass next_line as start_line to continue, or use read_source with start_line to inspect a hit in context.",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -7857,22 +7187,62 @@
       }
     },
     {
-      "description": "Read up to 8 KiB of a project-relative Python file from a revision, draft, or job snapshot. Use one-based start_line to read around a search hit or publication line. Continue with next_line as start_line and next_byte_offset as byte_offset. A null next_line means there is no next page.",
+      "description": "Find an exact Python identifier across a project revision, draft, or job snapshot. Reports function/class definitions, imports including aliases, and calls by name or attribute, without executing project code. Optional path and kind narrow the search. Results are syntactic candidates and do not resolve dynamic dispatch. Use read_source with start_line at a hit and pass next_cursor as cursor to scan more files or matches, even if the current page has no hits.",
       "input_schema": {
+        "$defs": {
+          "SymbolCursor": {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "skip": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "skip"
+            ],
+            "type": "object"
+          },
+          "SymbolKind": {
+            "enum": [
+              "definition",
+              "import",
+              "call"
+            ],
+            "type": "string"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "properties": {
-          "byte_offset": {
-            "description": "UTF-8 byte offset within the first line. Use next_byte_offset from a previous page.",
-            "format": "uint",
-            "minimum": 0,
-            "type": [
-              "integer",
-              "null"
+          "cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SymbolCursor"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Use next_cursor with the same version, symbol, path and kind."
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SymbolKind"
+              },
+              {
+                "type": "null"
+              }
             ]
           },
-          "max_lines": {
-            "description": "Maximum lines to read (1–200). Defaults to 80.",
+          "max_matches": {
+            "description": "Maximum matches (1–50). Defaults to 20.",
             "format": "uint",
             "minimum": 0,
             "type": [
@@ -7881,16 +7251,15 @@
             ]
           },
           "path": {
-            "type": "string"
-          },
-          "start_line": {
-            "description": "One-based first line. Defaults to 1.",
-            "format": "uint",
-            "minimum": 0,
+            "description": "Optional project-relative Python path to search.",
             "type": [
-              "integer",
+              "string",
               "null"
             ]
+          },
+          "symbol": {
+            "description": "Exact, case-sensitive Python identifier, for example make_slab.",
+            "type": "string"
           },
           "version": {
             "type": "string"
@@ -7902,44 +7271,21 @@
         "required": [
           "workspace_id",
           "version",
-          "path"
+          "symbol"
         ],
-        "title": "ReadSourceLines",
+        "title": "FindSymbol",
         "type": "object"
       },
-      "name": "read_source_lines",
+      "name": "find_symbol",
       "output_schema": {
         "$defs": {
-          "SourceLines": {
+          "SymbolCursor": {
+            "additionalProperties": false,
             "properties": {
-              "byte_offset": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "hash": {
-                "type": "string"
-              },
-              "next_byte_offset": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "next_line": {
-                "format": "uint",
-                "minimum": 0,
-                "type": [
-                  "integer",
-                  "null"
-                ]
-              },
               "path": {
                 "type": "string"
               },
-              "source": {
-                "type": "string"
-              },
-              "start_line": {
+              "skip": {
                 "format": "uint",
                 "minimum": 0,
                 "type": "integer"
@@ -7947,12 +7293,76 @@
             },
             "required": [
               "path",
-              "hash",
-              "source",
-              "start_line",
-              "byte_offset",
-              "next_line",
-              "next_byte_offset"
+              "skip"
+            ],
+            "type": "object"
+          },
+          "SymbolHit": {
+            "properties": {
+              "byte_column": {
+                "description": "Zero-based UTF-8 byte column.",
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "$ref": "#/$defs/SymbolKind"
+              },
+              "line": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "line",
+              "byte_column",
+              "kind"
+            ],
+            "type": "object"
+          },
+          "SymbolKind": {
+            "enum": [
+              "definition",
+              "import",
+              "call"
+            ],
+            "type": "string"
+          },
+          "SymbolReply": {
+            "properties": {
+              "diagnostics": {
+                "description": "Up to 20 parser diagnostics from the scanned portion of the page.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "matches": {
+                "items": {
+                  "$ref": "#/$defs/SymbolHit"
+                },
+                "type": "array"
+              },
+              "next_cursor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SymbolCursor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "matches",
+              "diagnostics",
+              "next_cursor"
             ],
             "type": "object"
           },
@@ -7977,7 +7387,7 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "anyOf": [
           {
-            "$ref": "#/$defs/SourceLines"
+            "$ref": "#/$defs/SymbolReply"
           },
           {
             "$ref": "#/$defs/ToolFailure"
@@ -10232,7 +9642,506 @@
       }
     },
     {
-      "description": "Use when the user asks where a selected face, edge, or part comes from. Pass its instance_id and current revision from the message or get_selection. Returns a Python show() file and line when known, or the path of a linked STL or STEP asset. Use read_source_lines around the publication line, then search_source for the builder. This traces the containing part. Individual face and edge creation history is unavailable.",
+      "description": "Match selected STL segments against one instance in a corresponding native CAD or STEP revision. Pass STL edge references, an explicit target workspace, revision and instance, and its current pose version if moving. The mesh and posed CAD model must already share millimetre coordinates. Ranks up to five candidates by the maximum of five sampled distances to exact curves. Zero candidates means no match within tolerance; multiple candidates are ambiguous. A geometric match does not establish shared build history. Candidates include an observed Python operation site when available. Use trace_cad_edge for native face adjacency.",
+      "input_schema": {
+        "$defs": {
+          "Entity": {
+            "additionalProperties": false,
+            "properties": {
+              "entity_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "revision",
+              "instance_id",
+              "entity_id"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "entities": {
+            "items": {
+              "$ref": "#/$defs/Entity"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "target_instance_id": {
+            "type": "string"
+          },
+          "target_pose_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target_revision": {
+            "type": "string"
+          },
+          "target_workspace_id": {
+            "description": "Workspace containing the corresponding native CAD model or STEP file.",
+            "type": "string"
+          },
+          "tolerance_mm": {
+            "description": "Maximum sampled point-to-curve distance, in millimetres. Defaults to 0.15.",
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "description": "Workspace containing the selected STL edges.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "revision",
+          "entities",
+          "target_workspace_id",
+          "target_revision",
+          "target_instance_id"
+        ],
+        "title": "MatchMeshEdge",
+        "type": "object"
+      },
+      "name": "match_mesh_edge",
+      "output_schema": {
+        "$defs": {
+          "CadEdgeCandidate": {
+            "properties": {
+              "curve_type": {
+                "type": "string"
+              },
+              "max_sample_distance_mm": {
+                "format": "double",
+                "type": "number"
+              },
+              "operation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CadOperationSite"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reference": {
+                "$ref": "#/$defs/Entity"
+              }
+            },
+            "required": [
+              "reference",
+              "max_sample_distance_mm",
+              "curve_type",
+              "operation"
+            ],
+            "type": "object"
+          },
+          "CadOperationSite": {
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "operation": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file",
+              "line",
+              "operation"
+            ],
+            "type": "object"
+          },
+          "Entity": {
+            "additionalProperties": false,
+            "properties": {
+              "entity_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "revision",
+              "instance_id",
+              "entity_id"
+            ],
+            "type": "object"
+          },
+          "MeshEdgeMatch": {
+            "properties": {
+              "candidate_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "candidates": {
+                "items": {
+                  "$ref": "#/$defs/CadEdgeCandidate"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "candidate_count",
+              "candidates"
+            ],
+            "type": "object"
+          },
+          "MeshEdgeMatchResult": {
+            "properties": {
+              "matches": {
+                "description": "One result per source entity, in the same order. Multiple candidates mean the match is ambiguous.",
+                "items": {
+                  "$ref": "#/$defs/MeshEdgeMatch"
+                },
+                "type": "array"
+              },
+              "target_pose_version": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "target_revision": {
+                "type": "string"
+              },
+              "tolerance_mm": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "target_revision",
+              "target_pose_version",
+              "tolerance_mm",
+              "matches"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MeshEdgeMatchResult"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Trace selected native CAD edges to their incident BRep faces and any observed Python operation that returned the surviving edge topology. Use edge references from get_selection or match_mesh_edge. A null operation means no reliable operation site was captured, for example with imported STEP, cached geometry, or unsupported operations. The publication location, when available, is the part's show() site. Use read_source with start_line to inspect either location.",
+      "input_schema": {
+        "$defs": {
+          "Entity": {
+            "additionalProperties": false,
+            "properties": {
+              "entity_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "revision",
+              "instance_id",
+              "entity_id"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "entities": {
+            "description": "One to sixteen native edge references.",
+            "items": {
+              "$ref": "#/$defs/Entity"
+            },
+            "type": "array"
+          },
+          "pose_version": {
+            "description": "Pass the current pose version for a moving model.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "revision",
+          "entities"
+        ],
+        "title": "TraceCadEdge",
+        "type": "object"
+      },
+      "name": "trace_cad_edge",
+      "output_schema": {
+        "$defs": {
+          "Accuracy": {
+            "enum": [
+              "exact",
+              "mesh"
+            ],
+            "type": "string"
+          },
+          "CadEdgeTrace": {
+            "properties": {
+              "curve_type": {
+                "type": "string"
+              },
+              "incident_face_count": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "incident_faces": {
+                "items": {
+                  "$ref": "#/$defs/CadIncidentFace"
+                },
+                "type": "array"
+              },
+              "length_mm": {
+                "format": "double",
+                "type": "number"
+              },
+              "operation": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CadOperationSite"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Observed operation whose returned edge shares the published topology identity."
+              },
+              "publication": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/SourceLocation"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reference": {
+                "$ref": "#/$defs/Entity"
+              }
+            },
+            "required": [
+              "reference",
+              "curve_type",
+              "length_mm",
+              "incident_face_count",
+              "incident_faces",
+              "operation",
+              "publication"
+            ],
+            "type": "object"
+          },
+          "CadEdgeTraceReply": {
+            "properties": {
+              "accuracy": {
+                "$ref": "#/$defs/Accuracy"
+              },
+              "edges": {
+                "items": {
+                  "$ref": "#/$defs/CadEdgeTrace"
+                },
+                "type": "array"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "units": {
+                "$ref": "#/$defs/Units"
+              }
+            },
+            "required": [
+              "revision",
+              "accuracy",
+              "units",
+              "edges"
+            ],
+            "type": "object"
+          },
+          "CadIncidentFace": {
+            "properties": {
+              "face_id": {
+                "type": "string"
+              },
+              "surface_type": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "face_id",
+              "surface_type"
+            ],
+            "type": "object"
+          },
+          "CadOperationSite": {
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "operation": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file",
+              "line",
+              "operation"
+            ],
+            "type": "object"
+          },
+          "Entity": {
+            "additionalProperties": false,
+            "properties": {
+              "entity_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "revision",
+              "instance_id",
+              "entity_id"
+            ],
+            "type": "object"
+          },
+          "SourceLocation": {
+            "description": "Project-relative Python file and line of the `show()` call that published a part.",
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "file",
+              "line"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "Units": {
+            "enum": [
+              "mm"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/CadEdgeTraceReply"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Use when the user asks where a selected face, edge, or part comes from. Pass its instance_id and current revision from the message or get_selection. Returns a Python show() file and line when known, or the path of a linked STL or STEP asset. Use read_source with start_line around the publication line, then find_symbol for the builder. This traces the containing part. Individual face and edge creation history is unavailable.",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,

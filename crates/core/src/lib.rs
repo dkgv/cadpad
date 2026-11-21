@@ -557,8 +557,19 @@ impl Core {
         version: &str,
         path: &str,
     ) -> Result<tools::SourceContent> {
-        let _memory = self.pin_workspace(workspace_id).await?;
         validate_path(path)?;
+        let files = self.source_files_at(workspace_id, version).await?;
+        let source = files
+            .get(path)
+            .ok_or_else(|| Error::domain("INVALID_REQUEST", "Unknown source file"))?;
+        Ok(tools::SourceContent {
+            path: path.into(),
+            source: source.clone(),
+            hash: hash(source),
+        })
+    }
+    async fn source_files_at(&self, workspace_id: &str, version: &str) -> Result<SourceFiles> {
+        let _memory = self.pin_workspace(workspace_id).await?;
         let workspaces = self.workspace_metadata(workspace_id).await?;
         let ws = workspaces
             .get(workspace_id)
@@ -570,15 +581,7 @@ impl Core {
         } else {
             ws.stored.revisions.load(version).await?.inputs.clone()
         };
-        let source = inputs
-            .files
-            .get(path)
-            .ok_or_else(|| Error::domain("INVALID_REQUEST", "Unknown source file"))?;
-        Ok(tools::SourceContent {
-            path: path.into(),
-            source: source.clone(),
-            hash: hash(source),
-        })
+        Ok(inputs.files)
     }
     pub async fn update_source(
         &self,
@@ -1226,7 +1229,15 @@ impl Core {
         let _memory = self.pin_workspace(workspace_id).await?;
         let mut args = args;
         let pose_version = self.query_pose(workspace_id, revision, &mut args).await?;
-        if !matches!(method, "inspect" | "export" | "trace_mesh_edges") {
+        if !matches!(
+            method,
+            "inspect"
+                | "export"
+                | "trace_mesh_edges"
+                | "mesh_edge_segments"
+                | "trace_cad_edge"
+                | "match_mesh_edge"
+        ) {
             return Err(Error::domain(
                 "UNSUPPORTED_OPERATION",
                 "Unknown geometry query",
@@ -1239,9 +1250,15 @@ impl Core {
                 .then(|| (current.model.clone(), current.inputs.clone()))
         };
         let data = if let Some((model, inputs)) = mesh_revision {
+            if matches!(method, "trace_cad_edge" | "match_mesh_edge") {
+                return Err(Error::domain(
+                    "UNSUPPORTED_OPERATION",
+                    "This query requires native CAD geometry",
+                ));
+            }
             self.query_stl(workspace_id, revision, model, inputs, method, args, receive)
                 .await?
-        } else if method == "trace_mesh_edges" {
+        } else if matches!(method, "trace_mesh_edges" | "mesh_edge_segments") {
             return Err(Error::domain(
                 "UNSUPPORTED_OPERATION",
                 "Edge adjacency tracing requires an STL mesh revision",

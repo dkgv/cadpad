@@ -91,6 +91,12 @@ pub struct CaptureViews {
     pub workspace_id: String,
     pub revision: String,
     pub pose_version: Option<u64>,
+    /// Standalone single capture without saving a baseline.
+    pub single: Option<bool>,
+    /// Preset camera for a standalone capture.
+    pub camera_preset: Option<Preset>,
+    /// Explicit camera for a standalone capture.
+    pub camera: Option<Camera>,
     /// Defaults to iso, front, right, top. One to four distinct views.
     pub views: Option<Vec<Preset>>,
     pub dimensions: Option<bool>,
@@ -131,6 +137,22 @@ pub struct ViewsReply {
     pub metadata: ViewsMetadata,
     pub images: Vec<LabeledImage>,
 }
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub(crate) enum CaptureToolReply {
+    Single(CaptureReply),
+    Baseline(ViewsReply),
+}
+
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub(crate) enum CaptureToolMetadata {
+    Single(CaptureMetadata),
+    Baseline(ViewsMetadata),
+}
+
 struct SavedViews {
     id: String,
     actor: String,
@@ -560,6 +582,35 @@ impl Core {
     }
     pub async fn capture_views(&self, actor: &str, args: CaptureViews) -> Result<Value> {
         self.ensure_actor_active(actor)?;
+        if args.single.unwrap_or(false) {
+            if args.views.is_some() {
+                return Err(Error::domain(
+                    "INVALID_PARAMETER",
+                    "Use camera_preset or camera for a standalone capture",
+                ));
+            }
+            return self
+                .capture_view(
+                    actor,
+                    Capture {
+                        workspace_id: args.workspace_id,
+                        revision: args.revision,
+                        pose_version: args.pose_version,
+                        camera_preset: args.camera_preset,
+                        camera: args.camera,
+                        dimensions: args.dimensions,
+                        width: args.width,
+                        height: args.height,
+                    },
+                )
+                .await;
+        }
+        if args.camera.is_some() || args.camera_preset.is_some() {
+            return Err(Error::domain(
+                "INVALID_PARAMETER",
+                "Set single=true to supply a standalone camera",
+            ));
+        }
         let views = args
             .views
             .unwrap_or_else(|| vec![Preset::Iso, Preset::Front, Preset::Right, Preset::Top]);

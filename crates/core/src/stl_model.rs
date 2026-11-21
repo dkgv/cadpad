@@ -564,7 +564,8 @@ fn inspect(
     vertices: &[u8],
     counts: &[u8],
     edges: &[u8],
-    trace: Option<&watch::Receiver<bool>>,
+    method: &str,
+    cancel: &watch::Receiver<bool>,
 ) -> Result<Value> {
     let revision = model["revision"].as_str().unwrap_or_default();
     let part = &model["parts"][0];
@@ -613,8 +614,21 @@ fn inspect(
             "Unknown STL geometry selection",
         ))
     };
-    if let Some(cancel) = trace {
+    if method == "trace_mesh_edges" {
         return trace_edges(revision, refs, &spans, vertices, selected, cancel);
+    }
+    if method == "mesh_edge_segments" {
+        let segments = refs
+            .iter()
+            .map(|reference| match selected(reference)? {
+                Selection::Edge(points) => Ok(points.map(|point| point.to_array())),
+                _ => Err(Error::domain(
+                    "INVALID_REQUEST",
+                    "Select STL edges to match",
+                )),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        return Ok(json!(segments));
     }
     let mut result = json!({"revision":revision,"pose_version":args["pose_version"],"accuracy":"mesh","units":"mm"});
     if args["query"] == "distance" {
@@ -781,7 +795,7 @@ impl Core {
             .map_err(|_| Error::domain("IO_ERROR", "STL export failed"))?;
         }
         let trace = method == "trace_mesh_edges";
-        if trace
+        if (trace || method == "mesh_edge_segments")
             && !args["entities"]
                 .as_array()
                 .is_some_and(|refs| (1..=16).contains(&refs.len()))
@@ -820,16 +834,10 @@ impl Core {
             }
         };
         let ((vertices, counts), edges) = tokio::try_join!(faces, edges)?;
+        let method = method.to_owned();
         tokio::task::spawn_blocking(move || {
             check_cancel(&cancel)?;
-            inspect(
-                &model,
-                &args,
-                &vertices,
-                &counts,
-                &edges,
-                trace.then_some(&cancel),
-            )
+            inspect(&model, &args, &vertices, &counts, &edges, &method, &cancel)
         })
         .await
         .map_err(|_| Error::domain("INVALID_GEOMETRY", "STL inspection failed"))?

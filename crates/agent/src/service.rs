@@ -1282,8 +1282,11 @@ fn history_steps(steps: &[Step]) -> Vec<Step> {
 fn activity(tool: &str) -> String {
     let label = match tool {
         "get_project" => "Reading the project",
+        "match_mesh_edge" => "Matching mesh edges to CAD",
+        "trace_cad_edge" => "Tracing native CAD edges",
         "trace_mesh_edges" => "Tracing mesh edges",
         "trace_part_source" => "Tracing the part to its source",
+        "find_symbol" => "Finding Python symbols",
         "search_source" => "Searching the source",
         "read_source_lines" | "read_source" => "Reading the source",
         "update_source" => "Updating the design",

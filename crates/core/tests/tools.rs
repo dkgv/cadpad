@@ -118,8 +118,10 @@ async fn large_source_can_be_searched_and_read_in_bounded_pages() {
     assert_eq!(next["matches"][0]["line"], 3);
     assert!(next["next_line"].is_null());
 
+    let mut paged = args.clone();
+    paged["paged"] = json!(true);
     let page = core
-        .dispatch(&context, "read_source_lines", args.clone())
+        .dispatch(&context, "read_source", paged)
         .await
         .unwrap();
     assert_eq!(page["hash"], hit["hash"]);
@@ -130,7 +132,7 @@ async fn large_source_can_be_searched_and_read_in_bounded_pages() {
     continuation["start_line"] = page["next_line"].clone();
     continuation["byte_offset"] = page["next_byte_offset"].clone();
     let remainder = core
-        .dispatch(&context, "read_source_lines", continuation)
+        .dispatch(&context, "read_source", continuation)
         .await
         .unwrap();
     assert_eq!(

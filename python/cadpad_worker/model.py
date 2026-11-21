@@ -294,18 +294,25 @@ class Model:
             cached_shape=self._geometry_cache.shape,
         )
         context = SimpleNamespace(parameters=values, **helpers)
+        from .edge_trace import OperationTrace
+        self._operation_trace = OperationTrace(source_root)
+        old_profile = sys.getprofile()
         old_path, old_cwd = sys.path[:], Path.cwd()
         try:
             sys.path.insert(0, str(source_root))
             if entry_path.parent != source_root:
                 sys.path.insert(0, str(entry_path.parent))
             os.chdir(source_root)
+            if old_profile is None:
+                sys.setprofile(self._operation_trace.profile)
             namespace = runpy.run_path(str(entry_path), init_globals=dict(helpers), run_name="__main__")
             if callable(namespace.get("build")):
                 namespace["build"](context)
             if not self.parts and isinstance(namespace.get("result"), (cq.Workplane, cq.Shape, cq.Assembly)):
                 show(namespace["result"], name="result")
         finally:
+            if old_profile is None and sys.getprofile() == self._operation_trace.profile:
+                sys.setprofile(None)
             os.chdir(old_cwd)
             sys.path[:] = old_path
         starter_entry = entry_path.read_text().strip() in ("# Describe a part to get started.", "# Cadpad project browser. Select a part in Explorer.")

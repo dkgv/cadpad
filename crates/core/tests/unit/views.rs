@@ -60,7 +60,7 @@ async fn selection_capture_and_dimension_requests_keep_explicit_revision_scope()
     assert_eq!(snapshot["numeric_context"][0]["volume"], 6000.0);
     assert_eq!(snapshot["width"], 1);
     assert_eq!(snapshot["image"]["mime_type"], "image/png");
-    let definition = crate::tools::definition("capture_view").unwrap();
+    let definition = crate::tools::definition("capture_views").unwrap();
     let native_schema =
         jsonschema::validator_for(definition.output_schema.as_ref().unwrap()).unwrap();
     let mcp_schema =
