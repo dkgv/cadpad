@@ -3,6 +3,7 @@ import {Icon} from './ui';
 
 export type CliDetection={backend:string;installed:boolean;authenticated:boolean;path?:string;detail:string};
 export type AgentSettings={provider:string;backend?:string;model:string;configured:boolean;credential_storage:string;cli?:CliDetection[];bridge_available?:boolean};
+export type CloudSettings={base_url:string;auth_frontend_url?:string;configured:boolean;credential_storage:string};
 export type ModelChoice={id:string;label:string};
 export type McpSettings={config:unknown;bridge_installed:boolean;sessions:{id:string;client_name:string;connected:boolean;calls:number}[]};
 
@@ -41,6 +42,12 @@ type Props={
   savingProvider:boolean;
   cleaningCache:boolean;
   providerSettings:AgentSettings|null;
+  cloudSettings:CloudSettings|null;
+  cloudBaseUrl:string;
+  cloudAuthFrontendUrl:string;
+  cloudApiKey:string;
+  savingCloud:boolean;
+  signingInCloud:boolean;
   mcpSettings:McpSettings|null;
   models:ModelChoice[]|null;
   onClose:()=>void;
@@ -49,6 +56,12 @@ type Props={
   onApiKey:(value:string)=>void;
   onSave:()=>void;
   onForgetKey:()=>void;
+  onCloudBaseUrl:(value:string)=>void;
+  onCloudAuthFrontendUrl:(value:string)=>void;
+  onCloudApiKey:(value:string)=>void;
+  onSaveCloud:()=>void;
+  onSignInCloud:()=>void;
+  onForgetCloudKey:()=>void;
   onRecheck:()=>void;
   onCleanCache:()=>void;
   onExternalOpen:(open:boolean)=>void;
@@ -57,8 +70,8 @@ type Props={
 };
 
 export function SettingsDialog({
-  open,dialogRef,agentBackend,modelId,apiKey,savingProvider,cleaningCache,providerSettings,mcpSettings,models,
-  onClose,onBackend,onModel,onApiKey,onSave,onForgetKey,onRecheck,onCleanCache,onExternalOpen,onDisconnect,onError,
+  open,dialogRef,agentBackend,modelId,apiKey,savingProvider,cleaningCache,providerSettings,cloudSettings,cloudBaseUrl,cloudAuthFrontendUrl,cloudApiKey,savingCloud,signingInCloud,mcpSettings,models,
+  onClose,onBackend,onModel,onApiKey,onSave,onForgetKey,onCloudBaseUrl,onCloudAuthFrontendUrl,onCloudApiKey,onSaveCloud,onSignInCloud,onForgetCloudKey,onRecheck,onCleanCache,onExternalOpen,onDisconnect,onError,
 }:Props){
   const [copied,setCopied]=useState(false);
   const [customModel,setCustomModel]=useState(false);
@@ -140,6 +153,26 @@ export function SettingsDialog({
               <button type="button" className="danger-button" disabled={savingProvider} onClick={onForgetKey}>Remove saved key</button>
             </div>}
           </div>}
+        </section>}
+        {open&&<section className="provider-settings settings-section">
+          <header className="settings-section-header">
+            <strong>Image to CAD</strong>
+            <p>Send a photo or screenshot to the Cadpad API. It returns editable CadQuery Python you can stage into the open project.</p>
+          </header>
+          <label>API base URL<input value={cloudBaseUrl} placeholder="http://127.0.0.1:8080" onChange={event=>onCloudBaseUrl(event.target.value)} autoComplete="off"/></label>
+          <label>Auth site URL<input value={cloudAuthFrontendUrl} placeholder="http://127.0.0.1:5173" onChange={event=>onCloudAuthFrontendUrl(event.target.value)} autoComplete="off"/></label>
+          <div className="settings-inline-actions">
+            <button type="button" className="primary-button" disabled={signingInCloud||savingCloud||!cloudBaseUrl.trim()} onClick={onSignInCloud}>{signingInCloud?'Waiting for browser…':'Sign in with browser'}</button>
+            {cloudSettings?.configured&&<button type="button" className="danger-button" disabled={savingCloud||signingInCloud} onClick={onForgetCloudKey}>Sign out</button>}
+          </div>
+          <p className="muted">{cloudSettings?.configured?'Signed in · API key saved in the system keychain.':'Opens the Cadpad site so you can sign in with Firebase. The app polls until authorized.'}</p>
+          <details className="connection-settings">
+            <summary>Paste API key instead</summary>
+            <label>Cadpad API key<input type="password" value={cloudApiKey} placeholder={cloudSettings?.configured?'Saved key · leave blank to keep':'cpd_…'} onChange={event=>onCloudApiKey(event.target.value)} autoComplete="off"/></label>
+            <div className="settings-inline-actions">
+              <button type="button" disabled={savingCloud||signingInCloud||!cloudBaseUrl.trim()} onClick={onSaveCloud}>{savingCloud?'Saving…':'Save key'}</button>
+            </div>
+          </details>
         </section>}
         <details className="connection-settings">
           <summary>Storage</summary>

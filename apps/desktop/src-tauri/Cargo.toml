@@ -15,6 +15,7 @@ serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+base64 = "0.22"
 tauri-plugin-dialog = "2"
 notify = "8.2"
 

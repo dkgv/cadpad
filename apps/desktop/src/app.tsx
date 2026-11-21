@@ -27,7 +27,7 @@ import {QuickModelSelector} from './quick-model';
 import {LiveReply,FinishedReply,Markdown,type AgentStep} from './agent-steps';
 import {useDockDrag} from './dock-drag';
 import {ViewCube,type ViewCubeDirection} from './view-cube';
-import {SettingsDialog,type AgentSettings,type McpSettings,type ModelChoice} from './settings-dialog';
+import {SettingsDialog,type AgentSettings,type CloudSettings,type McpSettings,type ModelChoice} from './settings-dialog';
 
 const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren>(function ConversationScroll({children},forwardedRef){
   const nodeRef=useRef<HTMLDivElement|null>(null);
@@ -311,6 +311,12 @@ export function App({host}:{host?:SessionHost}={}) {
   const [agentCatalog,setAgentCatalog]=useState<{backend:string;models:ModelChoice[]}|null>(null);
   const [agentBackend,setAgentBackend]=useState('claude_cli');
   const [modelId,setModelId]=useState(''),[apiKey,setApiKey]=useState(''),[savingProvider,setSavingProvider]=useState(false);
+  const [cloudSettings,setCloudSettings]=useState<CloudSettings|null>(null);
+  const [cloudBaseUrl,setCloudBaseUrl]=useState('http://127.0.0.1:8080');
+  const [cloudAuthFrontendUrl,setCloudAuthFrontendUrl]=useState('http://127.0.0.1:5173');
+  const [cloudApiKey,setCloudApiKey]=useState('');
+  const [savingCloud,setSavingCloud]=useState(false);
+  const [signingInCloud,setSigningInCloud]=useState(false);
   const agentConfigPending=useRef(false);
   const assistantVisible=host?host.chrome&&host.visibleTools.includes('assistant'):assistantOpen;
   const savedBackend=providerSettings?.backend||providerSettings?.provider;
@@ -515,6 +521,26 @@ export function App({host}:{host?:SessionHost}={}) {
       setNotice(settings.configured?'Agent settings saved. Send your request to start modeling.':settings.credential_storage==='local_cli'?'CLI selected. Sign in with that CLI if Cadpad still shows it as unavailable.':'Model saved. Add your API key to start modeling.');
     }
     catch(e){setError(message(e));}finally{agentConfigPending.current=false;setSavingProvider(false);}
+  }
+  async function saveCloud(){
+    setSavingCloud(true);setError('');
+    try{
+      const settings=await invoke<CloudSettings>('configure_cloud',{baseUrl:cloudBaseUrl,apiKey:cloudApiKey||null,authFrontendUrl:cloudAuthFrontendUrl||null});
+      setCloudSettings(settings);setCloudBaseUrl(settings.base_url);setCloudAuthFrontendUrl(settings.auth_frontend_url||cloudAuthFrontendUrl);setCloudApiKey('');
+      setNotice(settings.configured?'Image to CAD settings saved.':'API URL saved. Sign in with the browser to generate from images.');
+    }
+    catch(e){setError(message(e));}finally{setSavingCloud(false);}
+  }
+  async function signInCloud(){
+    setSigningInCloud(true);setError('');
+    try{
+      await invoke<CloudSettings>('configure_cloud',{baseUrl:cloudBaseUrl,apiKey:null,authFrontendUrl:cloudAuthFrontendUrl||null});
+      const result=await invoke<{configured?:boolean}>('cloud_sign_in');
+      const settings=await invoke<CloudSettings>('cloud_settings');
+      setCloudSettings(settings);setCloudBaseUrl(settings.base_url);setCloudAuthFrontendUrl(settings.auth_frontend_url||cloudAuthFrontendUrl);setCloudApiKey('');
+      setNotice(result.configured||settings.configured?'Signed in to Cadpad Cloud.':'Browser sign-in finished without a key.');
+    }
+    catch(e){setError(message(e));}finally{setSigningInCloud(false);}
   }
   async function saveAgentArtifact(artifact:{handle:string;format:string;revision:string}){
     if(!project)return;const workspace=project.workspace_id;
@@ -762,6 +788,16 @@ export function App({host}:{host?:SessionHost}={}) {
     }).catch(e=>{if(active&&providerOpen)setError(message(e));});
     return()=>{active=false;};
   },[providerOpen,assistantVisible]);
+  useEffect(()=>{
+    if(!providerOpen)return;
+    let active=true;
+    invoke<CloudSettings>('cloud_settings').then(settings=>{
+      if(!active)return;
+      setCloudSettings(settings);setCloudBaseUrl(settings.base_url||'http://127.0.0.1:8080');
+      setCloudAuthFrontendUrl(settings.auth_frontend_url||'http://127.0.0.1:5173');
+    }).catch(e=>{if(active)setError(message(e));});
+    return()=>{active=false;};
+  },[providerOpen]);
   useEffect(()=>{
     if(!catalogBackend)return;
     let active=true;
@@ -1394,6 +1430,12 @@ export function App({host}:{host?:SessionHost}={}) {
       savingProvider={savingProvider}
       cleaningCache={cleaningCache}
       providerSettings={providerSettings}
+      cloudSettings={cloudSettings}
+      cloudBaseUrl={cloudBaseUrl}
+      cloudAuthFrontendUrl={cloudAuthFrontendUrl}
+      cloudApiKey={cloudApiKey}
+      savingCloud={savingCloud}
+      signingInCloud={signingInCloud}
       mcpSettings={mcpSettings}
       models={agentModels}
       onClose={()=>setProviderOpen(false)}
@@ -1402,6 +1444,12 @@ export function App({host}:{host?:SessionHost}={}) {
       onApiKey={setApiKey}
       onSave={()=>void saveProvider()}
       onForgetKey={()=>invoke('forget_agent_key').then(()=>{if(providerSettings)setProviderSettings({...providerSettings,configured:false});setApiKey('');}).catch(e=>setError(message(e)))}
+      onCloudBaseUrl={setCloudBaseUrl}
+      onCloudAuthFrontendUrl={setCloudAuthFrontendUrl}
+      onCloudApiKey={setCloudApiKey}
+      onSaveCloud={()=>void saveCloud()}
+      onSignInCloud={()=>void signInCloud()}
+      onForgetCloudKey={()=>invoke('forget_cloud_key').then(()=>{if(cloudSettings)setCloudSettings({...cloudSettings,configured:false});setCloudApiKey('');}).catch(e=>setError(message(e)))}
       onRecheck={()=>invoke<AgentSettings>('agent_settings').then(setProviderSettings).catch(error=>setError(message(error)))}
       onCleanCache={()=>void cleanCache()}
       onExternalOpen={setSettingsOpen}

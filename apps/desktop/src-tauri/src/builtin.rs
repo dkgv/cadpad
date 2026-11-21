@@ -1,6 +1,8 @@
+use cadpad_agent::cloud::CloudService;
 use cadpad_agent::service::AgentService;
-use cadpad_core::{Error, error_value};
+use cadpad_core::{Core, Error, error_value};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use tauri::{State, ipc::Channel};
 fn error(error: Error) -> Value {
     error_value(&error)
@@ -123,4 +125,181 @@ pub async fn connect_agent(
         }
     });
     Ok(())
+}
+
+#[tauri::command]
+pub async fn cloud_settings(cloud: State<'_, CloudService>) -> Result<Value, Value> {
+    cloud.settings().await.map_err(error)
+}
+
+#[tauri::command]
+pub async fn configure_cloud(
+    cloud: State<'_, CloudService>,
+    base_url: String,
+    api_key: Option<String>,
+    auth_frontend_url: Option<String>,
+) -> Result<Value, Value> {
+    cloud
+        .configure(base_url, api_key, auth_frontend_url)
+        .await
+        .map_err(error)
+}
+
+#[tauri::command]
+pub async fn forget_cloud_key(cloud: State<'_, CloudService>) -> Result<(), Value> {
+    cloud.forget_key().await.map_err(error)
+}
+
+#[tauri::command]
+pub async fn cloud_sign_in(cloud: State<'_, CloudService>) -> Result<Value, Value> {
+    cloud.sign_in_with_browser().await.map_err(error)
+}
+
+/// Run image→CAD against backend and return CadQuery source (does not mutate the project).
+#[tauri::command]
+pub async fn cloud_generate(
+    cloud: State<'_, CloudService>,
+    image_base64: String,
+    mime_type: Option<String>,
+    prompt: Option<String>,
+    filename: Option<String>,
+) -> Result<Value, Value> {
+    let image = decode_base64(&image_base64).map_err(error)?;
+    cloud
+        .generate_from_image(
+            image,
+            mime_type.unwrap_or_else(|| "image/png".into()),
+            prompt,
+            filename,
+        )
+        .await
+        .map_err(error)
+}
+
+/// Generate CadQuery from an image and stage it into the open workspace as `model.py`, then build.
+#[tauri::command]
+pub async fn cloud_generate_into_workspace(
+    cloud: State<'_, CloudService>,
+    core: State<'_, Core>,
+    workspace: String,
+    image_base64: String,
+    mime_type: Option<String>,
+    prompt: Option<String>,
+    filename: Option<String>,
+) -> Result<Value, Value> {
+    let image = decode_base64(&image_base64).map_err(error)?;
+    let generated = cloud
+        .generate_from_image(
+            image,
+            mime_type.unwrap_or_else(|| "image/png".into()),
+            prompt,
+            filename,
+        )
+        .await
+        .map_err(error)?;
+    let staged = stage_generated(&core, &workspace, &generated).await?;
+    Ok(json!({
+        "generation": generated,
+        "draft_id": staged.0,
+        "job": staged.1,
+        "entry_point": staged.2,
+        "source": staged.3,
+    }))
+}
+
+/// Stage a cloud generation variant (an `alternates[]` entry from a previous
+/// generation response) into the workspace as a new revision, then build.
+#[tauri::command]
+pub async fn cloud_stage_variant(
+    core: State<'_, Core>,
+    workspace: String,
+    variant: Value,
+) -> Result<Value, Value> {
+    let staged = stage_generated(&core, &workspace, &variant).await?;
+    Ok(json!({
+        "variant": variant,
+        "draft_id": staged.0,
+        "job": staged.1,
+        "entry_point": staged.2,
+        "source": staged.3,
+    }))
+}
+
+/// Stage a wrapped generation result (winner or alternate) into the workspace:
+/// assets via stage_asset, entry point via update_source, then build.
+/// Returns (draft_id, build_job, entry_point, source).
+async fn stage_generated(
+    core: &Core,
+    workspace: &str,
+    generated: &Value,
+) -> Result<(String, Value, String, String), Value> {
+    let source = generated
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| error(Error::domain("NETWORK_ERROR", "Missing generated source")))?
+        .to_string();
+    let entry_point = generated
+        .get("entry_point")
+        .and_then(Value::as_str)
+        .unwrap_or("model.py")
+        .to_string();
+    let project = core.get_project(workspace).await.map_err(error)?;
+    let base = project
+        .get("revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| error(Error::domain("INVALID_STATE", "Project revision missing")))?
+        .to_string();
+    let mut draft_id: Option<String> = None;
+    if let Some(assets) = generated.get("assets").and_then(Value::as_array) {
+        for asset in assets {
+            let path = asset
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| error(Error::domain("NETWORK_ERROR", "Asset missing path")))?;
+            let content_b64 = asset
+                .get("content_base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| error(Error::domain("NETWORK_ERROR", "Asset missing content")))?;
+            let bytes = decode_base64(content_b64).map_err(error)?;
+            let draft = core
+                .stage_asset(
+                    workspace,
+                    &base,
+                    draft_id.as_deref(),
+                    path,
+                    bytes,
+                    "cloud-generate",
+                )
+                .await
+                .map_err(error)?;
+            draft_id = Some(draft.id);
+        }
+    }
+    let draft = core
+        .update_source(
+            workspace,
+            &base,
+            draft_id.as_deref(),
+            BTreeMap::from([(entry_point.clone(), source.clone())]),
+            "cloud-generate",
+        )
+        .await
+        .map_err(error)?;
+    let job = core
+        .build(workspace, &base, &draft.id, "cloud-generate")
+        .await
+        .map_err(error)?;
+    Ok((draft.id, job, entry_point, source))
+}
+
+fn decode_base64(value: &str) -> Result<Vec<u8>, Error> {
+    use base64::Engine;
+    let trimmed = value
+        .trim()
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(',').map(|(_, data)| data))
+        .unwrap_or(value.trim());
+    base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|_| Error::domain("INVALID_PARAMETER", "Image must be valid base64"))
 }
