@@ -14,7 +14,7 @@ pub struct Preset {
     pub build_volume_mm: [f64; 3],
     /// Shortest acceptable mesh edge, mm.
     pub min_feature_mm: f64,
-    /// Downward-facing surface steeper than this (deg from horizontal) counts as overhang.
+    /// Downward-facing surface within this many degrees of horizontal counts as overhang.
     pub overhang_deg: f64,
     /// Overhang area fraction that triggers a warning.
     pub overhang_warn_fraction: f64,
@@ -65,7 +65,7 @@ pub fn preset(name: &str) -> Result<Preset> {
         })
 }
 
-#[derive(Clone, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct Warning {
     pub code: String,
     pub severity: String,
@@ -390,8 +390,8 @@ mod tests {
     fn downward_facing_triangles_count_as_overhang() {
         // Two triangles: one facing +Z (roof), one facing -Z (overhang).
         let triangles = [
-            [[0.0, 0.0, 0.0], [10.0, 0.0, 10.0], [0.0, 10.0, 10.0]],
-            [[0.0, 0.0, 0.0], [0.0, 10.0, 10.0], [10.0, 0.0, 10.0]],
+            [[0.0, 0.0, 10.0], [10.0, 0.0, 10.0], [0.0, 10.0, 10.0]],
+            [[0.0, 0.0, 0.0], [0.0, 10.0, 0.0], [10.0, 0.0, 0.0]],
         ];
         let report = report(&triangles);
         assert!(report.overhang_area_mm2 > 0.0);
