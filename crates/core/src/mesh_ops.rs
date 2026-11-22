@@ -163,7 +163,7 @@ pub(crate) fn write_stl_binary(triangles: &[[[f64; 3]; 3]]) -> Result<Vec<u8>> {
         }
         for vertex in triangle {
             for coordinate in vertex {
-                let value = coordinate as f32;
+                let value = *coordinate as f32;
                 if !value.is_finite() {
                     return Err(Error::domain(
                         "INVALID_GEOMETRY",
@@ -192,10 +192,12 @@ fn resolve_asset_key<'a>(
     }
     let stripped = requested.strip_prefix("assets/").unwrap_or(requested);
     let prefixed = format!("assets/{stripped}");
-    let mut matches: Vec<&str> = Vec::new();
+    let mut matches: Vec<&'a str> = Vec::new();
     for candidate in [requested, stripped, prefixed.as_str()] {
-        if assets.contains_key(candidate) && !matches.contains(&candidate) {
-            matches.push(candidate);
+        if let Some((key, _)) = assets.get_key_value(candidate) {
+            if !matches.contains(&key.as_str()) {
+                matches.push(key.as_str());
+            }
         }
     }
     match matches.as_slice() {
@@ -265,7 +267,7 @@ impl Core {
                     "Managed asset digest mismatch",
                 ));
             }
-            let triangles = blocking(move || read_triangles(&blob)).await??;
+            let triangles = blocking(move || read_triangles(&blob)).await?;
             let transformed = blocking(move || {
                 let mut out = Vec::with_capacity(triangles.len());
                 for mut triangle in triangles {
@@ -281,7 +283,7 @@ impl Core {
                 }
                 write_stl_binary(&out)
             })
-            .await??;
+            .await?;
             let digest = portable::bytes_hash(&transformed);
             self.publish_asset_blob(digest.clone(), transformed).await?;
             (key, digest)
