@@ -3,6 +3,7 @@ import 'three-cad-viewer/css';
 import * as THREE from 'three';
 import {dimensionStroke,moveDimensionStroke,placeDimensionLabels,angleGeometry,dimensionText,placeAnnotation} from './dimension-display';
 export {dimensionText} from './dimension-display';
+import {entityDimensions} from './entity-dimensions';
 import {setRenderedVisibility} from './visibility';
 import {useCadpadHover} from './render-policy';
 import {sceneEntity,sameEntity,referenceLetter} from './entities';
@@ -896,7 +897,13 @@ export class CadViewport {
     this.clearAnnotations();
     if (!this.dimensions||!this.presented) return;
     const transforms=new Map([...this.paths].map(([path,part])=>[part.instance_id,this.viewer.nestedGroup.groups[path]?.matrixWorld]));
-    const annotations=modelDimensions(this.model).filter(resolved).filter(a=>this.visible.has(a.part)&&this.visible.has(a.end_part||a.part)&&this.visible.has(a.vertex_part||a.part)&&
+    // Picking a face or edge narrows "selected" dimensions to that entity
+    // instead of the whole part's overall extents.
+    const entity=this.scope==='selected'&&this.selectedEntity&&!this.selectedEntity.entity_id.startsWith('part:')?this.selectedEntity:null;
+    const geometry=entity&&this.pickGeometry.get(entity.instance_id);
+    const local=entity&&geometry?entityDimensions(entity.instance_id,entity.entity_id,geometry):[];
+    const base=modelDimensions(this.model).filter(a=>!local.length||a.kind!=='overall'||a.saved_id);
+    const annotations=[...local,...base].filter(resolved).filter(a=>this.visible.has(a.part)&&this.visible.has(a.end_part||a.part)&&this.visible.has(a.vertex_part||a.part)&&
       (this.scope==='all'||this.scope==='selected'&&(this.selected===a.part||this.selected===a.end_part||this.selected===a.vertex_part)||this.scope==='pinned'&&!!a.saved_id));
     annotations.sort((a,b)=>Number(this.selected===b.part||this.selected===b.end_part||this.selected===b.vertex_part)-Number(this.selected===a.part||this.selected===a.end_part||this.selected===a.vertex_part)||Number(!!b.saved_id)-Number(!!a.saved_id));
     for (const annotation of annotations.slice(0,100)) {
