@@ -1,5 +1,6 @@
 import React,{useEffect,useLayoutEffect,useRef,type ReactNode} from 'react';
 import {createPortal} from 'react-dom';
+import {Menu} from '@tauri-apps/api/menu';
 import {Icon} from './ui';
 import {useDockDrag,dockEdgeAt,dropLabel,acceptsDockDrop} from './dock-drag';
 
@@ -83,6 +84,19 @@ export function validateDock(value:unknown,allowed:Set<string>,depth=0,seen=new 
 
 const dragType='application/x-cadpad-tab';
 export type DockTab={id:string;title:string;dirty?:boolean;icon?:'file'|'cube'|'folder'|'motion'|'physics'|'tests'|'sparkles'|'chat';status?:'pending'|'unseen'};
+// Inside the desktop shell tabs get the OS context menu, like VS Code/Cursor.
+// The in-page menu remains for the browser build and tests.
+const nativeMenus=typeof window!=='undefined'&&'__TAURI_INTERNALS__' in window;
+let nativeTabMenu:Menu|null=null;
+async function popupNativeTabMenu({others,onCloseTab,onCloseOthers,onCloseAll}:{others:boolean;onCloseTab:()=>void;onCloseOthers:()=>void;onCloseAll:()=>void}){
+  void nativeTabMenu?.close().catch(()=>{});
+  const menu=nativeTabMenu=await Menu.new({items:[
+    {id:'tab-close',text:'Close',accelerator:'CmdOrCtrl+W',action:onCloseTab},
+    {id:'tab-close-others',text:'Close Others',enabled:others,action:onCloseOthers},
+    {id:'tab-close-all',text:'Close All',action:onCloseAll},
+  ]});
+  await menu.popup();
+}
 function TabContextMenu({x,y,others,onCloseTab,onCloseOthers,onCloseAll,onDismiss}:{x:number;y:number;others:boolean;onCloseTab:()=>void;onCloseOthers:()=>void;onCloseAll:()=>void;onDismiss:()=>void}){
   const ref=useRef<HTMLDivElement>(null);
   const mac=/Mac|iPhone|iPad/.test(navigator.platform);
@@ -131,6 +145,11 @@ export function DockArea({tree,tabs,hosts,area,focused,onFocus,onChange,onDrop,o
   function showMenu(group:string,tab:string,x:number,y:number){
     onFocus(group,tab);
     window.dispatchEvent(new Event('cadpad-dismiss-tab-menu'));
+    if(nativeMenus){
+      const siblings=groups(tree).find(g=>g.id===group)?.tabs.filter(id=>tabs[id])??[];
+      void popupNativeTabMenu({others:siblings.length>1,onCloseTab:()=>closeTabs([tab],tab),onCloseOthers:()=>closeTabs(siblings.filter(id=>id!==tab),tab),onCloseAll:()=>closeTabs(siblings,tab)}).catch(()=>setMenu({tab,x,y}));
+      return;
+    }
     setMenu({tab,x,y});
   }
   const start=useRef<{id:string;axis:string;bounds:DOMRect}|null>(null);
@@ -189,8 +208,7 @@ export function DockArea({tree,tabs,hosts,area,focused,onFocus,onChange,onDrop,o
   useEffect(()=>{const clear=()=>setMenu(null);window.addEventListener('cadpad-dismiss-tab-menu',clear);return()=>window.removeEventListener('cadpad-dismiss-tab-menu',clear);},[]);
   useEffect(()=>{if(menu&&!groups(tree).some(group=>group.tabs.includes(menu.tab)))setMenu(null);},[tree,menu]);
   const menuTabs=menu?(groups(tree).find(group=>group.tabs.includes(menu.tab))?.tabs.filter(id=>tabs[id])??[]):[];
-  function closeTabs(ids:string[]){
-    const current=menu?.tab;
+  function closeTabs(ids:string[],current=menu?.tab){
     setMenu(null);
     if(ids.length)onClose(ids);
     if(current&&!ids.includes(current))requestAnimationFrame(()=>[...document.querySelectorAll<HTMLElement>('[data-tab]')].find(tab=>tab.dataset.tab===current)?.focus());

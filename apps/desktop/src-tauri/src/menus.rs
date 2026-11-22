@@ -318,7 +318,10 @@ pub struct MenuStatus {
 }
 fn enabled(id: &str, status: &MenuStatus) -> bool {
     match id {
-        "close-tab" | "split-right" | "split-down" => status.has_project,
+        // Cmd+W must always reach the webview's tab logic; a disabled menu item
+        // would swallow the shortcut whenever the focused pane reports no project.
+        "close-tab" => true,
+        "split-right" | "split-down" => status.has_project,
         "save" | "save-as" => status.has_project && !status.busy,
         "import" | "rebuild" => status.has_project && !status.working,
         "export-step" | "export-stl" | "fit" | "iso" | "front" | "top" | "right" => {
