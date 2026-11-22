@@ -1,6 +1,6 @@
 import React,{useEffect,useMemo,useRef,useState,useSyncExternalStore} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {Icon,errorSummary} from './ui';
+import {Icon,errorText} from './ui';
 import {SourcePreview} from './source-preview';
 import {watchProjectFiles} from './project-files';
 
@@ -149,14 +149,14 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
     let active=true;
     if(!hasFiles.current){setLoading(true);setError('');setSourcePath(null);}
     loadSourceIndex(requestId,workspace,revision).then(result=>{if(!active)return;hasFiles.current=true;setFiles(result.files);setError('');})
-      .catch(error=>{if(active)setError(errorSummary(JSON.stringify(error)));}).finally(()=>{if(active)setLoading(false);});
+      .catch(error=>{if(active)setError(errorText(error));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};
   },[requestId,workspace,revision,attempt,catalogEpoch]);
   useEffect(()=>{
     if(!workspace)return;
     let active=true;
-    const refresh=()=>{void refreshSourceIndex(requestId,workspace,revision).then(()=>{if(active)setError('');}).catch(error=>{if(active)setError(errorSummary(JSON.stringify(error)));});};
-    const close=watchProjectFiles(workspace,refresh,error=>{if(active)setError(errorSummary(JSON.stringify(error)));});
+    const refresh=()=>{void refreshSourceIndex(requestId,workspace,revision).then(()=>{if(active)setError('');}).catch(error=>{if(active)setError(errorText(error));});};
+    const close=watchProjectFiles(workspace,refresh,error=>{if(active)setError(errorText(error));});
     return()=>{active=false;close();};
   },[requestId,workspace,revision]);
   useEffect(()=>{

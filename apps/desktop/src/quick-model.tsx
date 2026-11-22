@@ -1,6 +1,6 @@
 import React,{useEffect,useId,useMemo,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
-import {Icon,errorSummary} from './ui';
+import {Icon,errorText} from './ui';
 import {indexedModels,loadSourceIndex,modelCaption,useSourceCatalogEpoch,type IndexedModel} from './source-catalog';
 
 const recentKey=(workspace:string)=>`cadpad.recent-models.v1:${workspace}`;
@@ -82,7 +82,7 @@ export function QuickModelSelector({open,workspace,revision,historyWorkspace=wor
     if(!open)return;
     let active=true;setQuery('');setHighlight(0);setLoading(true);setError('');setModels([]);
     loadSourceIndex(undefined,workspace,revision).then(result=>{if(active)setModels(indexedModels(result.files));})
-      .catch(value=>{if(active)setError(errorSummary(JSON.stringify(value)));}).finally(()=>{if(active)setLoading(false);});
+      .catch(value=>{if(active)setError(errorText(value));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};
   },[open,workspace,revision,catalogEpoch]);
   useEffect(()=>{if(open)setHighlight(0);},[query,open]);

@@ -44,6 +44,8 @@ export function humanLabel(value:string){return value.replaceAll('_',' ').replac
 export function errorSummary(value:string){
   try{const data=JSON.parse(value);const message=data?.message||data?.error?.message;return typeof message==='string'?message:'This action could not be completed.';}catch{return value;}
 }
+/** User-facing text for a caught value; JSON.stringify drops an Error's message. */
+export function errorText(error:unknown){return error instanceof Error?error.message:errorSummary(typeof error==='string'?error:JSON.stringify(error));}
 export function ModelOpening(){
   return <div className="model-opening" role="status"><span className="model-opening-spinner" aria-hidden="true"/><strong>Opening model…</strong></div>;
 }

@@ -1,6 +1,6 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {Icon,errorSummary} from './ui';
+import {Icon,errorText} from './ui';
 import {SourceCatalog} from './source-catalog';
 
 export type EntrySelection={request_id:string;folder:string;entries:string[];current_entry?:string|null};
@@ -18,7 +18,7 @@ export function ProjectEntry({selection,busy,error,onOpen,onCancel}:{selection:E
       if(!active||!Array.isArray(result.options))return;
       setPlan(result);setBuilder(requested.current||result.recommended||result.options.find(option=>option.available)?.id||'');
       if(!manual.current)setMode(requested.current||!result.direct&&!!result.recommended?'adapter':'existing');
-    }).catch(error=>{if(active)setAnalysisError(errorSummary(JSON.stringify(error)));}).finally(()=>{if(active)setLoading(false);});
+    }).catch(error=>{if(active)setAnalysisError(errorText(error));}).finally(()=>{if(active)setLoading(false);});
     return()=>{active=false;};
   },[entry,selection.request_id,attempt]);
   const entries=selection.entries.filter(path=>path.toLowerCase().includes(query.toLowerCase()));

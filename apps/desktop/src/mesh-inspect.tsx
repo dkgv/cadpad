@@ -1,6 +1,6 @@
 import React,{useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {Icon,errorSummary} from './ui';
+import {Icon,errorText} from './ui';
 
 type MeshSummary={path:string;bytes:number;format:string;triangles:number;min:number[];max:number[];size:number[]};
 function measure(value:number){return `${Number.isFinite(value)?value.toLocaleString(undefined,{maximumFractionDigits:3}):'—'} mm`;}
@@ -18,7 +18,7 @@ export function MeshInspect({workspace,path,onClose}:{workspace:string;path:stri
   useEffect(()=>{
     let active=true;
     setSummary(null);setError('');
-    invoke<MeshSummary>('inspect_project_mesh',{workspace,path}).then(result=>{if(active)setSummary(result);}).catch(failure=>{if(active)setError(errorSummary(JSON.stringify(failure)));});
+    invoke<MeshSummary>('inspect_project_mesh',{workspace,path}).then(result=>{if(active)setSummary(result);}).catch(failure=>{if(active)setError(errorText(failure));});
     return()=>{active=false;};
   },[workspace,path]);
   const name=path.split('/').at(-1)||path;
