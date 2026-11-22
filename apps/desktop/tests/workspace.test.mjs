@@ -1,6 +1,6 @@
 // CPU-only React interaction checks. No browser, WebGL, native app or provider.
 import test,{after,before,beforeEach,afterEach} from 'node:test';
-import assert from 'node:assert/strict';
+import strictAssert,{AssertionError} from 'node:assert/strict';
 import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import path from 'node:path';
@@ -8,6 +8,14 @@ import {build} from 'esbuild';
 import {JSDOM} from 'jsdom';
 import React,{act} from 'react';
 
+// assert formats failures with customInspect disabled, so a failing equal() on a jsdom node
+// walks the entire DOM/window graph and can consume tens of GB. Report nodes as short HTML instead.
+const brief=value=>dom&&value instanceof dom.window.Node?`<${value.nodeName.toLowerCase()}> ${(value.outerHTML??value.textContent??'').slice(0,300)}`:value;
+const assert=new Proxy(strictAssert,{get(target,key){
+  if(!['equal','strictEqual','notEqual','notStrictEqual'].includes(key))return target[key];
+  const want=!key.startsWith('not');
+  return function guarded(actual,expected,message){if(Object.is(actual,expected)!==want)throw new AssertionError({actual:brief(actual),expected:brief(expected),operator:key,message,stackStartFn:guarded});};
+}});
 const repo=fileURLToPath(new URL('../../../',import.meta.url));
 let directory,App,Workbench,docking,createRoot,dom,root,harness;
 const fixture=()=>({workspace_id:'workspace-1',revision:'r1',name:'Rail assembly',dirty:true,saved_revision:null,external_tracking:false,activity:[],recordings:[],
@@ -27,7 +35,7 @@ async function expandModelFolders(...names){
     if(!parent.open)await click(summary);
   }
 }
-const motionIcon={Move:'tab-motion',Physics:'tab-physics',Requirements:'tab-tests'};
+const motionIcon={Move:'tab-motion',Simulation:'tab-motion',Physics:'tab-physics',Requirements:'tab-tests'};
 async function chooseMotionTask(title){const icon=document.getElementById(motionIcon[title]);if(icon.getAttribute('aria-expanded')!=='true')await click(icon);}
 async function openMotion(){const panel=document.getElementById('panel-motion');if(panel.hidden)await chooseMotionTask(panel.getAttribute('aria-label'));}
 async function openMotionSection(title){await click([...document.querySelectorAll('#panel-motion .motion-disclosure>summary')].find(summary=>summary.textContent.startsWith(title)));}
@@ -95,10 +103,12 @@ beforeEach(async()=>{
     if(command==='agent_settings')return {provider:'fixture',model:'test-model',configured:true,credential_storage:'fixture'};
     if(command==='mcp_settings')return {config:{},bridge_installed:true,sessions:[]};
     if(command==='motion_tests')return {catalog:'fixture-catalog',tests:[],accuracy:'Synthetic test fixture',snapshot:null};
+    if(command==='motion')return structuredClone(project.motion);
     if(command==='inspect')return {revision:'r1',pose_version:0,entities:[{reference:args.args.entities[0],kind:'part',volume:6000,area:1000,bounds:{size:[200,30,10]}}]};
     if(command==='joint_coordinate')return {snapshot:{...project.motion,pose_version:1,joints:[{...project.motion.joints[0],coordinate:args.request.coordinate}]}};
     if(command==='agent_start')return {id:'turn-1',workspace_id:project.workspace_id,state:'succeeded',text:'Done',activity:'Ready',artifacts:[]};
     if(command==='connect_view'){this.view=args.channel;return 'view-token';}
+    if(command==='model_history')return [];
     return {id:'job-1',state:'succeeded',diagnostics:{}};
   }};globalThis.__cadpadUiHarness=harness;
   root=createRoot(document.getElementById('root'));await act(async()=>{root.render(React.createElement(App));});await flush();
@@ -370,7 +380,7 @@ test('saved motion test renders measured failures and reruns through the catalog
   assert.match(document.querySelector('.test-definition').textContent,/0 of 1 requirements met/);
   await click(button('Check again'));
   const request=harness.calls.findLast(([name,args])=>name==='motion_tests'&&args.request.command.action==='start_run')[1].request;
-  assert.deepEqual(request,{workspace_id:'workspace-1',revision:'r1',expected_catalog:'catalog-2',command:{action:'start_run',id:'push'}});
+  assert.deepEqual(request,{workspace_id:'workspace-1',revision:'r1',expected_catalog:'catalog-2',command:{action:'start_run',id:'push'},model_views:[]});
   assert.ok(calls>=2);
   await click(button('Inspect replay'));
   assert.ok(document.querySelector('[aria-label="Requirement replay time"]'));
@@ -574,7 +584,7 @@ test('motion test Stop during pending start stays bound to the original document
   runs['workspace-1']=testRun('workspace-1');
   await act(async()=>{start.resolve(motionTestReply(runs['workspace-1']));await new Promise(resolve=>setTimeout(resolve,15));});
   const stops=harness.calls.filter(([name,args])=>name==='motion_tests'&&args.request.command.action==='cancel_run').map(([,args])=>args.request);
-  assert.deepEqual(stops,[{workspace_id:'workspace-1',revision:'r1',expected_catalog:null,command:{action:'cancel_run',run_id:'run-workspace-1'}}]);
+  assert.deepEqual(stops,[{workspace_id:'workspace-1',revision:'',expected_catalog:null,command:{action:'cancel_run',run_id:'run-workspace-1'},model_views:[]}]);
   assert.match(document.querySelector('.test-run-status').textContent,/Check queued/);
   assert.equal(button('Stop check').disabled,false);
   assert.equal(document.querySelector('.document-name').textContent,'Second document');

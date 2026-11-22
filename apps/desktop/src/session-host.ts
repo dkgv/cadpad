@@ -16,6 +16,10 @@ export type SessionHost={
   /** Workspace of the focused canvas tab (Explorer / agent edits follow this). */
   focusWorkspace:string;
   focusModelEntry?:{entry:string;builder:string};
+  /** Project models that have a workspace for the current project sources. */
+  modelViews?:()=>{entry:string;builder:string;workspace:string}[];
+  /** Resolve (or build in the background, without a tab) a project model's workspace. */
+  ensureModelView?:(entry:string,builder:string)=>Promise<{workspace:string;revision:string}>;
   /** Model chosen in Explorer that is still opening. */
   openingModel?:{entry:string;builder:string};
   focusSelection?:SelectionContext;

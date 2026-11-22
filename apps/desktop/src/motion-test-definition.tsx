@@ -7,7 +7,8 @@ type Body={type:'fixed'|'dynamic';friction:number;restitution:number;mass?:{type
 type Check={type:'displacement';body:string;direction:Vector;minimum_mm:number}
   |{type:'coordinate';joint_id:string;target:number;unit:string;tolerance:number}
   |{type:'push';pusher:string;receiver:string;driver_joint:string;direction:Vector;minimum_mm:number;minimum_additional_mm:number;minimum_sampled_impulse_ns:number};
-export type MotionTestDefinition={name:string;intent:string;initial_coordinates?:Record<string,number>;simulation?:{gravity_m_s2:Vector;bodies:Record<string,Body>};actions:{ticks:number;motors:Motor[];loads:Record<string,Load>}[];checks:Check[]};
+export type ModelRef={entry:string;builder:string};
+export type MotionTestDefinition={name:string;intent:string;model?:ModelRef|null;initial_coordinates?:Record<string,number>;simulation?:{gravity_m_s2:Vector;bodies:Record<string,Body>};actions:{ticks:number;motors:Motor[];loads:Record<string,Load>}[];checks:Check[]};
 export type MotionTestMeasurement={label:string;actual:number;expected:number;unit:string;passed:boolean};
 export type MotionTestOutcome={passed:boolean;measurements:MotionTestMeasurement[]};
 export type MotionTestReview={requirement:string;checks:{statement:string;met:boolean|null;measurements:MotionTestMeasurement[]}[];summary:string};

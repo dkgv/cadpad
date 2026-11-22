@@ -271,6 +271,10 @@ details.step-summary[open]>.agent-steps{margin-top:6px}
 .motion-test>.test-heading{align-items:flex-start}.motion-test>.test-heading>strong{font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 .test-status{font-size:10px;padding:3px 6px;border-radius:4px}.test-status.ready{color:#28649e;background:#edf4fc}.test-status.stale{color:#86611e;background:var(--surface)3da}
 .test-original-requirement{margin:8px 0;color:var(--muted);font-size:11px}.test-original-requirement summary{cursor:pointer}.test-intent{font-size:12px;margin:8px 0}
+.requirement-group{margin:0 0 6px}.requirement-group+.requirement-group{margin-top:10px}
+.requirement-group-heading{display:flex;align-items:center;gap:6px;padding:6px 0;border-bottom:1px solid var(--line);font-size:11px;color:var(--muted)}.requirement-group-heading strong{color:var(--text-strong);font-size:12px}.requirement-group-heading small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.requirement-assign{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:11px}.requirement-assign select{flex:1;min-width:0}
+.test-composer select{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
 .test-definition{margin:10px 0;font-size:12px}.test-checks-heading{display:block;margin-bottom:8px}.test-checks-heading>span{display:block;font-size:11px;margin-top:4px}
 .test-criteria>.test-criterion{padding:8px;margin:0 0 7px;border-radius:5px}.test-criterion-copy{font-size:12px;line-height:1.5}
 .test-criterion-status{font-size:9px;padding:2px 5px;margin-bottom:2px}.test-measurements li{font-size:11px;margin:5px 0}.test-measurements small{font-variant-numeric:tabular-nums;margin-top:3px}

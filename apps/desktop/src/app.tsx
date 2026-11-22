@@ -11,7 +11,7 @@ import './style.css';
 import {Icon,humanLabel,errorSummary,ModelOpening,PropertySummary,type IconName} from './ui';
 import {ExternalLoads} from './loads';
 import {PhysicsSettings} from './physics-settings';
-import {Requirements} from './motion-tests';
+import {Requirements,useProjectModels} from './motion-tests';
 import {JointControl} from './joint-control';
 import {PanelResizeHandle,usePanelSizes} from './panel-resize';
 import {AssistantChatDock,chatTabIds,type ChatSummary} from './assistant-chats';
@@ -253,8 +253,11 @@ export function App({host}:{host?:SessionHost}={}) {
   },[references,omitted,project?.workspace_id,project?.revision]);
   const chatScope=()=>{
     const projectWs=hostRef.current?.projectWorkspace,focusWs=hostRef.current?.focusWorkspace;
-    if(hostRef.current?.chrome&&projectWs)return projectWs;
-    return focusWs||projectWs||activeWorkspace.current;
+    // Chats live in the project's chat book, which the chrome Assistant shows. Canvas sessions
+    // (e.g. Requirements → prepareMotionTest) must start turns there too, or the chat is invisible.
+    // sendPrompt passes the focused model separately as modelWorkspace.
+    if(projectWs)return projectWs;
+    return focusWs||activeWorkspace.current;
   };
   const [settingsOpen,setSettingsOpen]=useState(false),[mcpSettings,setMcpSettings]=useState<McpSettings|null>(null);
   const [agentActivity,setAgentActivity]=useState('');
@@ -426,7 +429,7 @@ export function App({host}:{host?:SessionHost}={}) {
       await sendPrompt(edit.text,edit.chatId,edit);
     }catch(error){setError(message(error));}finally{setEditingMessageBusy(false);}
   }
-  async function sendPrompt(submission?:string,chatId?:string,edit?:MessageEdit){
+  async function sendPrompt(submission?:string,chatId?:string,edit?:MessageEdit,modelWorkspace?:string){
     const latest=currentProject.current;
     const current=edit&&latest?.workspace_id===displayProject?.workspace_id?latest:displayProject||latest;
     // Chrome keeps one project chat book mounted across model canvases.
@@ -448,19 +451,21 @@ export function App({host}:{host?:SessionHost}={}) {
       if(targetChat)setChatMessages(current=>({...current,[targetChat]:next}));
     }
     try{
-      const candidates=remoteSelection?focusedSelection?.entities??[]:referencesNow.current;
+      // Geometry references belong to the shown model; a turn about another model starts without them.
+      const foreign=!!modelWorkspace&&modelWorkspace!==current.workspace_id;
+      const candidates=foreign?[]:remoteSelection?focusedSelection?.entities??[]:referencesNow.current;
       const attached=edit
         ?(edit.references??[]).map(({instance_id,entity_id})=>({revision:current.revision,instance_id,entity_id}))
         :current.revision===candidates[0]?.revision?candidates.filter(item=>!composerOmitted.has(entityKey(item))):[];
-      const image=edit?edit.image??null:attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
-      const turn=await invoke<AgentTurn>('agent_start',{workspace,...(current.workspace_id!==workspace?{modelWorkspace:current.workspace_id}:{}),prompt:submitted,references:attached,image,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
+      const image=edit?edit.image??null:foreign?null:attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
+      const turn=await invoke<AgentTurn>('agent_start',{workspace,...((modelWorkspace??current.workspace_id)!==workspace?{modelWorkspace:modelWorkspace??current.workspace_id}:{}),prompt:submitted,references:attached,image,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
       if(turn.workspace_id!==workspace)throw new Error('Agent reply belongs to another workspace');
       pending.turn=turn;
       dropPendingStart(pendingTab);
       if(turn.chat_id){if(['succeeded','failed','cancelled'].includes(turn.state))noteSettledChat(turn.chat_id,turn.id);else notePendingChat(turn.chat_id,turn.id);}
       if(chatScope()===workspace&&(!liveTurn.current||liveTurn.current.id===turn.id||liveTurn.current.id===previousId))showTurn(turn);
       if(pending.cancelRequested)await cancelAcceptedStart(pending);
-      if(chatScope()===workspace){if(!edit&&!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}await refreshChat(workspace);}
+      if(chatScope()===workspace){if(!edit&&!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);if(!foreign){setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}}await refreshChat(workspace);}
     }catch(error){
       dropPendingStart(pendingTab);
       if(pending.cancelRequested&&!pending.turn){if(chatScope()===workspace)void refreshChat(workspace).catch(()=>{});return;}
@@ -1173,9 +1178,13 @@ export function App({host}:{host?:SessionHost}={}) {
     return()=>window.clearTimeout(timer);
   },[project?.workspace_id,project?.revision,external?.changed,external?.fingerprint,external?.conflicts?.length,working,trackExternal,host?.openingModel]);
   useEffect(()=>{if(job?.state==='failed'&&external?.changed)setExternalReloadFailed(true);},[job?.state,external?.changed]);
-  function prepareMotionTest(intent:string,id?:string){
-    const request=(id?`Edit the saved CAD requirement with ID ${id}. List saved requirements and inspect its existing definition first.\n`:'Create a saved CAD requirement from this free-text requirement:\n')+intent+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';
-    setPanel('assistant');setPrompt(request);void sendPrompt(request);
+  /** Ask the assistant to save a requirement for a project model, which need not be open. */
+  async function prepareMotionTest(intent:string,model:{entry:string;builder:string}|null,id?:string){
+    // Models without a tab get a background workspace so the assistant can inspect them.
+    const view=model&&host?.ensureModelView?await host.ensureModelView(model.entry,model.builder):null;
+    const target=model?`the project model ${model.builder} in ${model.entry}`:'this design';
+    const request=(id?`Edit the saved CAD requirement with ID ${id} for ${target}. List saved requirements and inspect its existing definition first.\n`:`Create a saved CAD requirement for ${target} from this free-text requirement:\n`)+intent+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';
+    setPanel('assistant');setPrompt(request);await sendPrompt(request,undefined,undefined,view?.workspace);
   }
   function intendedSelection(current:Project|null):Entity|null {
     const intent=selectionIntent.current;
@@ -1299,6 +1308,17 @@ export function App({host}:{host?:SessionHost}={}) {
 
 
 </div>);
+  // Requirements belong to the project: the shared sidebar shows them for every model.
+  const requirementModels=useProjectModels(host?.chrome||!host?project?.workspace_id:undefined,host?.chrome||!host?project?.revision:undefined);
+  const requirementsBody=project&&<Requirements project={project.workspace_id} projectRevision={project.revision} projectRunnable={project.model.parts.length>0}
+    models={requirementModels} focusedModel={host?host.focusModelEntry??null:null}
+    modelViews={()=>host?.modelViews?.()??[]}
+    ensureView={host?.ensureModelView?model=>host.ensureModelView!(model.entry,model.builder):undefined}
+    openModel={host?.onOpenModel?model=>host.onOpenModel!(model.entry,model.builder):undefined}
+    onSnapshot={snapshot=>{if(snapshot.workspace_id!==project.workspace_id)return;setSimulationRunning(false);setPlaybackRunning(false);pendingTargets.current.clear();receiveMotion(snapshot);}}
+    onChanged={()=>{const workspace=project.workspace_id;void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace&&currentProject.current?.revision===next.revision){currentProject.current=next;setProject(next);}}).catch(e=>setError(message(e)));}}
+    agentBusy={agentWorking||agentSending} onCreate={(intent,model)=>prepareMotionTest(intent,model)} onEdit={(id,intent,model)=>prepareMotionTest(intent,model,id)}/>;
+  const requirementsPanel=(<aside className="motion-sidebar inspector-page" id="panel-test" aria-label="Requirements"><div className="motion-sidebar-content">{requirementsBody}</div></aside>);
   const explorer=displayProject||project;
   const selectedMesh=explorer?.model.parts.some(part=>part.instance_id===selection?.instance_id&&part.accuracy==='mesh');
   const modelPanel=(          <aside className="model-browser explorer-panel inspector-page" id="panel-model" aria-label="Explorer" hidden={!host&&!modelOpen}>
@@ -1328,7 +1348,7 @@ export function App({host}:{host?:SessionHost}={}) {
       <div hidden={task!=='move'&&task!=='simulate'}>
       {task==='move'&&(project?.model.parts.length??0)>1&&<details className="motion-disclosure"><summary>Check for overlapping parts<small>Inspect the current position</small></summary><section className="motion-interference"><h3>Check for overlapping parts</h3><p className="muted">Check the exact geometry at the current position. Move the joints to check another position.</p><button disabled={checkingInterference} onClick={()=>void checkInterference()}>{checkingInterference?'Checking exact geometry…':'Check interference'}</button>{interferenceResult?.exact?.pairs.map(pair=><p key={pair.instances.join(':')}>{pair.instances.join(' ↔ ')}: {pair.interfering?`overlap ${pair.intersection_volume_mm3.toPrecision(4)} mm³`:`clearance ${pair.distance_mm.toPrecision(4)} mm`}<small className="muted"> · exact CAD at the settled pose</small></p>)}</section></details>}
           </div>
-          <div hidden={task!=='test'}>{project&&(!host||task==='test')&&<Requirements workspace={project.workspace_id} revision={project.revision} motion={motion} onSnapshot={snapshot=>{setSimulationRunning(false);setPlaybackRunning(false);pendingTargets.current.clear();receiveMotion(snapshot);}} onChanged={()=>{const workspace=project.workspace_id;void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace&&currentProject.current?.revision===next.revision){currentProject.current=next;setProject(next);}}).catch(e=>setError(message(e)));}} agentBusy={agentWorking||agentSending} onCreate={intent=>prepareMotionTest(intent)} onEdit={(id,intent)=>prepareMotionTest(intent,id)}/>}</div>
+          <div hidden={task!=='test'}>{!host&&task==='test'&&requirementsBody}</div>
         </div>
             </aside>);
   const importSetup=(!!importCandidates.length&&<div className="import-setup-backdrop"><section className="import-setup" role="dialog" aria-modal="true" aria-labelledby="import-setup-title"><header><h2 id="import-setup-title">Import model</h2><button className="icon-button" aria-label="Close import setup" onClick={()=>setImportCandidates([])}><Icon name="close" size={15}/></button></header><div className="import-setup-body"><p>Choose a model from this project folder.</p><div className="import-file-list" role="radiogroup" aria-label="Model file">{importCandidates.map(path=><button key={path} role="radio" aria-checked={importChoice===path} className={importChoice===path?'selected':''} onClick={()=>setImportChoice(path)}><Icon name="file" size={18}/><span>{path.split('/').at(-1)}</span><small>{path.split('.').at(-1)?.toUpperCase()}</small></button>)}</div><p className="import-setup-hint">The original file stays in your folder.</p></div><footer><button disabled={working} onClick={()=>setImportCandidates([])}>Skip for now</button><button className="primary-button" disabled={working||!importChoice} onClick={()=>{const path=importChoice;setImportCandidates([]);void run('import_model',{selectedPath:path});}}><Icon name="import" size={14}/>Import</button></footer></section></div>);
@@ -1463,7 +1483,7 @@ export function App({host}:{host?:SessionHost}={}) {
     {host.chrome&&createPortal(modelPanel,host.tools.model)}
     {host.active&&createPortal(motionPanel('move'),host.tools.move,'move')}
     {host.active&&createPortal(motionPanel('simulate'),host.tools.simulate,'simulate')}
-    {host.active&&createPortal(motionPanel('test'),host.tools.test,'test')}
+    {host.chrome&&createPortal(requirementsPanel,host.tools.test,'test')}
     {host.chrome&&createPortal(assistantPanel,host.tools.assistant)}
     {canvasPanel}{host.chrome&&createPortal(externalReview,host.changes)}{host.active&&dialogs}{host.active&&importSetup&&createPortal(importSetup,document.body)}
     {/* Shared chrome can outlive the canvas tab that owns its settings. */}

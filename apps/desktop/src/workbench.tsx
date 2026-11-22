@@ -264,6 +264,50 @@ export function Workbench(){
     if(jobId)void invoke('stop',{workspace,jobId}).catch(()=>{});
     void invoke('forget_workspace',{workspace}).catch(()=>{});
   }
+  /** Project models that already have a workspace for the current sources: open tabs first. */
+  function knownModelViews(){
+    const current=state.current;if(!current)return [];
+    const project=current.projectWorkspace||current.documents[0]?.workspace;
+    const source=project?projects.current.get(project):undefined;
+    const views=new Map<string,{entry:string;builder:string;workspace:string}>();
+    for(const [identity,view] of modelViews.current){
+      const [owner,entry,builder]=JSON.parse(identity) as string[];
+      if(owner===project&&view.sourceRevision===source?.revision)views.set(JSON.stringify([entry,builder]),{entry,builder,workspace:view.workspace});
+    }
+    for(const doc of current.documents)if(!doc.pending&&doc.modelEntry?.project===project)views.set(JSON.stringify([doc.modelEntry.entry,doc.modelEntry.builder]),{entry:doc.modelEntry.entry,builder:doc.modelEntry.builder,workspace:doc.workspace});
+    return [...views.values()];
+  }
+  /** A built workspace for a project model, without opening a tab (requirements, assistant). */
+  async function ensureModelView(entry:string,builder:string){
+    const current=state.current;if(!current)throw new Error('No project is open');
+    const project=current.projectWorkspace||current.documents[0]?.workspace;
+    const identity=JSON.stringify([project,entry,builder]);
+    let workspace=knownModelViews().find(view=>view.entry===entry&&view.builder===builder)?.workspace;
+    if(!workspace){
+      const pending=openingModels.current.get(identity);
+      if(pending&&!pending.cancelled){await pending.promise;workspace=knownModelViews().find(view=>view.entry===entry&&view.builder===builder)?.workspace;}
+    }
+    if(!workspace){
+      const source=projects.current.get(project);
+      if(!source)throw new Error('The project is still loading');
+      const result=await invoke<{project:Project;job:unknown}>('open_project_model',{workspace:source.workspace_id,revision:source.revision,entry,builder,cachedView:modelViews.current.get(identity)?.workspace});
+      workspace=result.project.workspace_id;
+      if(modelViews.current.size>=128&&!modelViews.current.has(identity))modelViews.current.delete(modelViews.current.keys().next().value!);
+      modelViews.current.set(identity,{workspace,sourceRevision:source.revision});
+    }
+    for(let attempt=0;attempt<2400;attempt++){
+      let view:Project;
+      try{view=await invoke<Project>('project',{workspace});}
+      catch(error){
+        // A cached background view can disappear (forgotten workspace); open it afresh once.
+        if(attempt||current.documents.some(doc=>doc.workspace===workspace)||modelViews.current.get(identity)?.workspace!==workspace)throw error;
+        modelViews.current.delete(identity);return ensureModelView(entry,builder);
+      }
+      if(!view.activity.some(job=>job.state==='queued'||job.state==='running'))return {workspace,revision:view.revision};
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+    throw new Error('The model is still building; try again shortly');
+  }
   async function openModel(document:string,entry:string,builder:string,sourceReload?:Promise<void>){
     const started=performance.now();
     const current=state.current,source=current?.documents.find(doc=>doc.id===document)
@@ -639,6 +683,7 @@ export function Workbench(){
     }).map(doc=>{
       const sessionHost:SessionHost={
         workspaceId:doc.workspace,modelEntry:doc.modelEntry,onOpenModel:(entry,builder,sourceReload)=>openModel(doc.id,entry,builder,sourceReload),
+        modelViews:knownModelViews,ensureModelView,
         openTiming:openTimings.current.get(doc.id),
         active:doc.id===layout.focus,chrome:doc.id===chromeId.current,visible:visible.has(doc.id),
         projectWorkspace,focusWorkspace,focusModelEntry:focusDoc?.modelEntry,openingModel:focusDoc?.opening||focusDoc?.checkingSource?focusDoc.modelEntry:undefined,focusSelection:selections[focusWorkspace],
