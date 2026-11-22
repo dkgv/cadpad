@@ -216,8 +216,9 @@ impl Core {
         folder: bool,
     ) -> Result<portable::Binding> {
         let _memory = self.pin_workspace(workspace_id).await?;
+        let project_tests = self.project_requirements(workspace_id).await?;
         let _publication = self.blob_publication.read().await;
-        let (stored, directory, expected_disk) = {
+        let (mut stored, directory, expected_disk) = {
             let workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces
                 .get(workspace_id)
@@ -266,6 +267,25 @@ impl Core {
         if let Some(origin) = stored.python_origin.clone() {
             blocking(move || crate::origins::unchanged(&origin, None)).await?;
         }
+        // A model view writes the project's requirements, checked against the
+        // archive digest last known on disk (project's or, for older views, its own).
+        if let Some((catalog, project)) = project_tests {
+            stored.motion_tests = catalog;
+            if let (Some(binding), Some(project)) = (stored.project.as_mut(), project)
+                && binding.directory == project.directory
+                && binding.motion_tests != project.motion_tests
+            {
+                let disk = binding.directory.clone();
+                let on_disk = blocking(move || portable::read_project_metadata(&disk))
+                    .await
+                    .ok()
+                    .and_then(|loaded| loaded.manifest.motion_tests);
+                if on_disk == project.motion_tests {
+                    binding.motion_tests = project.motion_tests;
+                    binding.motion_test_fingerprint = project.motion_test_fingerprint;
+                }
+            }
+        }
         let revisions = stored.revisions.clone();
         let current = stored.current.clone();
         let blobs = self.root.join("blobs");
@@ -302,6 +322,9 @@ impl Core {
         next.python_origin = None;
         self.persist(&next).await?;
         ws.stored = next;
+        drop(workspaces);
+        self.note_project_requirements_saved(workspace_id, &binding)
+            .await?;
         Ok(binding)
     }
     pub async fn scan_external_changes(&self, workspace_id: &str) -> Result<Value> {

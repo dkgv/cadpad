@@ -48,11 +48,22 @@ pub enum Check {
         minimum_sampled_impulse_ns: f64,
     },
 }
+/// A model in the project's source catalog: source file plus builder ID.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRef {
+    pub entry: String,
+    pub builder: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
     pub name: String,
     pub intent: String,
+    /// Project model this requirement checks. Omit when saving from a model's
+    /// workspace: that model is recorded. None means the addressed design itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
     /// Every moving joint must have an explicit starting coordinate, m/rad.
     pub initial_coordinates: BTreeMap<String, f64>,
     pub simulation: dynamics::Definition,
@@ -111,7 +122,11 @@ pub struct TestInfo {
     pub outcome: Option<Outcome>,
     /// Deterministic plain-language requirements and results for agents/MCP/UI.
     pub review: TestReview,
+    /// No result, or the result belongs to another design of this model or engine.
     pub stale: bool,
+    /// False when no workspace of the requirement's model was available to
+    /// compare: stale then reflects only engine changes, not design edits.
+    pub design_compared: bool,
     pub frame_count: usize,
     pub duration_s: f64,
 }
@@ -144,15 +159,27 @@ pub enum Command {
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Control {
+    /// A model's workspace (to run, replay or inspect against that model) or
+    /// the project workspace (catalog edits only). Model workspaces of one
+    /// project share a single requirement catalog stored on the project.
     pub workspace_id: String,
+    /// Current revision of workspace_id. Required for run/replay; empty skips
+    /// the design check for list/upsert/delete.
+    #[serde(default)]
     pub revision: String,
     /// Returned by list. Required for edits/runs to prevent lost updates.
     pub expected_catalog: Option<String>,
     pub command: Command,
+    /// Other model workspaces of the same project. Each requirement's stale
+    /// flag is compared against the listed workspace of its model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_views: Vec<String>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Reply {
     pub catalog: String,
+    /// Workspace that stores this catalog (the project for model workspaces).
+    pub project_workspace: String,
     pub tests: Vec<TestInfo>,
     pub accuracy: String,
     pub snapshot: Option<motion::Snapshot>,
@@ -219,6 +246,13 @@ impl Definition {
             return Err(invalid(
                 "Test needs a name, bounded intent, bodies, 1..16 actions and 1..16 checks",
             ));
+        }
+        if let Some(model) = &self.model
+            && [&model.entry, &model.builder].iter().any(|value| {
+                value.trim().is_empty() || value.len() > 1024 || value.chars().any(char::is_control)
+            })
+        {
+            return Err(invalid("Model needs a source entry and builder ID"));
         }
         let mut ticks = 0_u64;
         for action in &self.actions {
@@ -552,25 +586,214 @@ pub(crate) fn load(root: &std::path::Path, digest: Option<&str>) -> Result<Catal
     Ok(catalog)
 }
 
+/// A design workspace as seen by the requirements catalog. Model views of a
+/// project share the project's catalog; standalone workspaces own their own.
+#[derive(Clone)]
+pub(crate) struct View {
+    id: String,
+    revision: String,
+    /// Workspace that stores the requirement catalog.
+    owner: String,
+    /// The project model this view displays; None for the project/standalone design.
+    model: Option<ModelRef>,
+    inputs: String,
+    rebuild_required: bool,
+    /// Copy of the catalog left in a model view by earlier versions.
+    legacy: Catalog,
+}
+fn stale_error(message: &str) -> Error {
+    Error::domain("STALE_ENTITY", message)
+}
+
 impl Core {
+    /// Requirements are stored once per project, on the workspace that model
+    /// views branch from. Standalone workspaces store their own.
+    pub(crate) async fn requirement_owner(&self, workspace_id: &str) -> Result<String> {
+        let parent = {
+            let all = self.workspace_metadata(workspace_id).await?;
+            all[workspace_id].stored.model_parent.clone()
+        };
+        Ok(match parent {
+            Some(parent) if self.has_workspace(&parent).await => parent,
+            _ => workspace_id.to_owned(),
+        })
+    }
+    async fn requirement_view(&self, workspace_id: &str) -> Result<View> {
+        let owner = self.requirement_owner(workspace_id).await?;
+        let all = self.workspace(workspace_id).await?;
+        let ws = all
+            .get(workspace_id)
+            .ok_or_else(|| invalid("Unknown workspace"))?;
+        let revision = ws.stored.current_revision();
+        let model = (owner != workspace_id)
+            .then(|| crate::project_entry::inputs_model_entry(&revision.inputs))
+            .flatten()
+            .map(|(entry, builder)| ModelRef { entry, builder });
+        Ok(View {
+            id: workspace_id.to_owned(),
+            revision: ws.stored.current.clone(),
+            owner,
+            model,
+            inputs: portable::fingerprint(&revision.inputs)?,
+            rebuild_required: revision.model["rebuild_required"] == true,
+            legacy: ws.stored.motion_tests.clone(),
+        })
+    }
+    /// Earlier versions copied the project catalog into every model view and
+    /// edited that copy. Fold such copies into the project once, assigning
+    /// requirements that only exist in the view to the view's model.
+    async fn adopt_view_requirements(&self, view: &View, actor: &str) -> Result<()> {
+        if view.owner == view.id || view.legacy.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut all = self.workspace(&view.owner).await?;
+            let ws = all
+                .get_mut(&view.owner)
+                .ok_or_else(|| invalid("Unknown project workspace"))?;
+            let mut next = ws.stored.motion_tests.clone();
+            for (id, saved) in &view.legacy {
+                if next.contains_key(id) {
+                    continue;
+                }
+                let mut saved = saved.clone();
+                if saved.definition.model.is_none() {
+                    saved.definition.model = view.model.clone();
+                }
+                next.insert(id.clone(), saved);
+            }
+            if next.len() != ws.stored.motion_tests.len() {
+                // Over capacity: keep the view copy so nothing is silently lost.
+                if encode(&next).is_err() {
+                    return Ok(());
+                }
+                let mut stored = ws.stored.clone();
+                stored.motion_tests = next;
+                self.persist(&stored).await?;
+                ws.stored = stored;
+                let _ = self.activity.send(crate::events::Activity {
+                    workspace_id: view.owner.clone(),
+                    kind: "motion_tests_changed".into(),
+                    job: None,
+                    actor: Some(actor.into()),
+                    tool: Some("control_motion_tests".into()),
+                });
+            }
+        }
+        let mut all = self.workspace(&view.id).await?;
+        if let Some(ws) = all.get_mut(&view.id)
+            && !ws.stored.motion_tests.is_empty()
+        {
+            let mut stored = ws.stored.clone();
+            stored.motion_tests.clear();
+            self.persist(&stored).await?;
+            ws.stored = stored;
+        }
+        Ok(())
+    }
+    /// The addressed workspace plus any listed model views of the same project,
+    /// used to tell whether each requirement's last result matches its model.
+    async fn requirement_views(&self, addressed: &View, listed: &[String]) -> Vec<View> {
+        let mut views = vec![addressed.clone()];
+        for id in listed.iter().take(64) {
+            if views.iter().any(|view| view.id == *id) {
+                continue;
+            }
+            if let Ok(view) = self.requirement_view(id).await
+                && view.owner == addressed.owner
+                && view.owner != view.id
+            {
+                views.push(view);
+            }
+        }
+        views
+    }
+    /// For a model view: the project's requirements and save binding, which
+    /// saving and unsaved-change tracking use instead of the view's own.
+    pub(crate) async fn project_requirements(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<(Catalog, Option<portable::Binding>)>> {
+        let owner = self.requirement_owner(workspace_id).await?;
+        if owner == workspace_id {
+            return Ok(None);
+        }
+        let legacy = {
+            let all = self.workspace(workspace_id).await?;
+            all.get(workspace_id)
+                .is_some_and(|ws| !ws.stored.motion_tests.is_empty())
+        };
+        if legacy {
+            let view = self.requirement_view(workspace_id).await?;
+            self.adopt_view_requirements(&view, "local-user").await?;
+        }
+        let all = self.workspace(&owner).await?;
+        let ws = all
+            .get(&owner)
+            .ok_or_else(|| invalid("Unknown project workspace"))?;
+        Ok(Some((ws.stored.motion_tests.clone(), ws.stored.project.clone())))
+    }
+    /// After a model view saved into the project folder, record the written
+    /// requirement archive on the project's binding too.
+    pub(crate) async fn note_project_requirements_saved(
+        &self,
+        workspace_id: &str,
+        saved: &portable::Binding,
+    ) -> Result<()> {
+        let owner = self.requirement_owner(workspace_id).await?;
+        if owner == workspace_id {
+            return Ok(());
+        }
+        let mut all = self.workspace(&owner).await?;
+        let Some(ws) = all.get_mut(&owner) else {
+            return Ok(());
+        };
+        let Some(binding) = ws.stored.project.as_ref() else {
+            return Ok(());
+        };
+        if binding.directory != saved.directory
+            || (binding.motion_tests == saved.motion_tests
+                && binding.motion_test_fingerprint == saved.motion_test_fingerprint)
+        {
+            return Ok(());
+        }
+        let mut stored = ws.stored.clone();
+        let binding = stored.project.as_mut().unwrap();
+        binding.motion_tests = saved.motion_tests.clone();
+        binding.motion_test_fingerprint = saved.motion_test_fingerprint.clone();
+        self.persist(&stored).await?;
+        ws.stored = stored;
+        Ok(())
+    }
+    async fn catalog(&self, owner: &str) -> Result<Catalog> {
+        let all = self.workspace(owner).await?;
+        Ok(all
+            .get(owner)
+            .ok_or_else(|| invalid("Unknown workspace"))?
+            .stored
+            .motion_tests
+            .clone())
+    }
+
     pub async fn control_motion_tests(&self, actor: &str, args: Control) -> Result<Reply> {
         let _memory = self.pin_workspace(&args.workspace_id).await?;
         use crate::motion_test_runs::{CancelOnDrop, Lease};
         self.ensure_actor_active(actor)?;
+        let addressed = self.requirement_view(&args.workspace_id).await?;
+        let _owner_memory = self.pin_workspace(&addressed.owner).await?;
+        self.adopt_view_requirements(&addressed, actor).await?;
+        let owner = addressed.owner.clone();
         if let Command::CancelRun { run_id } = &args.command {
             // Serialize Stop with the result's final commit, but allow it after
             // a design revision/catalog change: the operation ID is explicit.
-            let workspaces = self.workspace(&args.workspace_id).await?;
-            let ws = workspaces
-                .get(&args.workspace_id)
-                .ok_or_else(|| invalid("Unknown workspace"))?;
-            self.motion_test_runs
-                .stop(&args.workspace_id, run_id, actor)?;
+            self.motion_test_runs.stop(&owner, run_id, actor)?;
+            let views = self.requirement_views(&addressed, &args.model_views).await;
             return reply(
-                &ws.stored.motion_tests,
-                &ws.stored.current,
+                &self.catalog(&owner).await?,
+                &addressed,
+                &views,
                 None,
-                self.motion_test_runs.status(&args.workspace_id),
+                self.motion_test_runs.status(&owner),
             );
         }
         let test_id = match &args.command {
@@ -581,37 +804,29 @@ impl Core {
             return self.control_motion_tests_inner(actor, args, None).await;
         };
         let (lease, accepted) = {
-            let workspaces = self.workspace(&args.workspace_id).await?;
-            let ws = workspaces
-                .get(&args.workspace_id)
-                .ok_or_else(|| invalid("Unknown workspace"))?;
-            if ws.stored.current != args.revision {
-                return Err(Error::domain("STALE_ENTITY", "Design revision changed"));
+            if addressed.revision != args.revision {
+                return Err(stale_error("Design revision changed"));
             }
-            if args.expected_catalog.as_deref() != Some(&fingerprint(&ws.stored.motion_tests)?) {
+            let catalog = self.catalog(&owner).await?;
+            if args.expected_catalog.as_deref() != Some(&fingerprint(&catalog)?) {
                 return Err(Error::domain(
                     "REVISION_CONFLICT",
                     "Motion tests changed; list before running",
                 ));
             }
-            let saved = ws
-                .stored
-                .motion_tests
+            let saved = catalog
                 .get(&test_id)
                 .ok_or_else(|| invalid("Unknown test"))?;
             saved.definition.validate()?;
-            if ws.stored.current_revision().model["rebuild_required"] == true {
+            check_target(&saved.definition, &addressed)?;
+            if addressed.rebuild_required {
                 return Err(invalid("Build the design before running tests"));
             }
             let lease: Lease =
                 self.motion_test_runs
-                    .start(&args.workspace_id, &args.revision, &test_id, actor)?;
-            let accepted = reply(
-                &ws.stored.motion_tests,
-                &args.revision,
-                None,
-                Some(lease.status()),
-            )?;
+                    .start(&owner, &args.revision, &test_id, actor)?;
+            let views = self.requirement_views(&addressed, &args.model_views).await;
+            let accepted = reply(&catalog, &addressed, &views, None, Some(lease.status()))?;
             (lease, accepted)
         };
         let background = matches!(args.command, Command::StartRun { .. });
@@ -648,7 +863,7 @@ impl Core {
                 deadline_lease.timeout();
             });
             let _watchers = Watchers(vec![actor_watch, deadline_watch]);
-            let workspace = args.workspace_id.clone();
+            let view = args.workspace_id.clone();
             let mut result = core
                 .control_motion_tests_inner(&actor, args, Some(task_lease.clone()))
                 .await;
@@ -656,13 +871,15 @@ impl Core {
             if let Ok(reply) = &mut result {
                 reply.run = status;
             }
-            let _ = core.activity.send(crate::events::Activity {
-                workspace_id: workspace,
-                kind: "motion_test_run_changed".into(),
-                job: None,
-                actor: Some(actor),
-                tool: Some("control_motion_tests".into()),
-            });
+            for workspace_id in std::collections::BTreeSet::from([owner, view]) {
+                let _ = core.activity.send(crate::events::Activity {
+                    workspace_id,
+                    kind: "motion_test_run_changed".into(),
+                    job: None,
+                    actor: Some(actor.clone()),
+                    tool: Some("control_motion_tests".into()),
+                });
+            }
             let _ = send.send(result);
         });
         if background {
@@ -684,41 +901,46 @@ impl Core {
     ) -> Result<Reply> {
         let _memory = self.pin_workspace(&args.workspace_id).await?;
         self.ensure_actor_active(actor)?;
-        let (mut next, revision) = {
-            let workspaces = self.workspace(&args.workspace_id).await?;
-            let ws = workspaces
-                .get(&args.workspace_id)
+        let addressed = self.requirement_view(&args.workspace_id).await?;
+        let owner = addressed.owner.clone();
+        let _owner_memory = self.pin_workspace(&owner).await?;
+        // Catalog edits are guarded by the catalog fingerprint. Runs and replays
+        // also need the addressed design to be the one the caller saw.
+        let design_bound = matches!(args.command, Command::Run { .. } | Command::Replay { .. });
+        if (design_bound || !args.revision.is_empty()) && addressed.revision != args.revision {
+            return Err(stale_error("Design revision changed"));
+        }
+        let views = self.requirement_views(&addressed, &args.model_views).await;
+        let run_revision = if matches!(args.command, Command::Run { .. }) {
+            let all = self.workspace(&addressed.id).await?;
+            let ws = all
+                .get(&addressed.id)
                 .ok_or_else(|| invalid("Unknown workspace"))?;
             if ws.stored.current != args.revision {
-                return Err(Error::domain("STALE_ENTITY", "Design revision changed"));
+                return Err(stale_error("Design revision changed"));
             }
-            if matches!(args.command, Command::List) {
-                return reply(
-                    &ws.stored.motion_tests,
-                    &args.revision,
-                    None,
-                    self.motion_test_runs.status(&args.workspace_id),
-                );
-            }
-            let current = fingerprint(&ws.stored.motion_tests)?;
-            if !matches!(args.command, Command::List)
-                && args.expected_catalog.as_deref() != Some(&current)
-            {
-                return Err(Error::domain(
-                    "REVISION_CONFLICT",
-                    "Motion tests changed; list and review before retrying",
-                ));
-            }
-            (
-                if matches!(args.command, Command::Replay { .. }) {
-                    BTreeMap::new()
-                } else {
-                    ws.stored.motion_tests.clone()
-                },
-                matches!(args.command, Command::Run { .. })
-                    .then(|| ws.stored.current_revision().clone()),
-            )
+            Some(ws.stored.current_revision().clone())
+        } else {
+            None
         };
+        let catalog = self.catalog(&owner).await?;
+        if matches!(args.command, Command::List) {
+            return reply(
+                &catalog,
+                &addressed,
+                &views,
+                None,
+                self.motion_test_runs.status(&owner),
+            );
+        }
+        let current = fingerprint(&catalog)?;
+        if args.expected_catalog.as_deref() != Some(&current) {
+            return Err(Error::domain(
+                "REVISION_CONFLICT",
+                "Motion tests changed; list and review before retrying",
+            ));
+        }
+        let mut next = catalog;
         let changed = matches!(
             args.command,
             Command::Upsert { .. } | Command::Delete { .. } | Command::Run { .. }
@@ -726,11 +948,16 @@ impl Core {
         match &args.command {
             Command::List | Command::Replay { .. } => (),
             Command::Upsert { id, definition } => {
+                let mut definition = definition.clone();
+                // A requirement saved from a model view checks that model.
+                if definition.model.is_none() {
+                    definition.model = addressed.model.clone();
+                }
                 definition.validate()?;
                 next.insert(
                     id.clone(),
                     Saved {
-                        definition: definition.clone(),
+                        definition,
                         last_run: None,
                     },
                 );
@@ -742,7 +969,7 @@ impl Core {
                 let lease = lease
                     .as_ref()
                     .ok_or_else(|| invalid("Missing simulation run lease"))?;
-                let revision = revision.ok_or_else(|| invalid("Missing test revision"))?;
+                let revision = run_revision.ok_or_else(|| invalid("Missing test revision"))?;
                 if revision.model["rebuild_required"] == true {
                     return Err(invalid("Build the design before running tests"));
                 }
@@ -751,6 +978,7 @@ impl Core {
                     .ok_or_else(|| invalid("Unknown test"))?
                     .definition
                     .clone();
+                check_target(&definition, &addressed)?;
                 let cancel = lease.signal();
                 // Bounded construction admission also bounds CPU simulation runs.
                 let permit = self.construction_slot(cancel.clone()).await?;
@@ -758,33 +986,22 @@ impl Core {
                 // A queued run must not spend CPU on a catalog/design already
                 // superseded while it waited for construction admission.
                 self.ensure_actor_active(actor)?;
-                {
-                    let workspaces = self.workspace(&args.workspace_id).await?;
-                    let ws = workspaces
-                        .get(&args.workspace_id)
-                        .ok_or_else(|| invalid("Unknown workspace"))?;
-                    if ws.stored.current != args.revision {
-                        return Err(Error::domain(
-                            "STALE_ENTITY",
-                            "Design changed while the test was queued",
-                        ));
-                    }
-                    if args.expected_catalog.as_deref()
-                        != Some(&fingerprint(&ws.stored.motion_tests)?)
-                    {
-                        return Err(Error::domain(
-                            "REVISION_CONFLICT",
-                            "Motion tests changed while the run was queued",
-                        ));
-                    }
+                if self.requirement_view(&addressed.id).await?.revision != args.revision {
+                    return Err(stale_error("Design changed while the test was queued"));
+                }
+                if fingerprint(&self.catalog(&owner).await?)? != current {
+                    return Err(Error::domain(
+                        "REVISION_CONFLICT",
+                        "Motion tests changed while the run was queued",
+                    ));
                 }
                 lease.running();
                 let entered = lease.clone();
-                let owner = self._process_lock.clone();
+                let process = self._process_lock.clone();
                 let run = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
                     let _entered = entered;
-                    let _owner = owner;
+                    let _owner = process;
                     execute(&definition, &revision, &cancel)
                 })
                 .await
@@ -800,43 +1017,40 @@ impl Core {
                 lease.check()?;
             }
             encode(&next)?;
-        }
-        let mut workspaces = self.workspace(&args.workspace_id).await?;
-        self.ensure_actor_active(actor)?;
-        let ws = workspaces
-            .get_mut(&args.workspace_id)
-            .ok_or_else(|| invalid("Unknown workspace"))?;
-        if ws.stored.current != args.revision {
-            return Err(Error::domain(
-                "STALE_ENTITY",
-                "Design changed during test operation",
-            ));
-        }
-        if !matches!(args.command, Command::List)
-            && args.expected_catalog.as_deref() != Some(&fingerprint(&ws.stored.motion_tests)?)
-        {
-            return Err(Error::domain(
-                "REVISION_CONFLICT",
-                "Motion tests changed during operation",
-            ));
-        }
-        if changed {
+            if design_bound && self.requirement_view(&addressed.id).await?.revision != args.revision
+            {
+                return Err(stale_error("Design changed during test operation"));
+            }
+            let mut workspaces = self.workspace(&owner).await?;
+            self.ensure_actor_active(actor)?;
+            let ws = workspaces
+                .get_mut(&owner)
+                .ok_or_else(|| invalid("Unknown workspace"))?;
+            if fingerprint(&ws.stored.motion_tests)? != current {
+                return Err(Error::domain(
+                    "REVISION_CONFLICT",
+                    "Motion tests changed during operation",
+                ));
+            }
             // Copy only the catalog: unrelated jobs/title/save binding may have
             // changed while the private simulation ran.
             if let Some(lease) = &lease {
                 lease.check()?;
             }
             let mut stored = ws.stored.clone();
-            stored.motion_tests = next;
+            stored.motion_tests = next.clone();
             self.persist(&stored).await?;
             ws.stored = stored;
-            let _ = self.activity.send(crate::events::Activity {
-                workspace_id: args.workspace_id.clone(),
-                kind: "motion_tests_changed".into(),
-                job: None,
-                actor: Some(actor.into()),
-                tool: Some("control_motion_tests".into()),
-            });
+            drop(workspaces);
+            for workspace_id in std::collections::BTreeSet::from([owner.clone(), addressed.id.clone()]) {
+                let _ = self.activity.send(crate::events::Activity {
+                    workspace_id,
+                    kind: "motion_tests_changed".into(),
+                    job: None,
+                    actor: Some(actor.into()),
+                    tool: Some("control_motion_tests".into()),
+                });
+            }
         }
         let mut snapshot = None;
         if let Command::Replay {
@@ -845,23 +1059,27 @@ impl Core {
             expected_pose_version,
         } = &args.command
         {
-            let saved = ws
-                .stored
-                .motion_tests
-                .get(id)
-                .ok_or_else(|| invalid("Unknown test"))?;
+            let saved = next.get(id).ok_or_else(|| invalid("Unknown test"))?;
+            check_target(&saved.definition, &addressed)?;
             let run = saved
                 .last_run
                 .as_ref()
                 .ok_or_else(|| invalid("Run the test before replaying it"))?;
-            if run.revision != args.revision || run.engine != engine() {
-                return Err(Error::domain(
-                    "STALE_ENTITY",
+            if run.input_fingerprint != addressed.inputs || run.engine != engine() {
+                return Err(stale_error(
                     "Rerun this test for the current design and engine",
                 ));
             }
             let name = saved.definition.name.clone();
             let samples = run.samples.clone();
+            let mut workspaces = self.workspace(&addressed.id).await?;
+            self.ensure_actor_active(actor)?;
+            let ws = workspaces
+                .get_mut(&addressed.id)
+                .ok_or_else(|| invalid("Unknown workspace"))?;
+            if ws.stored.current != args.revision {
+                return Err(stale_error("Design changed during test operation"));
+            }
             let state = motion::state(ws)?;
             if state.version != *expected_pose_version || state.recorder.is_some() {
                 return Err(invalid(
@@ -887,11 +1105,25 @@ impl Core {
             snapshot = Some(value);
         }
         reply(
-            &ws.stored.motion_tests,
-            &args.revision,
+            &next,
+            &addressed,
+            &views,
             snapshot,
-            self.motion_test_runs.status(&args.workspace_id),
+            self.motion_test_runs.status(&owner),
         )
+    }
+}
+/// A requirement assigned to a model runs only in a view of that model.
+fn check_target(definition: &Definition, view: &View) -> Result<()> {
+    match &definition.model {
+        Some(model) if view.model.as_ref() != Some(model) => Err(Error::domain(
+            "INVALID_MOTION_TEST",
+            format!(
+                "This requirement checks {} ({}); open or prepare that model and address its workspace",
+                model.entry, model.builder
+            ),
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -1042,7 +1274,8 @@ pub fn test_review(definition: &Definition, outcome: Option<&Outcome>) -> TestRe
 }
 fn reply(
     catalog: &Catalog,
-    revision: &str,
+    addressed: &View,
+    views: &[View],
     snapshot: Option<motion::Snapshot>,
     run: Option<crate::motion_test_runs::Status>,
 ) -> Result<Reply> {
@@ -1051,15 +1284,20 @@ fn reply(
         .map(|(id, saved)| {
             let outcome = saved.last_run.as_ref().map(|run| run.outcome.clone());
             let review = test_review(&saved.definition, outcome.as_ref());
+            // Compare the last result with a known view of the requirement's model.
+            let view = match &saved.definition.model {
+                Some(model) => views.iter().find(|view| view.model.as_ref() == Some(model)),
+                None => Some(addressed),
+            };
             TestInfo {
                 id: id.clone(),
                 definition: saved.definition.clone(),
                 outcome,
                 review,
-                stale: saved
-                    .last_run
-                    .as_ref()
-                    .is_none_or(|run| run.revision != revision || run.engine != engine()),
+                stale: saved.last_run.as_ref().is_none_or(|run| {
+                    run.engine != engine() || view.is_some_and(|view| view.inputs != run.input_fingerprint)
+                }),
+                design_compared: view.is_some(),
                 frame_count: saved.last_run.as_ref().map_or(0, |run| run.samples.len()),
                 duration_s: saved
                     .last_run
@@ -1069,7 +1307,7 @@ fn reply(
             }
         })
         .collect();
-    Ok(Reply { catalog: fingerprint(catalog)?, tests, run,
+    Ok(Reply { catalog: fingerprint(catalog)?, project_workspace: addressed.owner.clone(), tests, run,
             accuracy: "Approximate collision proxies and inertia. Push checks use peak sampled last-substep normal impulse, not average force; motion compared with driver disabled. CAD simulation only.".into(), snapshot })
 }
 

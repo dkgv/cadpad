@@ -14822,7 +14822,7 @@
       }
     },
     {
-      "description": "Create/list/edit/delete/run/replay saved CAD simulation tests from natural-language intent. List first for catalog CAS. Ground body/joint IDs in get_project/get_motion; inspect the full mechanism before defining actions. Upsert saves a named intent, explicit initial coordinates for every moving joint (m/rad), body masses/friction/gravity, timed motor/load actions and measurable checks. Ask the user to resolve missing targets/tolerances rather than inventing a requirement. Every list/run/upsert reply includes tests[].review: the original requirement, plain-language acceptance statements, Met/Not met per check, and measured values — use that review when explaining the test; do not rephrase thresholds. Run uses a fresh private 1/120 s simulation and never changes live poses or geometry. Run waits for completion; start_run returns a queued run ID immediately. List reports the latest queued/running/cancelling/completed/cancelled/failed operation. After start_run, poll list for that same run ID to become terminal before interpreting results. Existing outcomes belong to the previous run while an operation is active. Completed means execution finished; outcome.passed determines assertion success. cancel_run takes that exact workspace-scoped run_id, requires its actor or the local user, and needs no catalog/revision freshness. Stop preserves the previous result and stays cancelling until entered CPU work ends. Actor revocation cancels owned runs. There is one active run per workspace, two per actor and eight per application; queued and cancelling runs count. A 60-second wall deadline signals cancellation at safe tick boundaries; it is not a hard thread kill. Push requires direct signed normal contact, final receiver displacement and additional displacement versus an identical run without the selected driver motor. Contact threshold is peak sampled last-solver-substep impulse in N s, not force or total impulse. Approximate verified collision proxies/inertia only. Reports pass/fail measurements with thresholds; results become stale when revision/engine changes. Replay selects an accepted frame into canonical playback for visual and exact pose inspection; use control_playback leave to restore live pose. Up to 16 tests, 10 seconds/run, 32768 body-frames and 8 MiB catalog. Definitions travel with Save/Open; imported runs must be rerun. CAD simulation only.",
+      "description": "Create/list/edit/delete/run/replay saved CAD simulation tests (requirements) from natural-language intent. A project keeps one requirement catalog shared by all of its model workspaces; each requirement records definition.model (source entry + builder) and is listed, run and replayed through that model's workspace. Address the model's workspace: upsert without definition.model assigns that model; run/replay of a requirement assigned to another model is rejected. Addressing the project workspace edits the catalog only. List first for catalog CAS. Ground body/joint IDs in get_project/get_motion; inspect the full mechanism before defining actions. Upsert saves a named intent, explicit initial coordinates for every moving joint (m/rad), body masses/friction/gravity, timed motor/load actions and measurable checks. Ask the user to resolve missing targets/tolerances rather than inventing a requirement. Every list/run/upsert reply includes tests[].review: the original requirement, plain-language acceptance statements, Met/Not met per check, and measured values — use that review when explaining the test; do not rephrase thresholds. Run uses a fresh private 1/120 s simulation and never changes live poses or geometry. Run waits for completion; start_run returns a queued run ID immediately. List reports the latest queued/running/cancelling/completed/cancelled/failed operation. After start_run, poll list for that same run ID to become terminal before interpreting results. Existing outcomes belong to the previous run while an operation is active. Completed means execution finished; outcome.passed determines assertion success. cancel_run takes that exact workspace-scoped run_id, requires its actor or the local user, and needs no catalog/revision freshness. Stop preserves the previous result and stays cancelling until entered CPU work ends. Actor revocation cancels owned runs. There is one active run per workspace, two per actor and eight per application; queued and cancelling runs count. A 60-second wall deadline signals cancellation at safe tick boundaries; it is not a hard thread kill. Push requires direct signed normal contact, final receiver displacement and additional displacement versus an identical run without the selected driver motor. Contact threshold is peak sampled last-solver-substep impulse in N s, not force or total impulse. Approximate verified collision proxies/inertia only. Reports pass/fail measurements with thresholds; results become stale when the model's inputs or the engine change; design_compared is false when no workspace of that model was available to compare. Replay selects an accepted frame into canonical playback for visual and exact pose inspection; use control_playback leave to restore live pose. Up to 16 tests, 10 seconds/run, 32768 body-frames and 8 MiB catalog. Definitions travel with Save/Open; imported runs must be rerun. CAD simulation only.",
       "input_schema": {
         "$defs": {
           "Action": {
@@ -15190,6 +15190,17 @@
               "intent": {
                 "type": "string"
               },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Project model this requirement checks. Omit when saving from a model's\nworkspace: that model is recorded. None means the addressed design itself."
+              },
               "name": {
                 "type": "string"
               },
@@ -15301,6 +15312,23 @@
               }
             ]
           },
+          "ModelRef": {
+            "additionalProperties": false,
+            "description": "A model in the project's source catalog: source file plus builder ID.",
+            "properties": {
+              "builder": {
+                "type": "string"
+              },
+              "entry": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry",
+              "builder"
+            ],
+            "type": "object"
+          },
           "Motor": {
             "additionalProperties": false,
             "properties": {
@@ -15352,16 +15380,25 @@
               "null"
             ]
           },
+          "model_views": {
+            "description": "Other model workspaces of the same project. Each requirement's stale\nflag is compared against the listed workspace of its model.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "revision": {
+            "default": "",
+            "description": "Current revision of workspace_id. Required for run/replay; empty skips\nthe design check for list/upsert/delete.",
             "type": "string"
           },
           "workspace_id": {
+            "description": "A model's workspace (to run, replay or inspect against that model) or\nthe project workspace (catalog edits only). Model workspaces of one\nproject share a single requirement catalog stored on the project.",
             "type": "string"
           }
         },
         "required": [
           "workspace_id",
-          "revision",
           "command"
         ],
         "title": "Control",
@@ -15632,6 +15669,17 @@
               },
               "intent": {
                 "type": "string"
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Project model this requirement checks. Omit when saving from a model's\nworkspace: that model is recorded. None means the addressed design itself."
               },
               "name": {
                 "type": "string"
@@ -15921,6 +15969,23 @@
             ],
             "type": "object"
           },
+          "ModelRef": {
+            "additionalProperties": false,
+            "description": "A model in the project's source catalog: source file plus builder ID.",
+            "properties": {
+              "builder": {
+                "type": "string"
+              },
+              "entry": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "entry",
+              "builder"
+            ],
+            "type": "object"
+          },
           "Motor": {
             "additionalProperties": false,
             "properties": {
@@ -16084,6 +16149,10 @@
               "catalog": {
                 "type": "string"
               },
+              "project_workspace": {
+                "description": "Workspace that stores this catalog (the project for model workspaces).",
+                "type": "string"
+              },
               "run": {
                 "anyOf": [
                   {
@@ -16113,6 +16182,7 @@
             },
             "required": [
               "catalog",
+              "project_workspace",
               "tests",
               "accuracy",
               "snapshot",
@@ -16592,6 +16662,10 @@
               "definition": {
                 "$ref": "#/$defs/Definition"
               },
+              "design_compared": {
+                "description": "False when no workspace of the requirement's model was available to\ncompare: stale then reflects only engine changes, not design edits.",
+                "type": "boolean"
+              },
               "duration_s": {
                 "format": "double",
                 "type": "number"
@@ -16619,6 +16693,7 @@
                 "description": "Deterministic plain-language requirements and results for agents/MCP/UI."
               },
               "stale": {
+                "description": "No result, or the result belongs to another design of this model or engine.",
                 "type": "boolean"
               }
             },
@@ -16628,6 +16703,7 @@
               "outcome",
               "review",
               "stale",
+              "design_compared",
               "frame_count",
               "duration_s"
             ],
@@ -17296,6 +17372,443 @@
         "anyOf": [
           {
             "$ref": "#/$defs/Job"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Apply a rigid transform (translate mm, rotate axis+angle_deg, per-axis scale, mirror_axis) to a managed STL mesh asset, then rebuild as a new revision. Use for simple dimensional tweaks on STL assets — inspect get_project's assets map for the asset key. Only .stl assets qualify; CadQuery/BRep parts must be edited through source or set_parameter. Returns a build job; poll get_job.",
+      "input_schema": {
+        "$defs": {
+          "AxisAngle": {
+            "additionalProperties": false,
+            "properties": {
+              "angle_deg": {
+                "description": "Rotation angle in degrees.",
+                "format": "double",
+                "type": "number"
+              },
+              "axis": {
+                "description": "Rotation axis in mesh coordinates; need not be unit length.",
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "axis",
+              "angle_deg"
+            ],
+            "type": "object"
+          },
+          "MirrorAxis": {
+            "enum": [
+              "x",
+              "y",
+              "z"
+            ],
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "asset": {
+            "description": "Managed asset key as listed by get_project (the `assets` map). Must be STL.",
+            "type": "string"
+          },
+          "draft_id": {
+            "description": "Continue an existing draft instead of starting a new one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_base_revision": {
+            "description": "Current committed revision the draft is based on.",
+            "type": "string"
+          },
+          "mirror_axis": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MirrorAxis"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rotate": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/AxisAngle"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Rotation about an axis through the origin, applied after scale."
+          },
+          "scale": {
+            "description": "Per-axis scale factors. Negative components mirror and flip winding.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "translate": {
+            "description": "Translation in millimetres, applied after scale and rotation.",
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "expected_base_revision",
+          "asset"
+        ],
+        "title": "TransformMesh",
+        "type": "object"
+      },
+      "name": "transform_mesh",
+      "output_schema": {
+        "$defs": {
+          "Job": {
+            "properties": {
+              "actor": {
+                "type": "string"
+              },
+              "created_at": {
+                "default": 0,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "diagnostics": true,
+              "draft_id": {
+                "type": "string"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "$ref": "#/$defs/JobKind",
+                "default": "build"
+              },
+              "resulting_revision": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "snapshot_id": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/JobState"
+              }
+            },
+            "required": [
+              "kind",
+              "id",
+              "draft_id",
+              "snapshot_id",
+              "actor",
+              "state",
+              "resulting_revision",
+              "diagnostics",
+              "created_at"
+            ],
+            "type": "object"
+          },
+          "JobKind": {
+            "enum": [
+              "build",
+              "repair_display"
+            ],
+            "type": "string"
+          },
+          "JobState": {
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/Job"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
+      "description": "Run heuristic printability checks on the current revision: watertight/manifold edges, degenerate triangles, build-volume fit, minimum feature size and overhang fraction for a process preset (fdm default, resin, sla, generic). Works on STL mesh projects and CadQuery projects (tessellated through export). Results are estimates for triage — not a slicer. Requires the current revision; pass pose_version for a posed mechanism.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "pose_version": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "process": {
+            "description": "fdm | resin | sla | generic. Defaults to fdm.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "description": "Must be the current committed revision.",
+            "type": "string"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "revision"
+        ],
+        "title": "CheckPrintability",
+        "type": "object"
+      },
+      "name": "check_printability",
+      "output_schema": {
+        "$defs": {
+          "Bounds": {
+            "properties": {
+              "max": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "min": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "size": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "min",
+              "max",
+              "size"
+            ],
+            "type": "object"
+          },
+          "PrintabilityReport": {
+            "properties": {
+              "approximate": {
+                "type": "boolean"
+              },
+              "boundary_edges": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "bounds_mm": {
+                "$ref": "#/$defs/Bounds"
+              },
+              "degenerate_triangles": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "exceeds_build_volume": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "min_edge_mm": {
+                "format": "double",
+                "type": "number"
+              },
+              "min_triangle_area_mm2": {
+                "format": "double",
+                "type": "number"
+              },
+              "nonmanifold_edges": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "overhang_area_fraction": {
+                "format": "double",
+                "type": "number"
+              },
+              "overhang_area_mm2": {
+                "format": "double",
+                "type": "number"
+              },
+              "process": {
+                "type": "string"
+              },
+              "small_feature_triangles": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "source": {
+                "type": "string"
+              },
+              "triangles": {
+                "format": "uint",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "warnings": {
+                "items": {
+                  "$ref": "#/$defs/Warning"
+                },
+                "type": "array"
+              },
+              "watertight": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "process",
+              "source",
+              "triangles",
+              "watertight",
+              "boundary_edges",
+              "nonmanifold_edges",
+              "degenerate_triangles",
+              "bounds_mm",
+              "exceeds_build_volume",
+              "min_edge_mm",
+              "min_triangle_area_mm2",
+              "small_feature_triangles",
+              "overhang_area_mm2",
+              "overhang_area_fraction",
+              "warnings",
+              "approximate"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "Warning": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "severity",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/PrintabilityReport"
           },
           {
             "$ref": "#/$defs/ToolFailure"

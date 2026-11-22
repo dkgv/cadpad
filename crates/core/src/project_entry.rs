@@ -535,7 +535,8 @@ impl Core {
                 title: source.title.clone(),
                 recordings: Default::default(),
                 recording_imports: Default::default(),
-                motion_tests: source.motion_tests.clone(),
+                // Requirements stay on the project; model views read them there.
+                motion_tests: Default::default(),
                 geometry_cache: serde_json::Value::Null,
             };
             let (inputs, disk_fingerprint) = match disk {

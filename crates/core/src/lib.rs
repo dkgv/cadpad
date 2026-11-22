@@ -494,6 +494,8 @@ impl Core {
     }
     pub async fn get_project(&self, workspace_id: &str) -> Result<Value> {
         let _memory = self.pin_workspace(workspace_id).await?;
+        // Model views track the project's requirements, not their own copy.
+        let project_tests = self.project_requirements(workspace_id).await?;
         for _ in 0..3 {
             let checked = self.ensure_display_cache(workspace_id).await?;
             let mut workspaces = self.workspace(workspace_id).await?;
@@ -509,7 +511,20 @@ impl Core {
             let display_error = checked.error;
             let motion = motion::snapshot(ws)?;
             let recording_fingerprint = playback::metadata_fingerprint(&ws.stored.recordings)?;
-            let tests_fingerprint = motion_tests::catalog_fingerprint(&ws.stored.motion_tests)?;
+            let tests_fingerprint = motion_tests::catalog_fingerprint(
+                project_tests
+                    .as_ref()
+                    .map_or(&ws.stored.motion_tests, |(catalog, _)| catalog),
+            )?;
+            let saved_tests = |binding: &portable::Binding| {
+                project_tests
+                    .as_ref()
+                    .and_then(|(_, project)| project.as_ref())
+                    .filter(|project| project.directory == binding.directory)
+                    .unwrap_or(binding)
+                    .motion_test_fingerprint
+                    .clone()
+            };
             let revision = ws.stored.current_revision();
             let current_header = ws.stored.revisions.header(&ws.stored.current).unwrap();
             let unsaved_changes = ws.stored.project.as_ref().is_none_or(|binding| {
@@ -518,7 +533,7 @@ impl Core {
                     .header(&binding.saved_revision)
                     .is_none_or(|saved| !saved.same_content(current_header))
                     || binding.recording_fingerprint != recording_fingerprint
-                    || binding.motion_test_fingerprint != tests_fingerprint
+                    || saved_tests(binding) != tests_fingerprint
             });
             let mut activity = ws.stored.jobs.values().collect::<Vec<_>>();
             activity.sort_by_key(|job| (job.created_at, &job.id));
@@ -534,7 +549,7 @@ impl Core {
             "project_directory":ws.stored.project_directory().map(|directory|directory.to_string_lossy()),
             "saved_revision":ws.stored.project.as_ref().map(|binding|&binding.saved_revision),
             "unsaved_changes":unsaved_changes,
-            "dirty":ws.stored.project.as_ref().is_none_or(|binding|binding.saved_revision!=revision.id||binding.recording_fingerprint!=recording_fingerprint||binding.motion_test_fingerprint!=tests_fingerprint)});
+            "dirty":ws.stored.project.as_ref().is_none_or(|binding|binding.saved_revision!=revision.id||binding.recording_fingerprint!=recording_fingerprint||saved_tests(binding)!=tests_fingerprint)});
             project["model"] = revision.model.clone();
             return Ok(project);
         }

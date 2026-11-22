@@ -1144,3 +1144,77 @@ async fn benchmark_stl_open() {
         );
     }
 }
+
+#[tokio::test]
+async fn project_requirements_are_shared_by_model_tabs_and_bound_to_their_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("design");
+    std::fs::create_dir(&root).unwrap();
+    let source = "import cadquery as cq\ndef plate(): return cq.Workplane().box(2,3,4)\ndef pin(): return cq.Workplane().box(1,1,8)\n";
+    std::fs::write(root.join("geometry.py"), source).unwrap();
+    portable::initialize_project_browser(&root).unwrap();
+    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
+    let project = core.open_project(root.clone(), "user").await.unwrap();
+    let mut views = Vec::new();
+    for builder in ["plate", "pin"] {
+        let (view, job) = core
+            .open_project_model(&project.workspace_id, &project.base_revision, "geometry.py", builder, "user")
+            .await
+            .unwrap();
+        assert_eq!(done(&core, &view, job).await.state, JobState::Succeeded);
+        views.push(view);
+    }
+    let (plate, pin) = (&views[0], &views[1]);
+    let plate_project = core.get_project(plate).await.unwrap();
+    let plate_revision = plate_project["revision"].as_str().unwrap().to_owned();
+    let pin_revision = core.get_project(pin).await.unwrap()["revision"].as_str().unwrap().to_owned();
+    let body = plate_project["model"]["parts"][0]["instance_id"].as_str().unwrap().to_owned();
+    let tests = |workspace: &str, revision: &str, catalog: Option<&str>, command: Value| {
+        let request = serde_json::json!({"workspace_id":workspace,"revision":revision,"expected_catalog":catalog,"command":command});
+        let core = core.clone();
+        async move { core.control_motion_tests("user", serde_json::from_value(request).unwrap()).await }
+    };
+    let listed = tests(plate, &plate_revision, None, serde_json::json!({"action":"list"})).await.unwrap();
+    assert_eq!(listed.project_workspace, project.workspace_id);
+    // Saved from the plate tab without naming a model: the plate is recorded.
+    let definition = serde_json::json!({
+        "name":"Plate falls","intent":"The plate drops at least 1 mm",
+        "initial_coordinates":{},
+        "simulation":{"gravity_m_s2":[0,0,-9.81],"bodies":{body.clone():{"type":"dynamic","mass":{"type":"kilograms","mass_kg":0.1},"friction":0.5,"restitution":0}}},
+        "actions":[{"ticks":10,"motors":[],"loads":{}}],
+        "checks":[{"type":"displacement","body":body,"direction":[0,0,-1],"minimum_mm":1}]
+    });
+    let saved = tests(plate, &plate_revision, Some(&listed.catalog), serde_json::json!({"action":"upsert","id":"fall","definition":definition}))
+        .await
+        .unwrap();
+    let model = saved.tests[0].definition.model.clone().unwrap();
+    assert_eq!((model.entry.as_str(), model.builder.as_str()), ("geometry.py", "plate"));
+    // One catalog for the project: the pin tab and the project itself list it too.
+    let from_pin = tests(pin, &pin_revision, None, serde_json::json!({"action":"list"})).await.unwrap();
+    assert_eq!(from_pin.catalog, saved.catalog);
+    assert_eq!(from_pin.tests[0].id, "fall");
+    let from_project = core
+        .control_motion_tests("user", serde_json::from_value(serde_json::json!({"workspace_id":project.workspace_id,"expected_catalog":null,"command":{"action":"list"},"model_views":[plate]})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(from_project.catalog, saved.catalog);
+    assert!(from_project.tests[0].design_compared, "listed plate workspace is compared");
+    // A plate requirement cannot run against the pin.
+    let Err(wrong) = tests(pin, &pin_revision, Some(&saved.catalog), serde_json::json!({"action":"run","id":"fall"})).await else {
+        panic!("a plate requirement must not run against the pin");
+    };
+    assert_eq!(wrong.code(), "INVALID_MOTION_TEST");
+    // Model tabs no longer keep their own copy, and saving a tab writes the project's catalog.
+    let stored: Value = serde_json::from_slice(&std::fs::read(temp.path().join("app/workspaces").join(plate).join("workspace.json")).unwrap()).unwrap();
+    assert!(stored["motion_tests"].as_object().is_none_or(|tests| tests.is_empty()));
+    assert_eq!(core.get_project(pin).await.unwrap()["unsaved_changes"], true, "project requirements changed");
+    core.save_project_folder(plate, &plate_revision, None).await.unwrap();
+    assert_eq!(core.get_project(pin).await.unwrap()["unsaved_changes"], false, "saved through the plate tab");
+    let other = Core::open(temp.path().join("app-b"), config()).await.unwrap();
+    let reopened = other.open_project(root.clone(), "user").await.unwrap();
+    let imported = other
+        .control_motion_tests("user", serde_json::from_value(serde_json::json!({"workspace_id":reopened.workspace_id,"expected_catalog":null,"command":{"action":"list"}})).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(imported.tests[0].definition.model.as_ref().unwrap().builder, "plate");
+}
