@@ -232,7 +232,7 @@ async fn stage_generated(
     core: &Core,
     workspace: &str,
     generated: &Value,
-) -> Result<(String, Value, String, String), Value> {
+) -> Result<(String, cadpad_core::Job, String, String), Value> {
     let source = generated
         .get("source")
         .and_then(Value::as_str)
