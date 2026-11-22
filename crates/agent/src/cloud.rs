@@ -57,7 +57,7 @@ struct DevicePollResponse {
     account_id: Option<String>,
 }
 
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct GenerationAsset {
     pub path: String,
     pub content_type: String,
@@ -66,7 +66,7 @@ pub struct GenerationAsset {
 
 /// Runner-up ensemble result offered as a generation variant.
 /// Same wrapped shape as the winning result (CadQuery source + assets).
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct GenerationAlternate {
     pub member: String,
     pub format: String,
