@@ -21,8 +21,8 @@ import {framedZoom,projectedHalfExtent} from './fit-zoom';
 
 export type Vec3 = [number, number, number];
 export interface Entity { revision: string; instance_id: string; entity_id: string }
-/** `additive` is a ⌘/Ctrl click that adds or removes a reference; `marquee` is Shift+drag rectangle selection (Bambu-style); `mode` is a pick-mode change. */
-export type SelectOrigin='replacement'|'additive'|'mode'|'marquee'|'marquee-add';
+/** `additive` is a ⌘/Ctrl click that adds or removes a reference; `marquee` is Shift+drag rectangle selection (Bambu-style); `fill` is a face click with fill-to-edges on, batching every face up to the drawn edges; `mode` is a pick-mode change. */
+export type SelectOrigin='replacement'|'additive'|'mode'|'marquee'|'marquee-add'|'fill'|'fill-add';
 export type SelectHandler=(entity:Entity|null,origin?:SelectOrigin,batch?:Entity[])=>void;
 type HighlightKind='hover'|'selected'|'reference'|'motion';
 export interface Part {
@@ -39,7 +39,7 @@ export type Anchor = {kind:'local_point';instance_id:string;point:Vec3}|{kind:'b
 export type DimensionDefinition = {kind:'overall';instance_id:string;axis:'x'|'y'|'z'}|{kind:'published';publication_id:string}|{kind:'distance';start:Anchor;end:Anchor}|{kind:'angle';start:Anchor;vertex:Anchor;end:Anchor}|{kind:'radius'|'diameter';instance_id:string;feature:string}|{kind:'geometry_circle';instance_id:string;entity:GeometryRef;measure:'radius'|'diameter'};
 export type DimensionFormat = {unit:'mm'|'cm'|'m'|'in'|'deg'|'rad';precision:number};
 export interface SavedAnnotation { id:string;label:string;definition:DimensionDefinition;format?:DimensionFormat;parameter?:string|null;label_offset?:[number,number] }
-export interface Annotation { id: string; kind: string; part?: string; end_part?:string;vertex_part?:string;vertex?:Vec3; start?: Vec3; end?: Vec3; value?: number; label: string; parameter?: string | null; saved_id?:string; status?:'resolved'|'broken';error?:{code:string;message:string};definition?:DimensionDefinition;format?:DimensionFormat;label_offset?:[number,number] }
+export interface Annotation { id: string; kind: string; offset?:Vec3; part?: string; end_part?:string;vertex_part?:string;vertex?:Vec3; start?: Vec3; end?: Vec3; value?: number; label: string; parameter?: string | null; saved_id?:string; status?:'resolved'|'broken';error?:{code:string;message:string};definition?:DimensionDefinition;format?:DimensionFormat;label_offset?:[number,number] }
 interface ResolvedAnnotation extends Annotation {part:string;start:Vec3;end:Vec3;value:number}
 const resolved = (annotation:Annotation): annotation is ResolvedAnnotation => annotation.status!=='broken'&&!!annotation.part&&!!annotation.start&&!!annotation.end&&Number.isFinite(annotation.value);
 function segmentPairs(attribute:THREE.BufferAttribute|THREE.InterleavedBufferAttribute){
@@ -63,10 +63,13 @@ function faceBoundary(geometry:THREE.BufferGeometry){
   const index=geometry.getIndex(),position=geometry.getAttribute('position');
   if(!index||!position)return [];
   const edges=new Map<string,[number,number]>();
+  // Key by position: STL faces repeat each vertex per triangle, so index keys
+  // would outline every internal diagonal.
+  const at=(vertex:number)=>`${position.getX(vertex)},${position.getY(vertex)},${position.getZ(vertex)}`;
   for(let i=0;i+2<index.count;i+=3){
     const tri=[index.getX(i),index.getX(i+1),index.getX(i+2)];
     for(let edge=0;edge<3;edge++){
-      const a=tri[edge],b=tri[(edge+1)%3],id=a<b?`${a}:${b}`:`${b}:${a}`;
+      const a=tri[edge],b=tri[(edge+1)%3],ka=at(a),kb=at(b),id=ka<kb?`${ka}|${kb}`:`${kb}|${ka}`;
       if(edges.has(id))edges.delete(id);else edges.set(id,[a,b]);
     }
   }
@@ -102,6 +105,7 @@ export class CadViewport {
   private paths = new Map<string, Part>();
   private pickGeometry = new Map<string, PickGeometry>();
   private selectionMode:SelectionMode='face';
+  private fillFaces=false;
   private selectedEntity:Entity|null=null;
   private hovered:Entity|null=null;
   private highlights:{object:THREE.Mesh;kind:HighlightKind}[]=[];
@@ -390,6 +394,17 @@ export class CadViewport {
     const hit=pickTopology(this.viewer.camera.getCamera(),new THREE.Vector2((event.clientX-rect.left)/rect.width*2-1,-(event.clientY-rect.top)/rect.height*2+1),rect,mode,this.pickInstances());
     return hit?{revision:this.revision,...hit}:null;
   }
+  /** Fill to edges: a face pick grows to every face bounded by the same drawn edges. */
+  setFillSelection(enabled:boolean){
+    if(this.fillFaces===enabled)return;
+    this.fillFaces=enabled;this.cancelHover();this.setHover(null);
+  }
+  private fillRegion(entity:Entity|null):Entity[]{
+    if(!entity||!this.fillFaces||!entity.entity_id.startsWith('face:'))return entity?[entity]:[];
+    const geometry=this.pickGeometry.get(entity.instance_id);
+    const faces=geometry?.fillRegion(entity.entity_id)??[];
+    return faces.length?faces.map(entity_id=>({...entity,entity_id})):[entity];
+  }
   setSelectionMode(mode:SelectionMode){
     if(this.selectionMode===mode)return;
     this.selectionMode=mode;this.cancelHover();this.setHover(null);
@@ -464,7 +479,9 @@ export class CadViewport {
   }
   private highlight(entity:Entity|null,hover:boolean){
     this.clearHighlights(hover?'hover':'selected');
-    const drawn=this.drawEntity(entity,hover?'hover':'selected');
+    // Hover previews the whole fill region; selections arrive as references.
+    if(hover){for(const item of this.fillRegion(entity))if(!this.references.some(reference=>sameEntity(reference,item)))this.drawEntity(item,'hover');return;}
+    const drawn=this.drawEntity(entity,'selected');
     if(!hover){this.primaryAnchor=drawn;this.drawReferences();}
   }
   /**
@@ -638,13 +655,14 @@ export class CadViewport {
       // Shift+click without a drag keeps additive multi-select.
       if(!this.parts.length)return;
       const entity=this.pick(event);
-      if(entity){this.onPick();this.onSelect(entity,'additive');}
+      if(entity){this.onPick();if(!this.selectFill(entity,true))this.onSelect(entity,'additive');}
       return;
     }
     if(this.drag?.pointer===event.pointerId){event.preventDefault();event.stopPropagation();const drag=this.drag;this.cancelDrag();this.onJointTarget(drag.joint.id,drag.target,drag.joint.unit,true);return;}
     if(Math.hypot(event.clientX-this.pointerStart[0],event.clientY-this.pointerStart[1])>4||event.button!==0||!this.parts.length)return;
     const entity=this.pick(event),additive=event.metaKey||event.ctrlKey;
     if(entity)this.onPick();
+    if(entity&&this.selectFill(entity,additive))return;
     // Additive clicks only report; the owner decides the new primary and references.
     if(additive){this.onSelect(entity,'additive');return;}
     this.selectEntity(entity);this.onSelect(entity);
@@ -675,6 +693,14 @@ export class CadViewport {
     const width=Math.abs(this.marquee.currentX-this.marquee.startX);
     const height=Math.abs(this.marquee.currentY-this.marquee.startY);
     Object.assign(this.marqueeElement.style,{left:`${left}px`,top:`${top}px`,width:`${width}px`,height:`${height}px`});
+  }
+  /** Reports a fill region as one batch; false when the pick is a lone face. */
+  private selectFill(entity:Entity,additive:boolean){
+    const region=this.fillRegion(entity);
+    if(region.length<2)return false;
+    if(!additive)this.selectEntity(entity);
+    this.onSelect(entity,additive?'fill-add':'fill',region);
+    return true;
   }
   private commitMarquee(marquee:{startX:number;startY:number;currentX:number;currentY:number;additive:boolean}){
     if(!this.presented||!this.parts.length)return;

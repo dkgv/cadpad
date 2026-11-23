@@ -257,3 +257,19 @@ test('rectangle selection picks intersecting faces, parts and edges',()=>{
   assert.deepEqual(pickTopologyInRect(view,{left:0,top:0,right:10,bottom:10},size,'part',[left,right]),[]);
   left.geometry.dispose();right.geometry.dispose();edge.geometry.dispose();
 });
+test('fill region crosses undrawn coplanar seams but stops at drawn edges and creases',()=>{
+  // Unindexed like STL: every triangle repeats its corners.
+  const triangles=[
+    [[0,0,0],[1,0,0],[1,1,0]],[[0,0,0],[1,1,0],[0,1,0]], // faces 0 and 1: one square split along an undrawn diagonal
+    [[0,1,0],[1,1,0],[0,1,1]], // face 2: perpendicular wall
+    [[1,0,0],[2,0,0],[2,1,0]],[[1,0,0],[2,1,0],[1,1,0]], // face 3: coplanar, behind a drawn edge
+  ];
+  const vertices=new Float32Array(triangles.flat(2));
+  const buffers={vertices,triangles:Uint32Array.from({length:vertices.length/3},(_,i)=>i),triangles_per_face:new Uint32Array([1,1,1,2]),edges:new Float32Array([1,0,0,1,1,0]),segments_per_edge:new Uint32Array([1])};
+  const geometry=new PickGeometry(buffers);
+  assert.deepEqual(geometry.fillRegion('face:0'),['face:0','face:1']);
+  assert.deepEqual(geometry.fillRegion('face:3'),['face:3']);
+  assert.deepEqual(geometry.fillRegion('face:2'),['face:2']);
+  assert.deepEqual(geometry.fillRegion('face:9'),[]);
+  geometry.dispose();
+});

@@ -18,6 +18,7 @@ pub struct NativeMenus {
     advanced: CheckMenuItem<Wry>,
     inspectors: Vec<(&'static str, CheckMenuItem<Wry>)>,
     selection: Vec<(&'static str, CheckMenuItem<Wry>)>,
+    fill_selection: CheckMenuItem<Wry>,
     scopes: Vec<(&'static str, CheckMenuItem<Wry>)>,
     window_menu: Submenu<Wry>,
     documents: Mutex<OpenDocuments>,
@@ -141,6 +142,16 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
             )?,
         ));
     }
+    // Face picks grow to every face bounded by the same drawn edges.
+    let fill_selection = CheckMenuItem::with_id(
+        app,
+        "cadpad.select-fill",
+        "Fill Faces to Edges",
+        true,
+        false,
+        None::<&str>,
+    )?;
+    let selection_separator = PredefinedMenuItem::separator(app)?;
     let selection_menu = Submenu::with_items(
         app,
         "Select",
@@ -148,6 +159,10 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
         &selection
             .iter()
             .map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<Wry>)
+            .chain([
+                &selection_separator as &dyn tauri::menu::IsMenuItem<Wry>,
+                &fill_selection,
+            ])
             .collect::<Vec<_>>(),
     )?;
     let mut scopes = Vec::new();
@@ -263,6 +278,7 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
         advanced,
         inspectors,
         selection,
+        fill_selection,
         scopes,
         window_menu: window,
         documents: Mutex::new(OpenDocuments {
@@ -311,6 +327,8 @@ pub struct MenuStatus {
     pub has_hidden_parts: bool,
     #[serde(default)]
     pub selection_mode: String,
+    #[serde(default)]
+    pub fill_selection: bool,
     #[serde(default)]
     pub dimension_scope: String,
     #[serde(default)]
@@ -377,6 +395,15 @@ pub fn update_native_menu(
         item.set_checked(*id == status.selection_mode)
             .map_err(|e| e.to_string())?;
     }
+    state
+        .fill_selection
+        .set_checked(status.fill_selection)
+        .map_err(|e| e.to_string())?;
+    // Filling only applies to face picks.
+    state
+        .fill_selection
+        .set_enabled(status.selection_mode.is_empty() || status.selection_mode == "face")
+        .map_err(|e| e.to_string())?;
     for (id, item) in &state.scopes {
         item.set_checked(*id == status.dimension_scope)
             .map_err(|e| e.to_string())?;
@@ -452,20 +479,22 @@ pub fn popup_native_menu(
     y: f64,
 ) -> Result<(), String> {
     let menu = match kind {
-        "selection" | "scope" => {
-            let items = if kind == "selection" {
-                &state.selection
-            } else {
-                &state.scopes
-            };
-            Menu::with_items(
-                &window,
-                &items
-                    .iter()
-                    .map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<Wry>)
-                    .collect::<Vec<_>>(),
-            )
-        }
+        "selection" => Menu::with_items(
+            &window,
+            &state
+                .selection
+                .iter()
+                .map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<Wry>)
+                .collect::<Vec<_>>(),
+        ),
+        "scope" => Menu::with_items(
+            &window,
+            &state
+                .scopes
+                .iter()
+                .map(|(_, item)| item as &dyn tauri::menu::IsMenuItem<Wry>)
+                .collect::<Vec<_>>(),
+        ),
         "export" => Menu::with_items(
             &window,
             &[&state.actions["export-step"], &state.actions["export-stl"]],

@@ -27,6 +27,92 @@ export class PrimitiveSpans {
   }
 }
 export interface PickTopology {face_ids:(string|null)[];edge_ids:(string|null)[]}
+/** Matches the STL crease angle that decides which edges are drawn. */
+const FILL_CREASE_DOT=Math.cos(25*Math.PI/180);
+/** Position grid for welding duplicated vertices (0.1 µm in model millimetres). */
+const FILL_WELD=1e4;
+/**
+ * Triangle adjacency for "fill to edges" selection. Two triangles connect when
+ * they share exactly one welded edge, that edge is not drawn, and the facets
+ * meet at less than the crease angle. Drawn edges and creases bound a region.
+ */
+export class FillTopology {
+  /** Three slots per triangle: the neighbouring triangle across that side, or -1. */
+  readonly neighbors:Int32Array;
+  readonly triangleFace:Int32Array;
+  constructor(buffers:MeshBuffers,faces:PrimitiveSpans){
+    const vertices=buffers.vertices??new Float32Array(),triangles=buffers.triangles??new Uint32Array(),edges=buffers.edges??new Float32Array();
+    const count=triangles.length/3;
+    const ids=new Map<string,number>(),cached=new Int32Array(vertices.length/3).fill(-1);
+    const weld=(x:number,y:number,z:number)=>{
+      // `+0` folds -0 into 0 so mirrored zero coordinates still meet.
+      const key=`${Math.round(x*FILL_WELD)+0},${Math.round(y*FILL_WELD)+0},${Math.round(z*FILL_WELD)+0}`;
+      let id=ids.get(key);if(id===undefined){id=ids.size;ids.set(key,id);}return id;
+    };
+    const corners=new Int32Array(triangles.length);
+    for(let i=0;i<triangles.length;i++){
+      const vertex=triangles[i];
+      if(cached[vertex]<0)cached[vertex]=weld(vertices[vertex*3],vertices[vertex*3+1],vertices[vertex*3+2]);
+      corners[i]=cached[vertex];
+    }
+    const wallCorners=new Int32Array(edges.length/3);
+    for(let i=0;i<wallCorners.length;i++)wallCorners[i]=weld(edges[i*3],edges[i*3+1],edges[i*3+2]);
+    const span=ids.size+1;
+    const key=(a:number,b:number)=>a<b?a*span+b:b*span+a;
+    const walls=new Set<number>();
+    for(let i=0;i+1<wallCorners.length;i+=2)walls.add(key(wallCorners[i],wallCorners[i+1]));
+    const normals=new Float64Array(count*3);
+    for(let t=0;t<count;t++){
+      const [a,b,c]=[triangles[t*3]*3,triangles[t*3+1]*3,triangles[t*3+2]*3];
+      const ux=vertices[b]-vertices[a],uy=vertices[b+1]-vertices[a+1],uz=vertices[b+2]-vertices[a+2];
+      const vx=vertices[c]-vertices[a],vy=vertices[c+1]-vertices[a+1],vz=vertices[c+2]-vertices[a+2];
+      const nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx,length=Math.hypot(nx,ny,nz);
+      if(length>0){normals[t*3]=nx/length;normals[t*3+1]=ny/length;normals[t*3+2]=nz/length;}
+    }
+    // First slot to claim each edge; -1 once a third triangle makes it non-manifold.
+    const owner=new Map<number,number>(),slotKey=(slot:number)=>key(corners[slot],corners[slot-slot%3+(slot%3+1)%3]);
+    const neighbors=new Int32Array(count*3).fill(-1),partner=new Int32Array(count*3).fill(-1);
+    for(let slot=0;slot<count*3;slot++){
+      const edge=slotKey(slot);
+      if(corners[slot]===corners[slot-slot%3+(slot%3+1)%3])continue;
+      const first=owner.get(edge);
+      if(first===undefined){owner.set(edge,slot);continue;}
+      if(first<0)continue;
+      if(partner[first]>=0){
+        const second=partner[first];
+        neighbors[first]=neighbors[second]=partner[first]=partner[second]=-1;
+        owner.set(edge,-1);continue;
+      }
+      partner[first]=slot;partner[slot]=first;
+      neighbors[first]=Math.floor(slot/3);neighbors[slot]=Math.floor(first/3);
+    }
+    for(let slot=0;slot<count*3;slot++){
+      const other=neighbors[slot];if(other<0)continue;
+      const self=Math.floor(slot/3);
+      const dot=normals[self*3]*normals[other*3]+normals[self*3+1]*normals[other*3+1]+normals[self*3+2]*normals[other*3+2];
+      const degenerate=!normals[self*3]&&!normals[self*3+1]&&!normals[self*3+2]||!normals[other*3]&&!normals[other*3+1]&&!normals[other*3+2];
+      // STL winding is not reliable, so compare planes rather than orientation.
+      if(walls.has(slotKey(slot))||!degenerate&&Math.abs(dot)<FILL_CREASE_DOT)neighbors[slot]=-1;
+    }
+    const triangleFace=new Int32Array(count).fill(-1);
+    for(let face=0;face<faces.ends.length;face++){const range=faces.range(face)!;triangleFace.fill(face,range[0],range[1]);}
+    this.neighbors=neighbors;this.triangleFace=triangleFace;
+  }
+  /** Face indices reachable from `face` without crossing a drawn edge or crease, seed first. */
+  region(face:number,faces:PrimitiveSpans):number[]{
+    const seed=faces.range(face);if(!seed)return [];
+    const seen=new Set([face]),order=[face];
+    for(let next=0;next<order.length;next++){
+      const range=faces.range(order[next])!;
+      for(let slot=range[0]*3;slot<range[1]*3;slot++){
+        const triangle=this.neighbors[slot];if(triangle<0)continue;
+        const other=this.triangleFace[triangle];
+        if(other>=0&&!seen.has(other)){seen.add(other);order.push(other);}
+      }
+    }
+    return order;
+  }
+}
 /** Immutable CPU-only topology and geometry; each occurrence owns its raycast pose. */
 class PickResources {
   readonly faces:PrimitiveSpans;
@@ -43,6 +129,10 @@ class PickResources {
   }
   get lineTree(){
     return this.lineIndex??=new LineSegmentsBVH(this.lines,{indirect:true});
+  }
+  private fillIndex?:FillTopology;
+  get fill(){
+    return this.fillIndex??=new FillTopology(this.buffers,this.faces);
   }
   users=0;
   released=false;
@@ -92,6 +182,12 @@ export class PickGeometry {
     this.surface=new THREE.Mesh(resources.surface,new THREE.MeshBasicMaterial({side:THREE.DoubleSide}));this.surface.matrixAutoUpdate=false;
     if(this.buffers.triangles?.length>=384)this.surface.raycast=(raycaster,hits)=>resources.surfaceTree.raycastObject3D(this.surface,raycaster,hits);
     if(this.buffers.edges?.length>=768)this.lines.raycast=(raycaster,hits)=>resources.lineTree.raycastObject3D(this.lines,raycaster,hits);
+  }
+  /** Face ids sharing the drawn-edge-bounded region of `entity_id`, seed first. */
+  fillRegion(entity_id:string):string[]{
+    const face=this.faceIds.indexOf(entity_id);
+    if(this.disposed||face<0||!this.buffers.triangles?.length)return face<0?[]:[entity_id];
+    return this.resources.fill.region(face,this.faces).flatMap(index=>this.faceIds[index]?[this.faceIds[index]!]:[]);
   }
   /** New index views share immutable vertex bytes; dispose only the overlay. */
   highlight(kind:SelectionMode,index:number):THREE.BufferGeometry|null{
