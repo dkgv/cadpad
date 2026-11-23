@@ -8,6 +8,8 @@ import type {DockTab} from './dock-layout';
 
 type ExplorerProps={
   workspace:string;revision:string;catalogWorkspace?:string;catalogRevision?:string;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};selectionPanel?:React.ReactNode;builderDisabled?:boolean;onChooseBuilder:(path:string,builder:string)=>void;parameters?:React.ReactNode;parts:SceneModel['parts'];selected?:string;
+  /** Attach an Explorer folder (project-relative path) to the next Assistant message. */
+  onReferenceFolder?:(path:string)=>void;
   hidden:Set<string>;onSelect:(id:string)=>void;onToggleVisibility:(id:string)=>void;onShowAll:()=>void;
 };
 const sectionNames=['components','objects','parameters','selection'];
@@ -31,7 +33,7 @@ export function ProjectExplorer(props:ExplorerProps){
   return <Explorer key={props.catalogWorkspace??props.workspace} {...props}/>;
 }
 
-function Explorer({workspace,revision,catalogWorkspace=workspace,catalogRevision=revision,activeModel,openingModel,selectionPanel,builderDisabled,onChooseBuilder,parts,parameters,selected,hidden,onSelect,onToggleVisibility,onShowAll}:ExplorerProps){
+function Explorer({workspace,revision,catalogWorkspace=workspace,catalogRevision=revision,activeModel,openingModel,selectionPanel,builderDisabled,onChooseBuilder,parts,parameters,selected,hidden,onSelect,onToggleVisibility,onShowAll,onReferenceFolder}:ExplorerProps){
   const [query,setQuery]=useState('');
   const prefix=useId();
   const ids=useMemo(()=>Object.fromEntries(sectionNames.map(name=>[name,`${prefix}-${name}`])),[prefix]);
@@ -59,7 +61,7 @@ function Explorer({workspace,revision,catalogWorkspace=workspace,catalogRevision
   const contents:Record<string,React.ReactNode>={};
   const tabs:Record<string,DockTab>={};
   const section=(name:string,title:string,content:React.ReactNode)=>{tabs[ids[name]]={id:ids[name],title};contents[ids[name]]=content;};
-  section('components','Models',<SourceCatalog compact visible={!!search||expanded.includes(ids.components)} activeModel={activeModel} openingModel={openingModel} onLoadingChange={loading=>setIndexing(values=>values[ids.components]===loading?values:{...values,[ids.components]:loading})} filterQuery={query} disabled={builderDisabled} workspace={catalogWorkspace} revision={catalogRevision} onChoose={onChooseBuilder}/>);
+  section('components','Models',<SourceCatalog compact visible={!!search||expanded.includes(ids.components)} activeModel={activeModel} openingModel={openingModel} onLoadingChange={loading=>setIndexing(values=>values[ids.components]===loading?values:{...values,[ids.components]:loading})} filterQuery={query} disabled={builderDisabled} workspace={catalogWorkspace} revision={catalogRevision} onChoose={onChooseBuilder} onReferenceFolder={onReferenceFolder}/>);
   section('objects','Parts',parts.length?<div className="explorer-loaded-model">
     {!!search&&!visibleParts.length&&<p className="muted" role="status">No matching parts.</p>}
     {!!hidden.size&&<button className="explorer-show-all" onClick={onShowAll}>Show all parts</button>}

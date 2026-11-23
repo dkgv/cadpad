@@ -589,3 +589,10 @@ textarea,
   -webkit-user-select: text;
   user-select: text;
 }
+/* Explorer folders can be referenced in the Assistant composer. */
+.catalog-compact summary .folder-chat-reference{float:right;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin:0;padding:0;border:0;border-radius:4px;background:transparent;color:var(--muted);opacity:0}
+.catalog-compact summary:hover .folder-chat-reference,.catalog-compact summary .folder-chat-reference:focus-visible{opacity:1}
+.catalog-compact summary .folder-chat-reference:hover{background:var(--selected);color:var(--selected-text)}
+.catalog-compact summary .folder-chat-reference svg{margin:0}
+.reference-chip.folder-chip>svg{flex:none}
+.reference-chip.folder-chip .reference-part{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

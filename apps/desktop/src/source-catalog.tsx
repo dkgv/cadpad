@@ -119,8 +119,10 @@ export function fileGit(path:string,git:ReturnType<typeof indexGit>){
   return best;
 }
 export function folderGit(path:string,git:ReturnType<typeof indexGit>){return git.folders.get(path);}
+/** Drag payload for an Explorer folder dropped on the Assistant. */
+export const FOLDER_DRAG_TYPE='application/x-cadpad-folder';
 function gitMark(change?:GitChange){if(!change)return '';return change==='added'||change==='untracked'?'git-new':`git-${change}`;}
-export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,compact=false,filterQuery,compactView='models',onLoadingChange,activeModel,openingModel,visible=true}:{requestId?:string;workspace?:string;revision?:string;disabled?:boolean;onChoose:(path:string,builder:string)=>void;compact?:boolean;filterQuery?:string;compactView?:'models'|'files';onLoadingChange?:(loading:boolean)=>void;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};visible?:boolean}){
+export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,compact=false,filterQuery,compactView='models',onLoadingChange,activeModel,openingModel,visible=true,onReferenceFolder}:{onReferenceFolder?:(path:string)=>void;requestId?:string;workspace?:string;revision?:string;disabled?:boolean;onChoose:(path:string,builder:string)=>void;compact?:boolean;filterQuery?:string;compactView?:'models'|'files';onLoadingChange?:(loading:boolean)=>void;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};visible?:boolean}){
   const [sourcePath,setSourcePath]=useState<string|null>(null);
   const catalog=useRef<HTMLDivElement>(null);
   const [files,setFiles]=useState<SourceFile[]>([]),[loading,setLoading]=useState(true),[error,setError]=useState('');
@@ -271,9 +273,10 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const fileTree=(node:Tree,prefix=''):React.ReactNode=><ul>{sortedFolders(node).map(([name,child])=>{
     const path=prefix+name,change=showGit?folderGit(path,git):undefined,mark=gitMark(change);
     const automatic=!!search||activeFolder===path||activeFolder.startsWith(path+'/')||folder===path||folder.startsWith(path+'/');
-    const summary=<><Icon name="folder" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</>;
+    const summary=<><Icon name="folder" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}{onReferenceFolder&&<button type="button" className="folder-chat-reference" title="Reference this folder in the Assistant" aria-label={`Reference ${path} in the Assistant`} onClick={event=>{event.preventDefault();event.stopPropagation();onReferenceFolder(path);}}><Icon name="chat" size={12}/></button>}</>;
     return <li key={name}>{compact?branch(`folder:${path}`,automatic,summary,()=>fileTree(child,path+'/'),{
       className:mark||undefined,title:change?GIT_LABEL[change]:undefined,'aria-label':change?`${name}, ${GIT_LABEL[change]}`:undefined,
+      ...(onReferenceFolder?{draggable:true,onDragStart:event=>{event.dataTransfer.setData(FOLDER_DRAG_TYPE,path);event.dataTransfer.setData('text/plain',path);event.dataTransfer.effectAllowed='copy';}}:{}),
     }):
       <details open={automatic}><summary className={mark||undefined} title={change?GIT_LABEL[change]:undefined}
         aria-label={change?`${name}, ${GIT_LABEL[change]}`:undefined}>{summary}</summary>{fileTree(child,path+'/')}</details>}</li>;

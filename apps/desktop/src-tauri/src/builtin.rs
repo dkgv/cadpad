@@ -48,6 +48,7 @@ pub async fn agent_start(
     prompt: String,
     references: Option<Vec<cadpad_core::tools::Entity>>,
     image: Option<String>,
+    folders: Option<Vec<String>>,
     chat_id: Option<String>,
     model_workspace: Option<String>,
 ) -> Result<Value, Value> {
@@ -58,6 +59,7 @@ pub async fn agent_start(
             cadpad_agent::references::Attachments {
                 references: references.unwrap_or_default(),
                 image,
+                folders: folders.unwrap_or_default(),
             },
             chat_id,
             model_workspace,

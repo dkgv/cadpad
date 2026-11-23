@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
 pub const MAX_REFERENCES: usize = 8;
+pub const MAX_FOLDERS: usize = 8;
+const MAX_FOLDER_ENTRIES: usize = 200;
+const MAX_FOLDER_BYTES: usize = 32 * 1024;
 /// Base64 PNG bytes; the runner resends the image every round under a 2 MiB context cap.
 pub const MAX_IMAGE_BYTES: usize = 1024 * 1024;
 const MAX_FILE_BYTES: usize = 48 * 1024;
@@ -26,6 +29,9 @@ pub struct Attachments {
     /// Base64 PNG: either the lettered viewport capture or a user-dropped reference image.
     #[serde(default)]
     pub image: Option<String>,
+    /// Project-relative folders the user referenced from the Explorer.
+    #[serde(default)]
+    pub folders: Vec<String>,
 }
 
 /// The chip stored with a user chat message, so history shows what was referenced.
@@ -188,6 +194,135 @@ pub fn history_note(chips: &[ChatReference]) -> String {
         .collect::<Vec<_>>()
         .join("; ");
     format!("[Referenced geometry, earlier revision: {items}]")
+}
+
+/// Normalizes Explorer folder paths: project-relative, `/`-separated, no
+/// `.`/`..` segments. Duplicates are dropped; order is kept.
+pub fn validate_folders(folders: &[String]) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut valid = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let path = folder.trim().replace('\\', "/");
+        let path = path.trim_end_matches('/');
+        if path.is_empty()
+            || path.starts_with('/')
+            || path.len() > 512
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == ".." || part.contains(':'))
+        {
+            return Err(Error::domain(
+                "INVALID_REQUEST",
+                "Referenced folders must be project-relative paths",
+            ));
+        }
+        if seen.insert(path.to_string()) {
+            valid.push(path.to_string());
+        }
+    }
+    if valid.len() > MAX_FOLDERS {
+        return Err(Error::domain(
+            "INVALID_REQUEST",
+            format!("Attach at most {MAX_FOLDERS} folders"),
+        ));
+    }
+    Ok(valid)
+}
+
+/// One line for history, so later turns still know which folders were meant.
+pub fn folder_note(folders: &[String]) -> String {
+    format!("[Referenced folders: {}]", folders.join(", "))
+}
+
+/// Describes each referenced folder from the project source catalog
+/// (`{"files":[{"path","description","builders":[...]}]}`), bounded so a large
+/// tree cannot crowd out the conversation.
+pub fn folder_context(folders: &[String], catalog: Result<Value>) -> String {
+    let mut text = String::from(
+        "The user referenced these project folders in the Explorer and attached them to the message below. \
+Paths are relative to the project root; use read_source, search_source and find_symbol on the listed files. \
+\"this folder\" means the folder below when only one is listed.\n<folders>\n",
+    );
+    let files = match catalog {
+        Ok(catalog) => catalog["files"].as_array().cloned().unwrap_or_default(),
+        Err(error) => {
+            for folder in folders {
+                text.push_str(&format!(
+                    "<folder path=\"{folder}\" unavailable=\"{}\"/>\n",
+                    error.to_string().replace('"', "'")
+                ));
+            }
+            text.push_str("</folders>\n");
+            return text;
+        }
+    };
+    let mut budget = MAX_FOLDER_BYTES;
+    for folder in folders {
+        let prefix = format!("{folder}/");
+        let mut inside = files
+            .iter()
+            .filter(|file| {
+                file["path"]
+                    .as_str()
+                    .is_some_and(|path| path.starts_with(&prefix))
+            })
+            .collect::<Vec<_>>();
+        inside.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+        if inside.is_empty() {
+            text.push_str(&format!(
+                "<folder path=\"{folder}\" missing=\"no project files under this path\"/>\n"
+            ));
+            continue;
+        }
+        text.push_str(&format!(
+            "<folder path=\"{folder}\" files=\"{}\">\n",
+            inside.len()
+        ));
+        let mut shown = 0;
+        for file in &inside {
+            let path = file["path"].as_str().unwrap_or_default();
+            let models = file["builders"]
+                .as_array()
+                .map(|builders| {
+                    builders
+                        .iter()
+                        .filter(|builder| builder["available"] == true)
+                        .filter_map(|builder| {
+                            let label = builder["label"].as_str()?;
+                            Some(match builder["kind"].as_str() {
+                                Some(kind) => format!("{label} ({kind})"),
+                                None => label.to_string(),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let description = file["description"].as_str().unwrap_or_default().trim();
+            let mut line = format!("- {path}");
+            if !description.is_empty() {
+                line.push_str(&format!(" — {}", truncate(description, 200).0));
+            }
+            if !models.is_empty() {
+                line.push_str(&format!(" [entries: {}]", models.join(", ")));
+            }
+            line.push('\n');
+            if shown >= MAX_FOLDER_ENTRIES || line.len() > budget {
+                break;
+            }
+            budget -= line.len();
+            shown += 1;
+            text.push_str(&line);
+        }
+        if shown < inside.len() {
+            text.push_str(&format!(
+                "- … {} more files omitted for context budget\n",
+                inside.len() - shown
+            ));
+        }
+        text.push_str("</folder>\n");
+    }
+    text.push_str("</folders>\n");
+    text
 }
 
 fn truncate(text: &str, limit: usize) -> (&str, bool) {
@@ -376,6 +511,34 @@ mod tests {
                 .code(),
             "INVALID_REQUEST"
         );
+    }
+
+    #[test]
+    fn folders_are_project_relative_and_deduplicated() {
+        assert_eq!(
+            validate_folders(&["parts/".into(), "parts".into(), "a\\b".into()]).unwrap(),
+            ["parts", "a/b"].map(String::from)
+        );
+        for bad in ["", "/etc", "../x", "a/./b", "a//b", "C:/x"] {
+            assert!(validate_folders(&[bad.into()]).is_err(), "{bad}");
+        }
+        assert!(validate_folders(&(0..=MAX_FOLDERS).map(|i| format!("f{i}")).collect::<Vec<_>>()).is_err());
+    }
+
+    #[test]
+    fn folder_context_lists_files_under_the_folder_only() {
+        let catalog = json!({"files":[
+            {"path":"parts/plate.py","description":"Base plate","builders":[{"label":"build","kind":"part","available":true}]},
+            {"path":"parts/sub/pin.py","description":"","builders":[]},
+            {"path":"partsx/other.py","description":"","builders":[]},
+            {"path":"model.py","description":"","builders":[]}
+        ]});
+        let text = folder_context(&["parts".into(), "empty".into()], Ok(catalog));
+        assert!(text.contains("- parts/plate.py — Base plate [entries: build (part)]"));
+        assert!(text.contains("- parts/sub/pin.py"));
+        assert!(!text.contains("partsx/other.py"));
+        assert!(!text.contains("model.py"));
+        assert!(text.contains("<folder path=\"empty\" missing="));
     }
 
     #[test]

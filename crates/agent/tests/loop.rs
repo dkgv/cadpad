@@ -942,6 +942,7 @@ async fn viewport_references_reach_the_model_with_component_source_exact_propert
     let attachments = |references| cadpad_agent::references::Attachments {
         references,
         image: Some("iVBORw0KGgo=".into()),
+        folders: vec![],
     };
     assert_eq!(
         service
@@ -1031,6 +1032,27 @@ async fn viewport_references_reach_the_model_with_component_source_exact_propert
     assert_eq!(service.start_in_chat_for_model(
         ws.clone(), "Wrong model".into(), Default::default(), None, Some(unrelated),
     ).await.unwrap_err().code(), "INVALID_REQUEST");
+    // Explorer folders reach the model as a listing of the project files under them.
+    assert_eq!(service.start_with(
+        ws.clone(), "Tidy".into(),
+        cadpad_agent::references::Attachments { folders: vec!["../etc".into()], ..Default::default() },
+    ).await.unwrap_err().code(), "INVALID_REQUEST");
+    let turn = service.start_with(
+        ws.clone(), "Tidy up this folder".into(),
+        cadpad_agent::references::Attachments { folders: vec!["parts/".into()], ..Default::default() },
+    ).await.unwrap();
+    let completed = terminal(&service, &turn).await;
+    assert_eq!(completed.state, TurnState::Succeeded, "{:?}", completed.error);
+    let message = provider.0.lock().unwrap().clone().unwrap();
+    let [Block::Text { text: context }, Block::Text { text: prompt }] = message.content.as_slice() else {
+        panic!("unexpected prompt blocks: {:?}", message.content)
+    };
+    assert_eq!(prompt, "Tidy up this folder");
+    assert!(context.contains("<folder path=\"parts\" files=\"1\">"), "{context}");
+    assert!(context.contains("- parts/plate.py"), "{context}");
+    assert!(!context.contains("model.py\n"), "files outside the folder stay out: {context}");
+    let history = service.conversation(&ws, None).unwrap();
+    assert_eq!(history["messages"][4]["folders"], json!(["parts"]));
 }
 
 struct ChatHistoryProvider(Mutex<Vec<String>>, Option<Arc<tokio::sync::Semaphore>>);

@@ -618,6 +618,7 @@ impl AgentService {
             return Err(Error::domain("INVALID_REQUEST", "The selected model does not belong to this project"));
         }
         references::validate_image(&attachments.image)?;
+        let folders = references::validate_folders(&attachments.folders)?;
         if prompt.trim().is_empty() {
             return Err(Error::domain(
                 "INVALID_REQUEST",
@@ -730,6 +731,7 @@ impl AgentService {
                 role: "user".into(),
                 text: prompt.clone(),
                 references: chips.clone(),
+                folders: folders.clone(),
                 steps: vec![],
             });
             trim_history(&mut chat.messages);
@@ -756,6 +758,8 @@ impl AgentService {
         let service = self.clone();
         let task_turn = turn.clone();
         let pending = PendingReferences {
+            project: workspace.clone(),
+            folders,
             workspace: model_workspace,
             entities: attachments.references,
             chips,
@@ -1101,6 +1105,7 @@ impl AgentService {
                 role: "assistant".into(),
                 text,
                 references: vec![],
+                folders: vec![],
                 steps: history_steps(&finished.steps),
             });
             trim_history(messages);
@@ -1163,6 +1168,9 @@ impl AgentService {
     }
 }
 struct PendingReferences {
+    /// The chat's project workspace; Explorer folders resolve against its sources.
+    project: String,
+    folders: Vec<String>,
     workspace: String,
     entities: Vec<cadpad_core::tools::Entity>,
     chips: Vec<ChatReference>,
@@ -1170,6 +1178,35 @@ struct PendingReferences {
 }
 impl AgentService {
     async fn resolve_references(
+        &self,
+        turn: &Turn,
+        mut pending: PendingReferences,
+        image_supported: bool,
+    ) -> Result<references::Resolved> {
+        let folders = std::mem::take(&mut pending.folders);
+        let project = pending.project.clone();
+        let mut resolved = self
+            .resolve_geometry(turn, pending, image_supported)
+            .await?;
+        if !folders.is_empty() {
+            let catalog = async {
+                let current = self.inner.core.get_project(&project).await?;
+                let revision = current["revision"].as_str().unwrap_or_default().to_string();
+                self.inner
+                    .core
+                    .project_source_catalog(&project, &revision, None)
+                    .await
+            }
+            .await;
+            resolved.text = format!(
+                "{}{}",
+                references::folder_context(&folders, catalog),
+                resolved.text
+            );
+        }
+        Ok(resolved)
+    }
+    async fn resolve_geometry(
         &self,
         turn: &Turn,
         pending: PendingReferences,
