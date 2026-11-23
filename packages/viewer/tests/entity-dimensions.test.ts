@@ -22,3 +22,7 @@ test('straight edge reports length; circular edge reports diameter',()=>{
   assert.equal(circle.kind,'diameter');assert.ok(Math.abs(circle.value-6)<1e-3);
 });
 test('part selections produce no entity dimensions',()=>{assert.deepEqual(values('part:0'),[]);});
+test('planar face dimensions lift along the outward face normal',()=>{
+  for(const d of entityDimensions('p','face:0',geometry))assert.deepEqual(d.offset?.map(x=>x+0),[0,0,1]);
+  for(const d of entityDimensions('p','face:1',geometry))assert.deepEqual(d.offset?.map(x=>x+0),[0,-1,0]);
+});

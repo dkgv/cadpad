@@ -3,7 +3,7 @@ import type {PickGeometry} from './picking';
 
 type Vec3 = [number,number,number];
 export interface EntityDimension {
-  id:string;kind:'overall'|'distance'|'diameter';part:string;start:Vec3;end:Vec3;value:number;label:string;
+  id:string;kind:'overall'|'distance'|'diameter';part:string;start:Vec3;end:Vec3;value:number;label:string;offset?:Vec3;
   definition?:{kind:'overall';instance_id:string;axis:'x'|'y'|'z'};
 }
 
@@ -22,8 +22,13 @@ export function entityDimensions(instance:string,entityId:string,geometry:PickGe
     const {vertices,triangles}=geometry.buffers;
     if(!range||!vertices||!triangles)return [];
     const points:THREE.Vector3[]=[],seen=new Set<number>();
-    for(let i=range[0]*3;i<range[1]*3;i++){const v=triangles[i];if(!seen.has(v)){seen.add(v);points.push(new THREE.Vector3(vertices[v*3],vertices[v*3+1],vertices[v*3+2]));}}
-    return faceDimensions(id,instance,points);
+    const vertex=(v:number)=>new THREE.Vector3(vertices[v*3],vertices[v*3+1],vertices[v*3+2]);
+    for(let i=range[0]*3;i<range[1]*3;i++){const v=triangles[i];if(!seen.has(v)){seen.add(v);points.push(vertex(v));}}
+    // Area-weighted winding normal: tessellations wind outward, so this is
+    // the side the face looks toward.
+    const outward=new THREE.Vector3();
+    for(let i=range[0]*3;i<range[1]*3;i+=3){const a=vertex(triangles[i]);outward.add(vertex(triangles[i+1]).sub(a).cross(vertex(triangles[i+2]).sub(a)));}
+    return faceDimensions(id,instance,points,outward);
   }
   if(kind==='edge'){
     const range=geometry.edges.range(geometry.edgeIds.indexOf(`edge:${indexText}`));
@@ -36,14 +41,14 @@ export function entityDimensions(instance:string,entityId:string,geometry:PickGe
   return [];
 }
 
-function axisBox(id:string,instance:string,points:THREE.Vector3[],prefix:string):EntityDimension[]{
+function axisBox(id:string,instance:string,points:THREE.Vector3[],prefix:string,offset?:Vec3):EntityDimension[]{
   const box=new THREE.Box3().setFromPoints(points);
   if(box.isEmpty())return [];
   const size=box.getSize(new THREE.Vector3());
   return AXES.flatMap((axis,index):EntityDimension[]=>{
     if(size.getComponent(index)<EPS)return [];
     const start=box.min.clone(),end=start.clone();end.setComponent(index,box.max.getComponent(index));
-    return [{id:`${id}:${axis}`,kind:'overall',part:instance,start:v3(start),end:v3(end),value:size.getComponent(index),label:`${prefix} ${AXIS_LABELS[index].toLowerCase()}`,definition:{kind:'overall',instance_id:instance,axis}}];
+    return [{id:`${id}:${axis}`,kind:'overall',part:instance,start:v3(start),end:v3(end),value:size.getComponent(index),label:`${prefix} ${AXIS_LABELS[index].toLowerCase()}`,definition:{kind:'overall',instance_id:instance,axis},...offset?{offset}:{}}];
   });
 }
 
@@ -66,7 +71,7 @@ function diameter(id:string,instance:string,c:{center:THREE.Vector3;radius:numbe
   return {id:`${id}:diameter`,kind:'diameter',part:instance,start:v3(c.center.clone().sub(offset)),end:v3(c.center.clone().add(offset)),value:c.radius*2,label};
 }
 
-function faceDimensions(id:string,instance:string,points:THREE.Vector3[]):EntityDimension[]{
+function faceDimensions(id:string,instance:string,points:THREE.Vector3[],outward:THREE.Vector3):EntityDimension[]{
   if(points.length<3)return [];
   // Plane from the most spread-out triple; a robust stand-in for a fit.
   const a=points[0];
@@ -79,13 +84,17 @@ function faceDimensions(id:string,instance:string,points:THREE.Vector3[]):Entity
   normal.normalize();
   const planar=points.every(p=>Math.abs(p.clone().sub(a).dot(normal))<=Math.max(EPS,scale*1e-4));
   if(!planar)return axisBox(id,instance,points,'Face');
+  // Lift planar face dimensions toward the viewer side of the face, never
+  // sideways along an in-plane axis that can recede into the scene.
+  if(outward.dot(normal)<0)normal.negate();
+  const lift=v3(normal);
   // A flat disc (no hole) reads best as one diameter.
   const centroid=points.reduce((s,q)=>s.add(q),new THREE.Vector3()).divideScalar(points.length);
   const rim=circle(points.filter(p=>p.distanceTo(centroid)>EPS));
   if(rim&&rim.radius>EPS)return [diameter(id,instance,rim,'Face')];
   // Axis-aligned planes use the part axes and extension lines.
   const dominant=[0,1,2].find(i=>Math.abs(normal.getComponent(i))>1-1e-6);
-  if(dominant!==undefined)return axisBox(id,instance,points,'Face');
+  if(dominant!==undefined)return axisBox(id,instance,points,'Face',lift);
   // Tilted plane: in-plane frame anchored to the part axis closest to the plane.
   const axis=[0,1,2].map(i=>new THREE.Vector3().setComponent(i,1)).sort((p,q)=>Math.abs(p.dot(normal))-Math.abs(q.dot(normal)))[0];
   const u=axis.sub(normal.clone().multiplyScalar(axis.dot(normal))).normalize(),v=normal.clone().cross(u).normalize();
@@ -94,8 +103,8 @@ function faceDimensions(id:string,instance:string,points:THREE.Vector3[]):Entity
   const at=(pu:number,pv:number)=>a.clone().add(u.clone().multiplyScalar(pu)).add(v.clone().multiplyScalar(pv));
   const corner=at(minU,minV);
   const out:EntityDimension[]=[];
-  if(maxU-minU>EPS)out.push({id:`${id}:u`,kind:'distance',part:instance,start:v3(corner),end:v3(at(maxU,minV)),value:maxU-minU,label:'Face width'});
-  if(maxV-minV>EPS)out.push({id:`${id}:v`,kind:'distance',part:instance,start:v3(corner),end:v3(at(minU,maxV)),value:maxV-minV,label:'Face height'});
+  if(maxU-minU>EPS)out.push({id:`${id}:u`,kind:'distance',part:instance,start:v3(corner),end:v3(at(maxU,minV)),value:maxU-minU,label:'Face width',offset:lift});
+  if(maxV-minV>EPS)out.push({id:`${id}:v`,kind:'distance',part:instance,start:v3(corner),end:v3(at(minU,maxV)),value:maxV-minV,label:'Face height',offset:lift});
   return out;
 }
 

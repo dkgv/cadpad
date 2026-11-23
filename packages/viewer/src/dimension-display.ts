@@ -128,6 +128,8 @@ interface PlacementInput {
   kind:string;part:string;end_part?:string;vertex_part?:string;
   start:[number,number,number];end:[number,number,number];vertex?:[number,number,number];value:number;
   definition?:{kind:string;axis?:'x'|'y'|'z'};
+  /** Part-local direction to lift the dimension off its geometry (extension lines). */
+  offset?:[number,number,number];
 }
 export function placeAnnotation(annotation:PlacementInput,transforms:Map<string,THREE.Matrix4|undefined>,localAngleLayouts:WeakMap<PlacementInput,ReturnType<typeof angleGeometry>>){
   const transform=transforms.get(annotation.part),endTransform=transforms.get(annotation.end_part||annotation.part);
@@ -153,9 +155,10 @@ export function placeAnnotation(annotation:PlacementInput,transforms:Map<string,
   }
   const value=annotation.part===(annotation.end_part||annotation.part)?annotation.value:start.distanceTo(end);
   const segments:DimensionSegment[]=[];
-  if(annotation.kind==='overall'){
+  if(annotation.offset||annotation.kind==='overall'){
     const axis=annotation.definition?.kind==='overall'?'xyz'.indexOf(annotation.definition.axis||'x'):0;
-    const offset=new THREE.Vector3().setComponent((axis+1)%3,-1).transformDirection(transform).multiplyScalar(8);
+    const direction=annotation.offset?new THREE.Vector3(...annotation.offset):new THREE.Vector3().setComponent((axis+1)%3,-1);
+    const offset=direction.transformDirection(transform).multiplyScalar(8);
     segments.push({start:start.clone(),end:start.clone().add(offset)},{start:end.clone(),end:end.clone().add(offset)});
     start.add(offset);end.add(offset);
   }
