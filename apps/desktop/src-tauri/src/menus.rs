@@ -64,6 +64,7 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
     let save = action("save", "Save", Some("CmdOrCtrl+S"))?;
     let save_as = action("save-as", "Save As…", Some("CmdOrCtrl+Shift+S"))?;
     let import = action("import", "Import Model…", Some("CmdOrCtrl+Shift+I"))?;
+    let model_from_image = action("model-from-image", "Model from Image…", None)?;
     let export_step = action("export-step", "STEP…", None)?;
     let export_stl = action("export-stl", "STL…", None)?;
     let export = Submenu::with_items(app, "Export", true, &[&export_step, &export_stl])?;
@@ -82,6 +83,7 @@ pub fn install(app: &mut tauri::App) -> tauri::Result<()> {
             &save_as,
             &PredefinedMenuItem::separator(app)?,
             &import,
+            &model_from_image,
             &export,
             &PredefinedMenuItem::separator(app)?,
             &close_tab,
@@ -341,7 +343,7 @@ fn enabled(id: &str, status: &MenuStatus) -> bool {
         "close-tab" => true,
         "split-right" | "split-down" => status.has_project,
         "save" | "save-as" => status.has_project && !status.busy,
-        "import" | "rebuild" => status.has_project && !status.working,
+        "import" | "model-from-image" | "rebuild" => status.has_project && !status.working,
         "export-step" | "export-stl" | "fit" | "iso" | "front" | "top" | "right" => {
             status.has_parts
         }
@@ -553,7 +555,7 @@ mod tests {
         ] {
             assert!(enabled(id, &status), "{id}");
         }
-        for id in ["import", "rebuild", "undo"] {
+        for id in ["import", "model-from-image", "rebuild", "undo"] {
             assert!(!enabled(id, &status), "{id}");
         }
         status.busy = true;

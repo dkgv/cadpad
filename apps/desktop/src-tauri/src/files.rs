@@ -45,6 +45,63 @@ async fn file_path(
         .map(|path| path.into_path().map_err(dialog_error))
         .transpose()
 }
+/// Largest image the Cadpad cloud accepts for image→CAD generation.
+const CLOUD_IMAGE_LIMIT: usize = 15 << 20;
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "gif", "heic", "PNG", "JPG", "JPEG", "WEBP", "GIF", "HEIC",
+];
+fn image_mime(name: &str) -> &'static str {
+    match Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("heic") => "image/heic",
+        _ => "image/png",
+    }
+}
+/// Pick an image with the native dialog and return it base64-encoded for
+/// `cloud_generate_into_workspace`. Nothing is written to the project.
+#[tauri::command]
+pub async fn choose_image(app: AppHandle) -> Result<Value, Value> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("Choose an image to turn into CAD")
+        .add_filter("Image", IMAGE_EXTENSIONS)
+        .pick_file(move |path| {
+            let _ = send.send(path);
+        });
+    let Some(path) = receive
+        .await
+        .map_err(dialog_error)?
+        .map(|path| path.into_path().map_err(dialog_error))
+        .transpose()?
+    else {
+        return Ok(json!({"cancelled": true}));
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "image.png".into());
+    let bytes = tauri::async_runtime::spawn_blocking(move || std::fs::read(&path))
+        .await
+        .map_err(dialog_error)?
+        .map_err(dialog_error)?;
+    if bytes.len() > CLOUD_IMAGE_LIMIT {
+        return Err(dialog_error("Choose an image smaller than 15 MiB"));
+    }
+    use base64::Engine;
+    Ok(json!({
+        "name": name,
+        "mime_type": image_mime(&name),
+        "image_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+    }))
+}
 #[tauri::command]
 pub async fn new_scratchpad(core: State<'_, Core>) -> Result<Value, Value> {
     let workspace = core

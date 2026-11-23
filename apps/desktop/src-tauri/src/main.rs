@@ -6,9 +6,9 @@ mod frontend_assets;
 mod menus;
 use builtin::{
     agent_chat, agent_conversation, agent_models, agent_settings, agent_start, agent_stop,
-    agent_turn, cloud_generate, cloud_generate_into_workspace, cloud_settings, cloud_sign_in,
+    agent_turn, cloud_generate, cloud_account, cloud_generate_into_workspace, cloud_settings, cloud_sign_in,
     cloud_stage_variant,
-    configure_agent, configure_cloud, connect_agent, forget_agent_key, forget_cloud_key,
+    configure_agent, connect_agent, forget_agent_key, forget_cloud_key,
 };
 mod files;
 mod git_status;
@@ -267,7 +267,6 @@ fn main() {
                 ),
             )?;
             let cloud = tauri::async_runtime::block_on(cadpad_agent::cloud::CloudService::open(
-                app.path().app_data_dir()?.join("cloud"),
                 std::sync::Arc::new(cadpad_agent::credentials::CadpadCloudCredentials),
             ))?;
             app.manage(agent);
@@ -312,6 +311,7 @@ fn main() {
             files::inspect_project_mesh,
             files::work_on_project_builder,
             files::open_project_model,
+            files::choose_image,
             save_project,
             check_external,
             reload_project,
@@ -350,7 +350,7 @@ fn main() {
             agent_chat,
             connect_agent,
             cloud_settings,
-            configure_cloud,
+            cloud_account,
             forget_cloud_key,
             cloud_sign_in,
             cloud_generate,

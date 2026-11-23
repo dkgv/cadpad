@@ -3,7 +3,7 @@ import type {Project} from './app';
 import type {ModelOpenFrame,OpenStage} from './model-open-timing';
 import type {Entity} from '@cadpad/viewer';
 export type SelectionContext={workspace:string;revision:string;entities:Entity[];omitted:Set<string>;capture:()=>string|null;toggleOmitted:(entity:Entity)=>void;clear:()=>void};
-export type ToolTab='model'|'move'|'simulate'|'test'|'assistant';
+export type ToolTab='model'|'move'|'simulate'|'test'|'image'|'assistant';
 export type SessionHost={
   workspaceId:string;modelEntry?:{entry:string;builder:string};onOpenModel?:(entry:string,builder:string,sourceReload?:Promise<void>)=>Promise<void>;
   /** Focused canvas session — owns menus, save, motion panels, and dialogs. */

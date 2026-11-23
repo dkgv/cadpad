@@ -135,16 +135,8 @@ pub async fn cloud_settings(cloud: State<'_, CloudService>) -> Result<Value, Val
 }
 
 #[tauri::command]
-pub async fn configure_cloud(
-    cloud: State<'_, CloudService>,
-    base_url: String,
-    api_key: Option<String>,
-    auth_frontend_url: Option<String>,
-) -> Result<Value, Value> {
-    cloud
-        .configure(base_url, api_key, auth_frontend_url)
-        .await
-        .map_err(error)
+pub async fn cloud_account(cloud: State<'_, CloudService>) -> Result<Value, Value> {
+    cloud.account().await.map_err(error)
 }
 
 #[tauri::command]

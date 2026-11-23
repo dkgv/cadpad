@@ -40,9 +40,9 @@ function modelTabTitle(project:Project|undefined,fallback:string,entry?:{builder
   const roots=[...new Set((project?.model.parts||[]).map(part=>part.name.split('/')[0]).filter(Boolean))];
   return roots.length===1?titleCase(roots[0]):fallback;
 }
-const toolTabs:Record<ToolTab,DockTab>={model:{id:'model',title:'Explorer',icon:'folder'},move:{id:'move',title:'Move',icon:'motion'},simulate:{id:'simulate',title:'Physics',icon:'physics'},test:{id:'test',title:'Requirements',icon:'tests'},assistant:{id:'assistant',title:'Assistant',icon:'chat'}};
+const toolTabs:Record<ToolTab,DockTab>={model:{id:'model',title:'Explorer',icon:'folder'},move:{id:'move',title:'Move',icon:'motion'},simulate:{id:'simulate',title:'Physics',icon:'physics'},test:{id:'test',title:'Requirements',icon:'tests'},image:{id:'image',title:'Cadpad Cloud',icon:'image'},assistant:{id:'assistant',title:'Assistant',icon:'chat'}};
 const toolIds=Object.keys(toolTabs) as ToolTab[];
-const leftTools=new Set<ToolTab>(['model','move','simulate','test']);
+const leftTools=new Set<ToolTab>(['model','move','simulate','test','image']);
 function isProjectHome(project:Project){
   return !project.model_parent&&(!!project.model_entry||
     (!project.model.parts.length&&(project.external_tracking||project.saved_revision!=null)&&!project.display_error&&project.activity.at(-1)?.state!=='failed'));

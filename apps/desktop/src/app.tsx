@@ -22,11 +22,14 @@ import {ModelHistory} from './model-history';
 import {ExternalChangesPanel} from './external-changes';
 import {AppAlert} from './app-alert';
 import {ProjectExplorer} from './explorer';
+import {FOLDER_DRAG_TYPE} from './source-catalog';
 import {resetSourceCatalogCache} from './source-catalog';
 import {QuickModelSelector} from './quick-model';
 import {LiveReply,FinishedReply,Markdown,type AgentStep} from './agent-steps';
 import {useDockDrag} from './dock-drag';
 import {ViewCube,type ViewCubeDirection} from './view-cube';
+import {AccountBadge,type CloudAccount} from './account-badge';
+import {ImageToModel,readModelImage,type ModelImage} from './image-to-model';
 import {SettingsDialog,type AgentSettings,type CloudSettings,type McpSettings,type ModelChoice} from './settings-dialog';
 
 const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren>(function ConversationScroll({children},forwardedRef){
@@ -58,12 +61,16 @@ type Job = { id:string;state:string;diagnostics:unknown;actor?:string };
 type AgentTurn = {id:string;workspace_id:string;chat_id?:string;state:'running'|'cancelling'|'cancelled'|'succeeded'|'failed';text:string;activity:string;error:{code:string;message:string}|null;artifacts:{handle:string;format:string;revision:string}[];steps?:AgentStep[];started_at?:number};
 type PendingAgentStart={workspace:string;cancelRequested:boolean;turn?:AgentTurn;stopping?:Promise<AgentTurn>};
 type ChatReference={letter:string;instance_id:string;entity_id:string;part:string;label:string;file?:string;line?:number};
-type ChatMessage = {image?:string;checkpoint_revision?:string;role:string;text:string;references?:ChatReference[];steps?:AgentStep[]};
-type MessageEdit=Pick<ChatMessage,'image'|'references'|'text'|'checkpoint_revision'>&{chatId:string;index:number};
+type ChatMessage = {image?:string;checkpoint_revision?:string;role:string;text:string;references?:ChatReference[];folders?:string[];steps?:AgentStep[]};
+type MessageEdit=Pick<ChatMessage,'image'|'references'|'folders'|'text'|'checkpoint_revision'>&{chatId:string;index:number};
 const MAX_REFERENCES=8;
+const MAX_FOLDERS=8;
 const MAX_ATTACHED_IMAGE=1024*1024;
 const entityKey=(entity:Entity)=>`${entity.revision}|${entity.instance_id}|${entity.entity_id}`;
 type AttachedImage={data:string;preview:string;name:string};
+/** A cloud image→CAD result (the winner or an `alternates[]` entry) in the shape `cloud_stage_variant` stages. */
+type CloudVersion={member?:string;model?:string|null;format:string;entry_point:string;source:string;assets?:unknown[]};
+type CloudGeneration=CloudVersion&{job_id:string;alternates?:CloudVersion[]};
 /** Encode a dropped laptop image as a bounded base64 PNG for agent_start. */
 async function encodeReferenceImage(file:File):Promise<AttachedImage>{
   if(!file.type.startsWith('image/'))throw new Error('Drop an image file to attach it to your next message.');
@@ -131,6 +138,20 @@ export function App({host}:{host?:SessionHost}={}) {
   const [omitted,setOmitted]=useState<Set<string>>(new Set());
   const [attachedImage,setAttachedImage]=useState<AttachedImage|null>(null);
   const [imageDropDepth,setImageDropDepth]=useState(0);
+  // Versions from the last image→CAD generation; `staged` indexes the one in the model.
+  const [cloudVersions,setCloudVersions]=useState<{workspace:string;versions:CloudVersion[];staged:number}|null>(null);
+  const [cloudGenerating,setCloudGenerating]=useState(false);
+  // Cadpad Cloud panel: the image to send and optional guidance text.
+  const [cloudImage,setCloudImage]=useState<ModelImage|null>(null),[cloudGuidance,setCloudGuidance]=useState('');
+  // Explorer folders attached to the next message, as project-relative paths.
+  const [folderReferences,setFolderReferences]=useState<string[]>([]);
+  function referenceFolder(path:string){
+    if(!folderReferences.includes(path)){
+      if(folderReferences.length>=MAX_FOLDERS)setSelectionNotice(`Reference up to ${MAX_FOLDERS} folders per message.`);
+      else setFolderReferences(current=>current.includes(path)?current:[...current,path]);
+    }
+    setPanel('assistant');
+  }
   function setReferences(next:Entity[]){referencesNow.current=next;updateReferences(next);}
   function choosePrimary(entity:Entity|null){const current=currentProject.current;selectionIntent.current=entity&&current?{workspace:current.workspace_id,entity}:null;updateSelection(entity);}
   /** Replaces the selection, keeping the reference set when `entity` already belongs to it. */
@@ -156,6 +177,8 @@ export function App({host}:{host?:SessionHost}={}) {
   const [properties,setProperties] = useState<Inspection|null>(null);
   const [inspectStatus,setInspectStatus]=useState('');
   const [selectionMode,setSelectionMode]=useState<SelectionMode>('face');
+  const [fillSelection,setFillSelection]=useState(()=>localStorage.getItem('cadpad.fill-selection')==='1');
+  useEffect(()=>{localStorage.setItem('cadpad.fill-selection',fillSelection?'1':'0');},[fillSelection]);
   const [panel,setFocusedTool]=useState<'model'|'motion'|'assistant'>('assistant');
   const [modelOpen,setModelOpen]=useState(true),[motionOpen,setMotionOpen]=useState(false),[assistantOpen,setAssistantOpen]=useState(true);
   function setPanel(target:'model'|'motion'|'assistant'){
@@ -315,10 +338,7 @@ export function App({host}:{host?:SessionHost}={}) {
   const [agentBackend,setAgentBackend]=useState('claude_cli');
   const [modelId,setModelId]=useState(''),[apiKey,setApiKey]=useState(''),[savingProvider,setSavingProvider]=useState(false);
   const [cloudSettings,setCloudSettings]=useState<CloudSettings|null>(null);
-  const [cloudBaseUrl,setCloudBaseUrl]=useState('http://127.0.0.1:8080');
-  const [cloudAuthFrontendUrl,setCloudAuthFrontendUrl]=useState('http://127.0.0.1:5173');
-  const [cloudApiKey,setCloudApiKey]=useState('');
-  const [savingCloud,setSavingCloud]=useState(false);
+  const [cloudAccount,setCloudAccount]=useState<CloudAccount|null>(null);
   const [signingInCloud,setSigningInCloud]=useState(false);
   const agentConfigPending=useRef(false);
   const assistantVisible=host?host.chrome&&host.visibleTools.includes('assistant'):assistantOpen;
@@ -443,8 +463,10 @@ export function App({host}:{host?:SessionHost}={}) {
     const pendingTab=targetChat&&targetChat!=='new'?targetChat:'new';
     pendingAgentStarts.current.set(workspace,pending);starting(workspace,'starting');notePendingChat(pendingTab);chatEpoch.current++;setError('');setNotice('');
     // Show the outbound message immediately; refreshChat reconciles with the server.
+    // Only composer sends carry the attached folders; programmatic prompts start without them.
+    const folders=edit?edit.folders??[]:submission===undefined?folderReferences:[];
     if(chatScope()===workspace){
-      const optimistic={role:'user',text:submitted,image:edit?edit.image:attachedImage?.data,references:edit?.references};
+      const optimistic={role:'user',text:submitted,image:edit?edit.image:attachedImage?.data,references:edit?.references,folders};
       const base=!targetChat||targetChat===activeChatId?chat:chatMessages[targetChat]||[];
       const next=[...(edit?base.slice(0,edit.index):base),optimistic];
       if(!targetChat||targetChat===activeChatId)setChat(next);
@@ -458,14 +480,14 @@ export function App({host}:{host?:SessionHost}={}) {
         ?(edit.references??[]).map(({instance_id,entity_id})=>({revision:current.revision,instance_id,entity_id}))
         :current.revision===candidates[0]?.revision?candidates.filter(item=>!composerOmitted.has(entityKey(item))):[];
       const image=edit?edit.image??null:foreign?null:attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
-      const turn=await invoke<AgentTurn>('agent_start',{workspace,...((modelWorkspace??current.workspace_id)!==workspace?{modelWorkspace:modelWorkspace??current.workspace_id}:{}),prompt:submitted,references:attached,image,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
+      const turn=await invoke<AgentTurn>('agent_start',{workspace,...((modelWorkspace??current.workspace_id)!==workspace?{modelWorkspace:modelWorkspace??current.workspace_id}:{}),prompt:submitted,references:attached,image,folders,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
       if(turn.workspace_id!==workspace)throw new Error('Agent reply belongs to another workspace');
       pending.turn=turn;
       dropPendingStart(pendingTab);
       if(turn.chat_id){if(['succeeded','failed','cancelled'].includes(turn.state))noteSettledChat(turn.chat_id,turn.id);else notePendingChat(turn.chat_id,turn.id);}
       if(chatScope()===workspace&&(!liveTurn.current||liveTurn.current.id===turn.id||liveTurn.current.id===previousId))showTurn(turn);
       if(pending.cancelRequested)await cancelAcceptedStart(pending);
-      if(chatScope()===workspace){if(!edit&&!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);if(!foreign){setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}}await refreshChat(workspace);}
+      if(chatScope()===workspace){if(!edit&&!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);setFolderReferences(current=>current.filter(path=>!folders.includes(path)));if(!foreign){setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}}await refreshChat(workspace);}
     }catch(error){
       dropPendingStart(pendingTab);
       if(pending.cancelRequested&&!pending.turn){if(chatScope()===workspace)void refreshChat(workspace).catch(()=>{});return;}
@@ -481,7 +503,14 @@ export function App({host}:{host?:SessionHost}={}) {
     return null;
   }
   function imageDrag(event:React.DragEvent,phase:'enter'|'over'|'leave'|'drop'){
-    if(![...event.dataTransfer.types].includes('Files'))return;
+    const types=[...event.dataTransfer.types];
+    if(types.includes(FOLDER_DRAG_TYPE)){
+      event.preventDefault();
+      if(phase==='over')event.dataTransfer.dropEffect='copy';
+      else if(phase==='drop'){const path=event.dataTransfer.getData(FOLDER_DRAG_TYPE);if(path)referenceFolder(path);}
+      return;
+    }
+    if(!types.includes('Files'))return;
     event.preventDefault();
     if(phase==='over'){event.dataTransfer.dropEffect='copy';return;}
     if(phase==='enter'){setImageDropDepth(depth=>depth+1);return;}
@@ -527,22 +556,13 @@ export function App({host}:{host?:SessionHost}={}) {
     }
     catch(e){setError(message(e));}finally{agentConfigPending.current=false;setSavingProvider(false);}
   }
-  async function saveCloud(){
-    setSavingCloud(true);setError('');
-    try{
-      const settings=await invoke<CloudSettings>('configure_cloud',{baseUrl:cloudBaseUrl,apiKey:cloudApiKey||null,authFrontendUrl:cloudAuthFrontendUrl||null});
-      setCloudSettings(settings);setCloudBaseUrl(settings.base_url);setCloudAuthFrontendUrl(settings.auth_frontend_url||cloudAuthFrontendUrl);setCloudApiKey('');
-      setNotice(settings.configured?'Image to CAD settings saved.':'API URL saved. Sign in with the browser to generate from images.');
-    }
-    catch(e){setError(message(e));}finally{setSavingCloud(false);}
-  }
   async function signInCloud(){
     setSigningInCloud(true);setError('');
     try{
-      await invoke<CloudSettings>('configure_cloud',{baseUrl:cloudBaseUrl,apiKey:null,authFrontendUrl:cloudAuthFrontendUrl||null});
       const result=await invoke<{configured?:boolean}>('cloud_sign_in');
       const settings=await invoke<CloudSettings>('cloud_settings');
-      setCloudSettings(settings);setCloudBaseUrl(settings.base_url);setCloudAuthFrontendUrl(settings.auth_frontend_url||cloudAuthFrontendUrl);setCloudApiKey('');
+      setCloudSettings(settings);
+      window.dispatchEvent(new CustomEvent('cadpad-cloud-auth'));
       setNotice(result.configured||settings.configured?'Signed in to Cadpad Cloud.':'Browser sign-in finished without a key.');
     }
     catch(e){setError(message(e));}finally{setSigningInCloud(false);}
@@ -750,7 +770,7 @@ export function App({host}:{host?:SessionHost}={}) {
     if(!chatWorkspace)return;
     pruneChatHosts(new Set());
     resetChatAttention();
-    setChat([]);setChatList([]);setActiveChatId(null);setChatMessages({});setAgentActivity('');setAttachedImage(null);setImageDropDepth(0);showTurn(null);
+    setChat([]);setChatList([]);setActiveChatId(null);setChatMessages({});setAgentActivity('');setAttachedImage(null);setFolderReferences([]);setImageDropDepth(0);showTurn(null);
     refreshChat(chatWorkspace).catch(e=>setError(message(e)));
   },[chatWorkspace]);
   useEffect(()=>{
@@ -793,13 +813,37 @@ export function App({host}:{host?:SessionHost}={}) {
     }).catch(e=>{if(active&&providerOpen)setError(message(e));});
     return()=>{active=false;};
   },[providerOpen,assistantVisible]);
+  const imageToolShown=!!host?.chrome&&host.visibleTools.includes('image');
+  useEffect(()=>{if(!host||imageToolShown)invoke<CloudSettings>('cloud_settings').then(setCloudSettings).catch(()=>{});},[imageToolShown]);
+  const ownsRail=!host||host.chrome;
+  function refreshCloudAccount(){
+    if(!ownsRail)return;
+    invoke<CloudAccount>('cloud_account').then(setCloudAccount).catch(()=>{});
+  }
+  useEffect(()=>{if(cloudSettings?.configured)refreshCloudAccount();else setCloudAccount(null);},[cloudSettings?.configured,ownsRail]);
+  // Sign-in state changes in any canvas session (each has its own Settings dialog).
+  useEffect(()=>{
+    const reload=()=>invoke<CloudSettings>('cloud_settings').then(setCloudSettings).catch(()=>{});
+    window.addEventListener('cadpad-cloud-auth',reload);
+    return()=>window.removeEventListener('cadpad-cloud-auth',reload);
+  },[]);
+  async function signOutCloud(){
+    try{await invoke('forget_cloud_key');setCloudSettings(current=>current?{...current,configured:false}:current);setCloudAccount(null);window.dispatchEvent(new CustomEvent('cadpad-cloud-auth'));}
+    catch(e){setError(message(e));}
+  }
+  const imageRequest=useRef<()=>void>(()=>{});imageRequest.current=()=>void pickImageForCad(true);
+  useEffect(()=>{
+    if(!host?.chrome)return;
+    const listener=()=>imageRequest.current();
+    window.addEventListener('cadpad-image-to-model',listener);
+    return()=>window.removeEventListener('cadpad-image-to-model',listener);
+  },[host?.chrome]);
   useEffect(()=>{
     if(!providerOpen)return;
     let active=true;
     invoke<CloudSettings>('cloud_settings').then(settings=>{
       if(!active)return;
-      setCloudSettings(settings);setCloudBaseUrl(settings.base_url||'http://127.0.0.1:8080');
-      setCloudAuthFrontendUrl(settings.auth_frontend_url||'http://127.0.0.1:5173');
+      setCloudSettings(settings);
     }).catch(e=>{if(active)setError(message(e));});
     return()=>{active=false;};
   },[providerOpen]);
@@ -882,6 +926,17 @@ export function App({host}:{host?:SessionHost}={}) {
       const viewport = new CadViewport(container.current,(entity,origin,batch)=>{if(!active)return;const current=currentProject.current;if(entity&&(!current||entity.revision!==current.revision||!viewport.hasScene(current.workspace_id,current.revision)))return;
         if(origin==='additive'){if(entity)toggleReference(entity);return;}
         if(origin==='mode'){const next=referencesNow.current.filter(item=>!sameEntity(item,selectionIntent.current?.entity));const primary=next[next.length-1]??null;setReferences(next);choosePrimary(primary);viewport.selectEntity(primary);return;}
+        if(origin==='fill'||origin==='fill-add'){
+          const region=(batch??[]).filter(item=>current&&item.revision===current.revision);
+          if(!entity||!region.length)return;
+          const now=origin==='fill-add'?referencesNow.current.filter(item=>current&&item.revision===current.revision):[];
+          // ⌘/Shift-click on a region that is already fully selected removes it.
+          const remove=origin==='fill-add'&&region.every(hit=>now.some(item=>sameEntity(item,hit)));
+          let next=remove?now.filter(item=>!region.some(hit=>sameEntity(item,hit))):[...now.filter(item=>!region.some(hit=>sameEntity(item,hit))),...region.slice(1),region[0]];
+          if(next.length>MAX_REFERENCES){setSelectionNotice(`This region has ${region.length} faces; only ${MAX_REFERENCES} references fit in one message.`);next=next.slice(-MAX_REFERENCES);}
+          const primary=remove?next[next.length-1]??null:entity;
+          setReferences(next);choosePrimary(primary);viewport.selectEntity(primary);if(primary&&!toolPanelOpen.current)setModelOpen(true);return;
+        }
         if(origin==='marquee'||origin==='marquee-add'){
           const hits=(batch??[]).filter(item=>current&&item.revision===current.revision);
           let next=origin==='marquee-add'?[...referencesNow.current.filter(item=>current&&item.revision===current.revision)]:[] as Entity[];
@@ -938,6 +993,7 @@ export function App({host}:{host?:SessionHost}={}) {
   },[project?.workspace_id,project?.revision,project?.display_generation,project?.display_error?.code,viewAttempt,graphicsLost,viewportAttempt,host?.visible]);
   useEffect(() => { viewer.current?.setDimensions(dimensions,scope); },[dimensions,scope,viewportAttempt]);
   useEffect(()=>{viewer.current?.setSelectionMode(selectionMode);},[selectionMode,viewportAttempt]);
+  useEffect(()=>{viewer.current?.setFillSelection(fillSelection);},[fillSelection,viewportAttempt]);
   useEffect(()=>{viewer.current?.setAdvancedTools(advancedView);},[advancedView,viewportAttempt]);
   useEffect(()=>{setInterferenceResult(null);},[motion?.revision,motion?.pose_version]);
   useEffect(()=>{viewer.current?.setManipulation(manipulating&&motion?.mode==='manipulate'&&!motion.playback,(joint,coordinate,unit,commit)=>{const current=currentProject.current;if(current&&viewer.current?.hasScene(current.workspace_id,current.revision))queueJoint(joint,coordinate,unit,commit);});},[manipulating,motion?.mode,motion?.playback?.recording_id,project?.workspace_id,project?.revision,viewportAttempt]);
@@ -1016,6 +1072,85 @@ export function App({host}:{host?:SessionHost}={}) {
         if(focus&&workspace===focus.workspace_id)invoke<Project>('project',{workspace}).then(setFocusProject).catch(()=>{});
       }
     } catch(e){setError(message(e));}finally{mutationBusy.current=false;setBusy(false);}
+  }
+  /** Shared guard + job hand-off for cloud commands that stage a draft and start a build. */
+  async function cloudMutation<T extends {job:Job}>(start:(workspace:string)=>Promise<T>):Promise<{workspace:string;result:T}|null>{
+    const focus=hostRef.current?.chrome?focusProject:null;
+    const target=focus&&hostRef.current?.focusWorkspace===focus.workspace_id?focus:currentProject.current;
+    const workspace=target?.workspace_id;
+    if(!workspace||mutationBusy.current)return null;
+    if(liveJob.current&&['queued','running'].includes(liveJob.current.state)){
+      setError('Wait for the current build to finish before changing the model.');
+      return null;
+    }
+    mutationBusy.current=true;
+    setBusy(true);setError('');setNotice('');
+    try{
+      const result=await start(workspace);
+      liveJob.current=result.job;setJob(result.job);
+      if(focus&&workspace===focus.workspace_id)invoke<Project>('project',{workspace}).then(setFocusProject).catch(()=>{});
+      return {workspace,result};
+    }catch(e){
+      if((e as {code?:string})?.code==='LLM_NOT_CONFIGURED'){setProviderOpen(true);setError('Sign in to Cadpad Cloud to turn images into models.');}
+      else setError(message(e));
+      return null;
+    }finally{mutationBusy.current=false;setBusy(false);}
+  }
+  const signInPrompt='Sign in to Cadpad Cloud to turn images into models.';
+  /** Re-read the keychain: another canvas session may have signed in or out since this one loaded. */
+  async function cloudSignedIn(){
+    const settings=await invoke<CloudSettings>('cloud_settings').catch(()=>null);
+    if(settings)setCloudSettings(settings);
+    return settings?.configured??true;
+  }
+  function openImageTool(){hostRef.current?.showTool('image');}
+  /** Send an image to Cadpad Cloud and stage the generated CadQuery into the open model. */
+  async function generateFromImage(image:ModelImage,prompt?:string):Promise<boolean>{
+    if(cloudGenerating)return false;
+    setCloudImage(image);if(prompt!==undefined)setCloudGuidance(prompt);openImageTool();
+    if(!await cloudSignedIn()){setError(signInPrompt);return false;}
+    setCloudGenerating(true);
+    try{
+      const done=await cloudMutation(workspace=>invoke<{generation:CloudGeneration;job:Job}>('cloud_generate_into_workspace',{workspace,imageBase64:image.data,mimeType:image.mime,prompt:prompt?.trim()||null,filename:image.name}));
+      if(!done)return false;
+      const {alternates=[],job_id:_,...winner}=done.result.generation;
+      setCloudVersions(alternates.length?{workspace:done.workspace,versions:[winner,...alternates],staged:0}:null);
+      refreshCloudAccount();
+      setNotice(`Generated a model from ${image.name}.${alternates.length?' Pick another version in Cadpad Cloud if this one is off.':''}`);
+      return true;
+    }finally{setCloudGenerating(false);}
+  }
+  async function chooseCloudVersion(index:number){
+    const current=cloudVersions;const version=current?.versions[index];
+    if(!current||!version||index===current.staged)return;
+    const done=await cloudMutation(workspace=>{
+      if(workspace!==current.workspace)throw new Error('These versions belong to another model.');
+      return invoke<{job:Job}>('cloud_stage_variant',{workspace,variant:version});
+    });
+    if(done)setCloudVersions(latest=>latest===current?{...current,staged:index}:latest);
+  }
+  /** Native picker. `generate` starts right away (menu, empty state); otherwise it only fills the panel. */
+  async function pickImageForCad(generate:boolean){
+    openImageTool();
+    try{
+      const picked=await invoke<{cancelled?:boolean;name:string;mime_type:string;image_base64:string}>('choose_image');
+      if(picked.cancelled)return;
+      const image={data:picked.image_base64,mime:picked.mime_type,name:picked.name};
+      if(generate&&currentProject.current&&!working)await generateFromImage(image,cloudGuidance);
+      else setCloudImage(image);
+    }catch(e){setError(message(e));}
+  }
+  /** Menu and empty-state entry. Generation state lives in the chrome session that owns the panel. */
+  function requestImageToModel(){
+    if(hostRef.current&&!hostRef.current.chrome){window.dispatchEvent(new CustomEvent('cadpad-image-to-model'));return;}
+    void pickImageForCad(true);
+  }
+  /** Composer: turn the attached image (with the draft as guidance) into a model. */
+  async function attachedImageToCad(chatId:string){
+    const image=attachedImage;if(!image)return;
+    if(await generateFromImage({data:image.data,mime:'image/png',name:image.name},draftFor(chatId))){
+      setAttachedImage(current=>current===image?null:current);setDraft(chatId,'');
+    }
   }
   async function openModelEntry(entry:string,builder:string){
     if(!hostRef.current?.onOpenModel){await run('work_on_project_builder',{entry,builder});return;}
@@ -1222,11 +1357,13 @@ export function App({host}:{host?:SessionHost}={}) {
       case 'save':if(!busy)void save();break;
       case 'save-as':if(!busy)void save(true);break;
       case 'import':if(!working)void run('import_model');break;
+      case 'model-from-image':requestImageToModel();break;
       case 'rebuild':if(!working)void run('rebuild');break;
       case 'export-step':void download('STEP');break;
       case 'export-stl':void download('STL');break;
       case 'undo':if(document.activeElement?.matches('input:not([type=range]):not([type=checkbox]),textarea,[contenteditable=true]')){document.execCommand?.('undo');}else if(!working&&project?.activity.some(job=>job.state==='succeeded'))void run('undo');break;
       case 'select-face':setSelectionMode('face');break;case 'select-edge':setSelectionMode('edge');break;case 'select-part':setSelectionMode('part');break;
+      case 'select-fill':setFillSelection(value=>!value);break;
       case 'scope-selected':setScope('selected');break;case 'scope-pinned':setScope('pinned');break;case 'scope-all':setScope('all');break;
       case 'dimensions':setDimensions(value=>!value);break;
       case 'advanced':setAdvancedView(value=>!value);break;
@@ -1245,7 +1382,7 @@ export function App({host}:{host?:SessionHost}={}) {
     const refresh=()=>setEditing(!!document.activeElement?.matches('input:not([type=range]):not([type=checkbox]),textarea,[contenteditable=true]'));
     document.addEventListener('focusin',refresh);document.addEventListener('focusout',refresh);return()=>{document.removeEventListener('focusin',refresh);document.removeEventListener('focusout',refresh);};
   },[]);
-  useEffect(()=>{if(host&&!host.active)return;void invoke('update_native_menu',{status:{has_project:!!project,has_parts:!!project?.model.parts.length,working,busy,can_undo:!!project?.activity.some(job=>job.state==='succeeded'),editing,dimensions,advanced:advancedView,document_name:project?.name||'Untitled',inspector:panel,model_browser_open:modelOpen,motion_panel_open:motionOpen,has_selection:!!selection,has_hidden_parts:!!hidden.size,selection_mode:selectionMode,dimension_scope:scope,workspaces:workspaces.filter(ws=>!ws.model_parent).map(ws=>({id:ws.workspace_id,name:ws.name,selected:ws.workspace_id===(project?.model_parent||project?.workspace_id),running:!!ws.running}))}}).catch(e=>setError(message(e)));},[project?.workspace_id,project?.name,project?.revision,project?.model.parts.length,working,busy,editing,dimensions,advancedView,panel,modelOpen,motionOpen,selection,hidden,selectionMode,scope,workspaces,host?.active]);
+  useEffect(()=>{if(host&&!host.active)return;void invoke('update_native_menu',{status:{has_project:!!project,has_parts:!!project?.model.parts.length,working,busy,can_undo:!!project?.activity.some(job=>job.state==='succeeded'),editing,dimensions,advanced:advancedView,document_name:project?.name||'Untitled',inspector:panel,model_browser_open:modelOpen,motion_panel_open:motionOpen,has_selection:!!selection,has_hidden_parts:!!hidden.size,selection_mode:selectionMode,fill_selection:fillSelection,dimension_scope:scope,workspaces:workspaces.filter(ws=>!ws.model_parent).map(ws=>({id:ws.workspace_id,name:ws.name,selected:ws.workspace_id===(project?.model_parent||project?.workspace_id),running:!!ws.running}))}}).catch(e=>setError(message(e)));},[project?.workspace_id,project?.name,project?.revision,project?.model.parts.length,working,busy,editing,dimensions,advancedView,panel,modelOpen,motionOpen,selection,hidden,selectionMode,fillSelection,scope,workspaces,host?.active]);
   useEffect(()=>{
     const dialog=settingsDialog.current;if(!dialog)return;
     if(providerOpen&&!dialog.open)dialog.showModal();else if(!providerOpen&&dialog.open)dialog.close();
@@ -1300,6 +1437,8 @@ export function App({host}:{host?:SessionHost}={}) {
   const activityRail=(      <nav className="activity-rail" aria-label="Workspace panels">
         <button id="tab-model" {...railEvents('model','Explorer')} aria-label="Toggle Explorer panel" data-sidebar-tooltip="Explorer" aria-controls="panel-model" aria-expanded={host?host.visibleTools.includes('model'):modelOpen} onClick={()=>{if(host)host.showTool('model',true);else if(modelOpen)setModelOpen(false);else setPanel('model');}}><Icon name="folder" size={21}/></button>
         {motionTools.filter(tool=>tool.id!=='simulate').map(tool=><button key={tool.id} id={tool.button} {...railEvents(tool.id,tool.title)} aria-label={`Toggle ${tool.title} panel`} data-sidebar-tooltip={tool.title} aria-controls={host?`panel-${tool.id}`:"panel-motion"} aria-expanded={host?host.visibleTools.includes(tool.id):motionOpen&&motionTask===tool.id} onClick={()=>openMotionTool(tool.id,true)}><Icon name={tool.icon} size={21}/></button>)}
+        {host&&<button id="tab-image" {...railEvents('image','Cadpad Cloud')} aria-label="Toggle Cadpad Cloud panel" data-sidebar-tooltip="Cadpad Cloud" aria-controls="panel-image" aria-expanded={host.visibleTools.includes('image')} onClick={()=>host.showTool('image',true)}><Icon name="image" size={21}/></button>}
+        {cloudSettings?.configured&&<AccountBadge account={cloudAccount} onSettings={()=>setProviderOpen(true)} onSignOut={()=>void signOutCloud()}/>}
 
       </nav>);
   const noticesPanel=(        <div className="workspace-notices inspector-page">      {notice&&<p className="notice">{notice}</p>}
@@ -1308,6 +1447,15 @@ export function App({host}:{host?:SessionHost}={}) {
 
 
 </div>);
+  const imagePanel=(<ImageToModel signedIn={cloudSettings?cloudSettings.configured:null} signingIn={signingInCloud}
+    image={cloudImage} guidance={cloudGuidance} generating={cloudGenerating}
+    versions={cloudVersions&&cloudVersions.workspace===(focusProject??project)?.workspace_id?cloudVersions.versions.map((version,index)=>({label:index===0?'Best match':`Option ${index+1}`,title:version.model||version.member||undefined})):[]}
+    staged={cloudVersions?.staged??0} disabled={!project||working}
+    onSignIn={()=>void signInCloud()} onChoose={()=>void pickImageForCad(false)}
+    onFile={file=>void readModelImage(file).then(image=>{setCloudImage(image);setError('');}).catch(e=>setError(message(e)))}
+    onClear={()=>setCloudImage(null)} onGuidance={setCloudGuidance}
+    onGenerate={()=>{if(cloudImage)void generateFromImage(cloudImage,cloudGuidance);}}
+    onVersion={index=>void chooseCloudVersion(index)} onDismissVersions={()=>setCloudVersions(null)}/>);
   // Requirements belong to the project: the shared sidebar shows them for every model.
   const requirementModels=useProjectModels(host?.chrome||!host?project?.workspace_id:undefined,host?.chrome||!host?project?.revision:undefined);
   const requirementsBody=project&&<Requirements project={project.workspace_id} projectRevision={project.revision} projectRunnable={project.model.parts.length>0}
@@ -1325,7 +1473,7 @@ export function App({host}:{host?:SessionHost}={}) {
             {!host&&<PanelResizeHandle panel="model" value={panelSizes.model} onChange={value=>resizePanel('model',value)}/>}
             {!host&&<header className="dock-heading"><strong>Explorer</strong><button className="icon-button" aria-label="Close Explorer" onClick={()=>{setModelOpen(false);requestAnimationFrame(()=>document.getElementById('tab-model')?.focus());}}><Icon name="close" size={16}/></button></header>}
             <div className="model-browser-content">
-          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':selectedMesh&&selection.entity_id.startsWith('face:')?'Surface':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">{selectedMesh?'Measured from STL triangles.':'Measured on the current model.'}</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={modelPickerBusy} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its models and parts.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
+          {explorer?<ProjectExplorer catalogWorkspace={host?.chrome?project?.workspace_id:undefined} catalogRevision={host?.chrome?project?.revision:undefined} activeModel={host?.chrome?host.focusModelEntry:host?.modelEntry} openingModel={host?.openingModel} selectionPanel={selection?<div><p className="selection-name">{explorer.model.parts.find(part=>part.instance_id===selection.instance_id)?.name||selection.instance_id}<span>{selection.entity_id.startsWith('part:')?'Object':selectedMesh&&selection.entity_id.startsWith('face:')?'Surface':humanLabel(selection.entity_id.split(':')[0])}</span></p><button onClick={isolatePart}>Isolate object</button><p className="muted">{selectedMesh?'Measured from STL triangles.':'Measured on the current model.'}</p>{inspectStatus?<><p className="muted">{inspectStatus}</p><button disabled={working} onClick={()=>run('rebuild')}>Rebuild as new revision</button></>:<PropertySummary inspection={properties}/>}</div>:undefined} workspace={explorer.workspace_id} revision={explorer.revision} builderDisabled={modelPickerBusy} onChooseBuilder={(entry,builder)=>void openModelEntry(entry,builder)} onReferenceFolder={referenceFolder} parts={generatedProjectView&&explorer.workspace_id===project?.workspace_id&&!host?.focusModelEntry?[]:explorer.model.parts} parameters={Object.entries(explorer.parameters).map(([name,p])=><label className="parameter" key={`${explorer.revision}:${name}`}><span title={p.description}>{humanLabel(name)}</span><input id={`parameter:${name}`} type="number" defaultValue={p.value} min={p.minimum??undefined} max={p.maximum??undefined} disabled={working} onBlur={e=>{const value=Number(e.target.value);if(value!==p.value)run('parameter',{parameter:name,value,unit:p.unit});}} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}}/><small>{p.unit}</small></label>)} selected={selection?.instance_id} hidden={hidden} onShowAll={showAllParts} onSelect={id=>{const entity={revision:explorer.revision,instance_id:id,entity_id:'part:0'};if(viewer.current?.hasScene(explorer.workspace_id,explorer.revision))viewer.current.select(id);else window.dispatchEvent(new CustomEvent('cadpad-canvas-select',{detail:{workspace:explorer.workspace_id,revision:explorer.revision,instanceId:id}}));setSelection(entity);}} onToggleVisibility={id=>{const next=new Set(hiddenIntent.current);if(next.has(id))next.delete(id);else next.add(id);applyVisibility(next);window.dispatchEvent(new CustomEvent('cadpad-canvas-visibility',{detail:{workspace:explorer.workspace_id,hidden:[...next]}}));}}/>:<div className="panel-empty"><h3>No project open</h3><p>Open a project to browse its models and parts.</p><button disabled={working} onClick={()=>open('open_project')}>Open a project</button></div>}
 
         </div>
           </aside>);
@@ -1355,7 +1503,7 @@ export function App({host}:{host?:SessionHost}={}) {
   const canvasPanel=(            <section className={`workspace ${modelInCanvas?'has-model':''}`} aria-label="3D modeling canvas">
       <div className="workspace-stage">
       {modelInCanvas&&<nav className="viewport-tools" aria-label="Model tools">
-        <div className="tool-group"><Icon name="cube" size={16}/><button className="native-picker" aria-label="Selection kind" title="Click picks one item. Shift-drag selects by rectangle. ⌘/Ctrl-click adds or removes." aria-haspopup="menu" onClick={event=>nativePopup('selection',event.currentTarget)}>Pick {({face:'faces',edge:'edges',part:'objects'})[selectionMode]}<Icon name="chevron" size={10}/></button></div><span className="tool-divider"/>
+        <div className="tool-group"><Icon name="cube" size={16}/><button className="native-picker" aria-label="Selection kind" title={`Click picks one item. Shift-drag selects by rectangle. ⌘/Ctrl-click adds or removes.`} aria-haspopup="menu" onClick={event=>nativePopup('selection',event.currentTarget)}>Pick {({face:'faces',edge:'edges',part:'objects'})[selectionMode]}<Icon name="chevron" size={10}/></button>{selectionMode==='face'&&<button className={fillSelection?'active':''} aria-pressed={fillSelection} title="Fill to edges: clicking a face also selects every face around it, up to the drawn edges" onClick={()=>setFillSelection(!fillSelection)}><Icon name="fill" size={16}/>Fill</button>}</div><span className="tool-divider"/>
         <button className={dimensions?'active':''} aria-pressed={dimensions} onClick={()=>setDimensions(!dimensions)}><Icon name="measure" size={16}/>Dimensions</button>
 
       </nav>}
@@ -1373,7 +1521,7 @@ export function App({host}:{host?:SessionHost}={}) {
       {!host?.modelEntry&&(generatedProjectView||!project?.model.parts.length)&&job?.state!=='failed'&&(project?.external_tracking&&(project.files?.length??0)>1?<div className="empty">
         <h1>No model open</h1>
         {job&&['queued','running'].includes(job.state)?<p role="status">Building selected model…</p>:<p>Choose a model in Explorer to open it here.</p>}
-      </div>:<div className="empty"><h1>Start a model</h1><p>Import a model or ask the assistant to create one.</p><div className="start-actions"><div className="start-file-actions"><button className="primary-button" disabled={working||!project} aria-label="Import model" onClick={()=>void run('import_model')}><Icon name="import" size={15}/>Import model…</button></div></div></div>)}
+      </div>:<div className="empty"><h1>Start a model</h1><p>Import a model or ask the assistant to create one.</p><div className="start-actions"><div className="start-file-actions"><button className="primary-button" disabled={working||!project} aria-label="Import model" onClick={()=>void run('import_model')}><Icon name="import" size={15}/>Import model…</button><button disabled={working||!project} onClick={requestImageToModel}><Icon name="sparkles" size={15}/>Model from image…</button></div></div></div>)}
       {!advancedView&&modelInCanvas&&<nav className="camera-controls" aria-label="Camera views">
         <ViewCube getQuaternion={()=>viewer.current?.cameraQuaternion()??null} onView={chooseCamera}/>
         <button className="camera-fit" aria-label="Fit model in view" title="Fit model" onClick={()=>chooseCamera('fit')}><Icon name="fit" size={18}/><small>Fit</small></button>
@@ -1411,7 +1559,7 @@ export function App({host}:{host?:SessionHost}={}) {
               <ConversationScroll key={`${project?.workspace_id}:${chatId}`} ref={activePane?conversationRef:undefined}>
                 <div className="inspector-page" id={activePane?'panel-assistant':undefined} role="region" aria-label="Assistant conversation">
                   {!messages.length&&!live&&<div className="assistant-welcome"><h3>Describe a change</h3><p>Ask for a part, an edit, or a mechanism. It shows up in this document.</p></div>}
-                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p>{entry.text}</p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({...entry,chatId,index})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending} onClick={()=>void run('restore_checkpoint',{target:entry.checkpoint_revision})}><Icon name="undo" size={13}/>Restore</button>}</>:<FinishedReply text={entry.text} steps={entry.steps}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=><li key={`${chip.instance_id}:${chip.entity_id}`} className="reference-chip" title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`}>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></li>)}</ul>}</div>)}
+                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p>{entry.text}</p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({...entry,chatId,index})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending} onClick={()=>void run('restore_checkpoint',{target:entry.checkpoint_revision})}><Icon name="undo" size={13}/>Restore</button>}</>:<FinishedReply text={entry.text} steps={entry.steps}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=><li key={`${chip.instance_id}:${chip.entity_id}`} className="reference-chip" title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`}>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></li>)}</ul>}{!!entry.folders?.length&&<ul className="message-references" aria-label="Referenced folders">{entry.folders.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span></li>)}</ul>}</div>)}
                   {activePane&&!!agentChromeStatus&&<span className="visually-hidden" data-agent-chrome-status role="status">{agentChromeStatus}</span>}
                   {live&&<div className="chat-message assistant streaming" aria-live="polite"><strong>Cadpad</strong>{agentWorking&&agentTurn.steps?.length?<LiveReply steps={agentTurn.steps} activity={agentTurn.activity} startedAt={agentTurn.started_at} stopping={agentStartCancelling||agentTurn.state==='cancelling'}/>:agentWorking&&agentTurn.text?<><Markdown text={agentTurn.text}/><LiveReply steps={[]} activity={agentTurn.activity} startedAt={agentTurn.started_at}/></>:<LiveReply steps={[]} activity={agentStartCancelling?'Stopping':agentWorking?agentTurn.activity:'Starting'} startedAt={agentWorking?agentTurn.started_at:undefined}/>}</div>}
                   {live&&agentTurn?.state==='failed'&&<p className="agent-failure">{agentTurn.error?.message||'The agent could not finish this change.'}</p>}
@@ -1419,8 +1567,10 @@ export function App({host}:{host?:SessionHost}={}) {
                   {live&&!!agentTurn?.artifacts.length&&<section className="agent-artifacts">{agentTurn.artifacts.map(artifact=><button key={artifact.handle} onClick={()=>saveAgentArtifact(artifact)}>Save {artifact.format} export</button>)}</section>}
                 </div>
               </ConversationScroll>
-              <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&selectionNotice&&<div className="composer-notice" role="status">{selectionNotice}<button type="button" className="icon-button" aria-label="Dismiss selection notice" onClick={()=>setSelectionNotice('')}><Icon name="close" size={12}/></button></div>}{activePane&&!!composerReferences.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>remoteSelection?focusedSelection?.toggleOmitted(chip.entity):toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<textarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&composerReferences.length?(composerReferences.length>1?'Ask about A, B…  (⇧-click to add or remove)':'Ask about this selection…  (⇧-click to add more)'):activePane&&attachedImage?'Ask about this image…':'Ask for a part or a change…'} value={draft} onPaste={event=>{
+              <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&selectionNotice&&<div className="composer-notice" role="status">{selectionNotice}<button type="button" className="icon-button" aria-label="Dismiss selection notice" onClick={()=>setSelectionNotice('')}><Icon name="close" size={12}/></button></div>}{activePane&&!!composerReferences.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>remoteSelection?focusedSelection?.toggleOmitted(chip.entity):toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&!!folderReferences.length&&<ul className="composer-references" aria-label="Folders sent with your message">{folderReferences.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span><button type="button" className="reference-remove" aria-label={`Remove folder ${path}`} onClick={()=>setFolderReferences(current=>current.filter(item=>item!==path))}><Icon name="close" size={11}/></button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="composer-image-action" title="Generate an editable model from this image with Cadpad Cloud. Your message is sent as guidance." disabled={!project||working} onClick={()=>void attachedImageToCad(chatId)}><Icon name="sparkles" size={12}/>{cloudGenerating?'Generating…':'Turn into model'}</button><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<textarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&composerReferences.length?(composerReferences.length>1?'Ask about A, B…  (⇧-click to add or remove)':'Ask about this selection…  (⇧-click to add more)'):activePane&&attachedImage?'Ask about this image…':activePane&&folderReferences.length?(folderReferences.length>1?'Ask about these folders…':'Ask about this folder…'):'Ask for a part or a change…'} value={draft} onPaste={event=>{
                 const text=event.clipboardData.getData('text/plain');
+                const pasted=[...event.clipboardData.files].find(item=>item.type.startsWith('image/'));
+                if(!text&&pasted){event.preventDefault();void encodeReferenceImage(pasted).then(image=>{setAttachedImage(image);setError('');}).catch(error=>setError(message(error)));return;}
                 if(!text)return;
                 event.preventDefault();
                 const input=event.currentTarget,start=input.selectionStart,end=input.selectionEnd;
@@ -1451,10 +1601,6 @@ export function App({host}:{host?:SessionHost}={}) {
       cleaningCache={cleaningCache}
       providerSettings={providerSettings}
       cloudSettings={cloudSettings}
-      cloudBaseUrl={cloudBaseUrl}
-      cloudAuthFrontendUrl={cloudAuthFrontendUrl}
-      cloudApiKey={cloudApiKey}
-      savingCloud={savingCloud}
       signingInCloud={signingInCloud}
       mcpSettings={mcpSettings}
       models={agentModels}
@@ -1464,12 +1610,8 @@ export function App({host}:{host?:SessionHost}={}) {
       onApiKey={setApiKey}
       onSave={()=>void saveProvider()}
       onForgetKey={()=>invoke('forget_agent_key').then(()=>{if(providerSettings)setProviderSettings({...providerSettings,configured:false});setApiKey('');}).catch(e=>setError(message(e)))}
-      onCloudBaseUrl={setCloudBaseUrl}
-      onCloudAuthFrontendUrl={setCloudAuthFrontendUrl}
-      onCloudApiKey={setCloudApiKey}
-      onSaveCloud={()=>void saveCloud()}
       onSignInCloud={()=>void signInCloud()}
-      onForgetCloudKey={()=>invoke('forget_cloud_key').then(()=>{if(cloudSettings)setCloudSettings({...cloudSettings,configured:false});setCloudApiKey('');}).catch(e=>setError(message(e)))}
+      onForgetCloudKey={()=>void signOutCloud()}
       onRecheck={()=>invoke<AgentSettings>('agent_settings').then(setProviderSettings).catch(error=>setError(message(error)))}
       onCleanCache={()=>void cleanCache()}
       onExternalOpen={setSettingsOpen}
@@ -1484,6 +1626,7 @@ export function App({host}:{host?:SessionHost}={}) {
     {host.active&&createPortal(motionPanel('move'),host.tools.move,'move')}
     {host.active&&createPortal(motionPanel('simulate'),host.tools.simulate,'simulate')}
     {host.chrome&&createPortal(requirementsPanel,host.tools.test,'test')}
+    {host.chrome&&createPortal(imagePanel,host.tools.image,'image')}
     {host.chrome&&createPortal(assistantPanel,host.tools.assistant)}
     {canvasPanel}{host.chrome&&createPortal(externalReview,host.changes)}{host.active&&dialogs}{host.active&&importSetup&&createPortal(importSetup,document.body)}
     {/* Shared chrome can outlive the canvas tab that owns its settings. */}

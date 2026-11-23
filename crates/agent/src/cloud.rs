@@ -4,37 +4,34 @@ use cadpad_core::{Error, Result};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use std::{sync::Arc, time::Duration};
 
-const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8080";
-const DEFAULT_AUTH_FRONTEND_URL: &str = "http://127.0.0.1:5173";
+/// Hosted Cadpad API. Override with `CADPAD_API_URL` for local development.
+const UPSTREAM_API_URL: &str = "https://api.cadpad.app";
+/// Hosted Cadpad site used for browser sign-in. Override with `CADPAD_AUTH_URL`.
+const UPSTREAM_AUTH_URL: &str = "https://cadpad.app";
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct CloudSettings {
-    #[serde(default = "default_base_url")]
-    pub base_url: String,
-    /// Public web origin used when opening the browser for Firebase login.
-    #[serde(default = "default_auth_frontend_url")]
-    pub auth_frontend_url: String,
+#[derive(Clone, Debug)]
+struct Endpoints {
+    base_url: String,
+    auth_frontend_url: String,
 }
 
-fn default_base_url() -> String {
-    DEFAULT_BASE_URL.into()
-}
-
-fn default_auth_frontend_url() -> String {
-    DEFAULT_AUTH_FRONTEND_URL.into()
-}
-
-impl Default for CloudSettings {
-    fn default() -> Self {
+impl Endpoints {
+    fn resolve() -> Self {
         Self {
-            base_url: default_base_url(),
-            auth_frontend_url: default_auth_frontend_url(),
+            base_url: env_url("CADPAD_API_URL", UPSTREAM_API_URL),
+            auth_frontend_url: env_url("CADPAD_AUTH_URL", UPSTREAM_AUTH_URL),
         }
     }
+}
+
+fn env_url(name: &str, fallback: &str) -> String {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+        .unwrap_or_else(|| fallback.into())
 }
 
 #[derive(Clone, Deserialize, Debug)]
@@ -100,31 +97,15 @@ struct JobResponse {
 }
 
 pub struct CloudService {
-    root: PathBuf,
-    settings: Mutex<CloudSettings>,
+    endpoints: Endpoints,
     credentials: Arc<dyn Credentials>,
     http: reqwest::Client,
 }
 
 impl CloudService {
-    pub async fn open(root: PathBuf, credentials: Arc<dyn Credentials>) -> Result<Self> {
-        tokio::fs::create_dir_all(&root).await.map_err(|error| {
-            Error::domain("IO_ERROR", format!("Could not create cloud settings dir: {error}"))
-        })?;
-        let settings = tokio::fs::read(root.join("cloud_settings.json"))
-            .await
-            .ok()
-            .and_then(|bytes| {
-                if bytes.len() < 65536 {
-                    serde_json::from_slice::<CloudSettings>(&bytes).ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
+    pub async fn open(credentials: Arc<dyn Credentials>) -> Result<Self> {
         Ok(Self {
-            root,
-            settings: Mutex::new(settings),
+            endpoints: Endpoints::resolve(),
             credentials,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -134,7 +115,6 @@ impl CloudService {
     }
 
     pub async fn settings(&self) -> Result<Value> {
-        let settings = self.settings.lock().await.clone();
         let credentials = self.credentials.clone();
         let configured = tokio::task::spawn_blocking(move || credentials.get().map(|key| key.is_some()))
             .await
@@ -145,81 +125,34 @@ impl CloudService {
                 )
             })??;
         Ok(json!({
-            "base_url": settings.base_url,
-            "auth_frontend_url": settings.auth_frontend_url,
+            "base_url": self.endpoints.base_url,
             "configured": configured,
             "credential_storage": "system_keychain",
         }))
     }
 
-    pub async fn configure(
-        &self,
-        base_url: String,
-        api_key: Option<String>,
-        auth_frontend_url: Option<String>,
-    ) -> Result<Value> {
-        let base_url = base_url.trim().trim_end_matches('/').to_string();
-        if base_url.is_empty() {
+    /// Save a Cadpad API key (`cpd_…`) to the system keychain.
+    async fn save_key(&self, api_key: String) -> Result<Value> {
+        let secret = Secret::new(api_key)?;
+        if !secret.expose().starts_with("cpd_") {
             return Err(Error::domain(
                 "INVALID_PARAMETER",
-                "Enter the Cadpad API base URL",
+                "Cadpad API keys start with cpd_",
             ));
         }
-        if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-            return Err(Error::domain(
-                "INVALID_PARAMETER",
-                "API base URL must start with http:// or https://",
-            ));
-        }
-        let current = self.settings.lock().await.clone();
-        let auth_frontend_url = auth_frontend_url
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or(current.auth_frontend_url);
-        if !(auth_frontend_url.starts_with("http://") || auth_frontend_url.starts_with("https://"))
-        {
-            return Err(Error::domain(
-                "INVALID_PARAMETER",
-                "Auth site URL must start with http:// or https://",
-            ));
-        }
-        if let Some(key) = api_key {
-            let secret = Secret::new(key)?;
-            if !secret.expose().starts_with("cpd_") {
-                return Err(Error::domain(
-                    "INVALID_PARAMETER",
-                    "Cadpad API keys start with cpd_",
-                ));
-            }
-            let credentials = self.credentials.clone();
-            tokio::task::spawn_blocking(move || credentials.set(secret))
-                .await
-                .map_err(|_| {
-                    Error::domain("CREDENTIAL_UNAVAILABLE", "Could not save the API key")
-                })??;
-        }
-        let next = CloudSettings {
-            base_url,
-            auth_frontend_url,
-        };
-        let bytes = serde_json::to_vec_pretty(&next).map_err(|error| {
-            Error::domain("IO_ERROR", format!("Could not encode cloud settings: {error}"))
-        })?;
-        tokio::fs::write(self.root.join("cloud_settings.json"), bytes)
+        let credentials = self.credentials.clone();
+        tokio::task::spawn_blocking(move || credentials.set(secret))
             .await
-            .map_err(|error| {
-                Error::domain("IO_ERROR", format!("Could not save cloud settings: {error}"))
-            })?;
-        *self.settings.lock().await = next;
+            .map_err(|_| Error::domain("CREDENTIAL_UNAVAILABLE", "Could not save the API key"))??;
         self.settings().await
     }
 
     /// Start browser login: open the Cadpad site, poll until an API key is minted.
     pub async fn sign_in_with_browser(&self) -> Result<Value> {
-        let (base_url, auth_frontend_url) = {
-            let settings = self.settings.lock().await;
-            (settings.base_url.clone(), settings.auth_frontend_url.clone())
-        };
+        let Endpoints {
+            base_url,
+            auth_frontend_url,
+        } = self.endpoints.clone();
         let response = self
             .http
             .post(format!("{base_url}/v1/auth/device"))
@@ -298,8 +231,7 @@ impl CloudService {
                     let api_key = poll_body.api_key.ok_or_else(|| {
                         Error::domain("AUTH_FAILED", "Authorized response missing API key")
                     })?;
-                    self.configure(base_url, Some(api_key), Some(auth_frontend_url))
-                        .await?;
+                    self.save_key(api_key).await?;
                     return Ok(json!({
                         "configured": true,
                         "user_code": started.user_code,
@@ -329,6 +261,26 @@ impl CloudService {
             })?
     }
 
+    /// Signed-in account: profile (email, name) and credit balance from `GET /v1/account`.
+    pub async fn account(&self) -> Result<Value> {
+        let api_key = self.api_key().await?;
+        let response = self
+            .http
+            .get(format!("{}/v1/account", self.endpoints.base_url))
+            .header("Authorization", format!("Bearer {}", api_key.expose()))
+            .send()
+            .await
+            .map_err(network)?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(network)?;
+        if !status.is_success() {
+            return Err(api_error(status.as_u16(), &body));
+        }
+        serde_json::from_slice(&body).map_err(|error| {
+            Error::domain("NETWORK_ERROR", format!("Invalid account response: {error}"))
+        })
+    }
+
     /// Upload an image, poll until the job finishes, return CadQuery source.
     pub async fn generate_from_image(
         &self,
@@ -347,7 +299,7 @@ impl CloudService {
             ));
         }
         let api_key = self.api_key().await?;
-        let base_url = self.settings.lock().await.base_url.clone();
+        let base_url = self.endpoints.base_url.clone();
         let mime = if mime_type.trim().is_empty() {
             "image/png".into()
         } else {
@@ -464,7 +416,7 @@ impl CloudService {
                 key.ok_or_else(|| {
                     Error::domain(
                         "LLM_NOT_CONFIGURED",
-                        "Add a Cadpad API key in Settings → Image to CAD",
+                        "Sign in to Cadpad Cloud in Settings",
                     )
                 })
             })

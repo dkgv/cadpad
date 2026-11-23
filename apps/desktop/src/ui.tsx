@@ -1,6 +1,6 @@
 import type {Inspection} from '@cadpad/viewer';
 
-export type IconName='chat'|'search'|'cube'|'viewIso'|'viewFront'|'viewTop'|'viewRight'|'sparkles'|'measure'|'motion'|'settings'|'undo'|'export'|'save'|'eye'|'eyeOff'|'fit'|'chevron'|'close'|'arrowUp'|'plus'|'sliders'|'recordings'|'tests'|'folder'|'file'|'import'|'physics'|'history'|'edit'|'splitRight'|'splitDown';
+export type IconName='chat'|'search'|'cube'|'viewIso'|'viewFront'|'viewTop'|'viewRight'|'sparkles'|'measure'|'motion'|'settings'|'undo'|'export'|'save'|'eye'|'eyeOff'|'fit'|'chevron'|'close'|'arrowUp'|'plus'|'sliders'|'recordings'|'tests'|'folder'|'file'|'import'|'physics'|'history'|'edit'|'splitRight'|'splitDown'|'fill'|'image';
 const cameraCube=['M12 2.5 22 8v9L12 22.5 2 17V8Z','M2 8l10 5.5L22 8','M12 13.5v9'];
 const cameraFaces:Partial<Record<IconName,string>>={
   viewIso:'M12 2.5 22 8v9L12 22.5 2 17V8Z',
@@ -35,6 +35,8 @@ const paths:Record<IconName,string[]>={
   history:['M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.7 2.7L3 8','M3 3v5h5','M12 7v5l3 2'],
   physics:['M10 7a3 3 0 1 0-6 0 3 3 0 0 0 6 0','M17 3v13','m13 12 4 4 4-4','M3 21h18'],
   tests:['M9 5H6a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3','M9 2h6v5H9Z','m8 14 3 3 5-6'],
+  image:['M3 5h18v14H3Z','M10 9.5a1.5 1.5 0 1 0-3 0 1.5 1.5 0 0 0 3 0','m21 15-5-5-11 9'],
+  fill:['m19 11-8-8-8.5 8.5a2.1 2.1 0 0 0 0 3l5 5a2.1 2.1 0 0 0 3 0Z','m5 2 5 5','M2 13h15','M22 20a2 2 0 1 1-4 0c0-1.6 2-4 2-4s2 2.4 2 4'],
   sliders:['M4 6h5m4 0h7','M4 12h9m4 0h3','M4 18h2m4 0h10','M9 3v6','M13 9v6','M6 15v6']
 };
 export function Icon({name,size=18}:{name:IconName;size?:number}){

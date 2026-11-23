@@ -83,7 +83,7 @@ export function validateDock(value:unknown,allowed:Set<string>,depth=0,seen=new 
 }
 
 const dragType='application/x-cadpad-tab';
-export type DockTab={id:string;title:string;dirty?:boolean;icon?:'file'|'cube'|'folder'|'motion'|'physics'|'tests'|'sparkles'|'chat';status?:'pending'|'unseen'};
+export type DockTab={id:string;title:string;dirty?:boolean;icon?:'file'|'cube'|'folder'|'motion'|'physics'|'tests'|'sparkles'|'chat'|'image';status?:'pending'|'unseen'};
 // Inside the desktop shell tabs get the OS context menu, like VS Code/Cursor.
 // The in-page menu remains for the browser build and tests.
 const nativeMenus=typeof window!=='undefined'&&'__TAURI_INTERNALS__' in window;
