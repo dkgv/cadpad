@@ -1,8 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {previewJoint,sliderDelta,hingeDelta,unwrapStep,sliderScreenMap,hingeScreenMap,type MotionSnapshot} from '../src/motion.ts';
+import {previewJoint,applyRequirementMoves,sliderDelta,hingeDelta,unwrapStep,sliderScreenMap,hingeScreenMap,type MotionSnapshot} from '../src/motion.ts';
 const near=(actual:number[],expected:number[])=>{assert.equal(actual.length,expected.length);actual.forEach((v,i)=>assert.ok(Math.abs(v-expected[i])<1e-9,`${actual} != ${expected}`));};
 const scene:MotionSnapshot={workspace_id:'w',revision:'r',pose_version:0,mode:'manipulate',cad_units:'mm',collision_checked:false,poses:{rail:{position:[0,0,0],quaternion:[0,0,0,1]},carriage:{position:[20,0,0],quaternion:[0,0,0,1]},arm:{position:[40,0,0],quaternion:[0,0,0,1]}},joints:[{id:'slide',parent:'rail',child:'carriage',kind:'prismatic',coordinate:0.02,unit:'m',limits:[0,0.08],axis_world:[1,0,0],origin_mm:[0,0,0]},{id:'hinge',parent:'carriage',child:'arm',kind:'revolute',coordinate:0,unit:'rad',limits:[-Math.PI,Math.PI],axis_world:[0,0,1],origin_mm:[30,0,0]}]};
+test('requirement replay applies normalized moves to exact published part names without editing the source poses',()=>{
+ const poses={door:{position:[1,0,0] as [number,number,number],quaternion:[0,0,0,1] as [number,number,number,number]},frame:{position:[0,5,0] as [number,number,number],quaternion:[0,0,0,1] as [number,number,number,number]}};
+ const replayed=applyRequirementMoves(poses,{door:'door',frame:'frame'},[
+  {op:'rotate',parts:['door'],axis:'z',origin:[0,0,0],angle_deg:90},
+  {op:'translate',parts:['door'],vector:[0,0,4]},
+  {op:'translate',parts:['not-a-part'],vector:[100,0,0]},
+ ]);
+ near(replayed.door.position,[0,1,4]);near(replayed.door.quaternion,[0,0,Math.SQRT1_2,Math.SQRT1_2]);
+ near(replayed.frame.position,[0,5,0]);near(poses.door.position,[1,0,0]);
+});
 test('rigid preview clamps coordinates and moves precisely the driven subtree',()=>{
  const slider=previewJoint(scene,'slide',1);assert.equal(slider.coordinate,0.08);near(slider.poses.carriage.position,[80,0,0]);near(slider.poses.arm.position,[100,0,0]);near(slider.poses.rail.position,[0,0,0]);near(scene.poses.carriage.position,[20,0,0]);
  const hinge=previewJoint(scene,'hinge',Math.PI/2);near(hinge.poses.arm.position,[30,10,0]);near(hinge.poses.carriage.position,[20,0,0]);near(hinge.poses.arm.quaternion,[0,0,Math.SQRT1_2,Math.SQRT1_2]);assert.throws(()=>previewJoint(scene,'missing',1));assert.throws(()=>previewJoint(scene,'slide',NaN));

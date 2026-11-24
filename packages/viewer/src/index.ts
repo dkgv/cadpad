@@ -12,7 +12,7 @@ import {revisionBuffers,type BufferDescriptor} from './buffers';
 import {shareRenderBuffers,revisionRenderBuffers} from './render-buffers';
 import {PickGeometry,scenePicking,pickTopology,pickTopologyInRect,geometryCenter,type SelectionMode,type MeshBuffers} from './picking';
 export type {SelectionMode} from './picking';
-import { partMotion, manipulationJoint, interpolateSimulation, previewJoint, sliderDelta, hingeDelta, unwrapStep, pathCoordinate, sliderScreenMap, hingeScreenMap, type MotionSnapshot, type JointState, type Ray } from './motion';
+import { partMotion, manipulationJoint, interpolateSimulation, previewJoint, applyRequirementMoves, sliderDelta, hingeDelta, unwrapStep, pathCoordinate, sliderScreenMap, hingeScreenMap, type MotionSnapshot, type JointState, type Ray, type RequirementMove, type Pose } from './motion';
 export type {MotionSnapshot,JointState} from './motion';
 export {recordedFrameAt,partMotion} from './motion';
 export {selectedAnchor,selectedCircle} from './references';
@@ -743,6 +743,16 @@ export class CadViewport {
     // Annotation projection is deferred while dragging so joint motion stays on the pointer.
     if(!this.drag)this.updateAnnotationPoses();
     if(this.parts.length)this.viewer.update(true);
+  }
+
+  /** Apply evaluator-normalized requirement moves to this viewer only. */
+  applyRequirementMoves(moves:RequirementMove[]){
+    const poses:Record<string,Pose>={},names:Record<string,string>={};
+    for(const part of this.parts){
+      poses[part.instance_id]={position:[...part.position] as Vec3,quaternion:[0,0,0,1]};
+      names[part.instance_id]=part.name;
+    }
+    this.applyPoses(applyRequirementMoves(poses,names,moves));
   }
 
   select(instance: string | null) {this.selectEntity(instance?{revision:this.revision,instance_id:instance,entity_id:'part:0'}:null);}

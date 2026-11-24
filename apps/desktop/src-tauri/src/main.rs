@@ -15,9 +15,11 @@ mod git_status;
 mod project_watch;
 mod subscriptions;
 use agents::{
-    clean_cache, complete_view, connect_activity, connect_motion, connect_view,
-    disconnect_external, interference, joint_coordinate, mcp_settings, motion, motion_tests, requirements, approve_requirement, delete_requirement,
-    playback, rebuild, repair_display, set_selection, simulation,
+    approve_requirement, clean_cache, complete_view, connect_activity, connect_motion,
+    connect_view, delete_requirement, disconnect_external, interference, joint_coordinate,
+    mcp_settings, motion, motion_tests, playback, rebuild, repair_display, requirement_replay,
+    close_requirement_replay,
+    requirements, set_selection, simulation,
 };
 use cadpad_core::{Core, error_value, worker::WorkerConfig};
 use files::{
@@ -338,6 +340,8 @@ fn main() {
             requirements,
             approve_requirement,
             delete_requirement,
+            requirement_replay,
+            close_requirement_replay,
             clean_cache,
             repair_display,
             rebuild,

@@ -1320,7 +1320,13 @@ export function App({host}:{host?:SessionHost}={}) {
     const target=model?`the project model ${model.builder} in ${model.entry}`:'this design';
     const others=mentioned.filter(item=>!model||item.entry!==model.entry||item.builder!==model.builder);
     const mentions=mentioned.length>1||others.length?`\nThe requirement mentions these project models (as @[Label](entry#builder) tokens): ${mentioned.map(item=>`${item.builder} in ${item.entry}`).join('; ')}. Consider every one of them when inspecting and writing checks.`:'';
-    const request=(id?`Edit the requirement with ID ${id} for ${target}. Use control_requirements: list first and read its print, then compile the changed IR.\n`:`Create a requirement for ${target} from this free-text requirement:\n`)+intent+mentions+'\nUse control_requirements: compile the IR (keep @[Label](entry#builder) chips as written and give every number a source), resolve each diagnostic (apply edit_ir fixes, ask me about ask_user and E_VAGUE one question at a time, propose edit_source changes), and when compile is ok save it as a draft. Never invent numbers: take them from my text, the model or the library, or propose them marked inferred. Do not run it and do not approve it: I review the print and approve it myself. Explain the requirement only from its print. Geometry only.';
+    const request=(id?`Edit the requirement with ID ${id} for ${target}. Use control_requirements: list first and read its print, then compile the changed IR.\n`:`Create a requirement for ${target} from this free-text requirement:\n`)+intent+mentions+'\nUse control_requirements: compile the IR (keep @[Label](entry#builder) chips as written and give every number a source), apply edit_ir fixes and propose edit_source changes. If ask_user or E_VAGUE remains, save the draft with its diagnostics so I can answer in Requirements. When compilation succeeds, save the draft for review. Never invent numbers: take them from my text, the model or the library, or propose them marked inferred. Do not run it and do not approve it: I review the print and approve it myself. Explain the requirement only from its print. Geometry only.';
+    setPanel('assistant');setPrompt(request);await sendPrompt(request,undefined,undefined,view?.workspace);
+  }
+  /** Send the user's answer, allowance request or rule removal for a requirement to the assistant (the UI never edits the IR). */
+  async function askAboutRequirement(request:string,mentioned:{entry:string;builder:string}[]){
+    const first=mentioned[0];
+    const view=first&&host?.ensureModelView?await host.ensureModelView(first.entry,first.builder):null;
     setPanel('assistant');setPrompt(request);await sendPrompt(request,undefined,undefined,view?.workspace);
   }
   function intendedSelection(current:Project|null):Entity|null {
@@ -1467,7 +1473,7 @@ export function App({host}:{host?:SessionHost}={}) {
     openModel={host?.onOpenModel?model=>host.onOpenModel!(model.entry,model.builder):undefined}
     onSnapshot={snapshot=>{if(snapshot.workspace_id!==project.workspace_id)return;setSimulationRunning(false);setPlaybackRunning(false);pendingTargets.current.clear();receiveMotion(snapshot);}}
     onChanged={()=>{const workspace=project.workspace_id;void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace&&currentProject.current?.revision===next.revision){currentProject.current=next;setProject(next);}}).catch(e=>setError(message(e)));}}
-    agentBusy={agentWorking||agentSending} onCreate={(intent,model,mentioned)=>prepareMotionTest(intent,model,undefined,mentioned)} onEdit={(id,intent,model,mentioned)=>prepareMotionTest(intent,model,id,mentioned)}/>;
+    agentBusy={agentWorking||agentSending} onCreate={(intent,model,mentioned)=>prepareMotionTest(intent,model,undefined,mentioned)} onEdit={(id,intent,model,mentioned)=>prepareMotionTest(intent,model,id,mentioned)} onAsk={askAboutRequirement}/>;
   const requirementsPanel=(<aside className="motion-sidebar inspector-page" id="panel-test" aria-label="Requirements"><div className="motion-sidebar-content">{requirementsBody}</div></aside>);
   const explorer=displayProject||project;
   const selectedMesh=explorer?.model.parts.some(part=>part.instance_id===selection?.instance_id&&part.accuracy==='mesh');

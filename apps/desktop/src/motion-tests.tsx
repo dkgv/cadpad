@@ -5,6 +5,11 @@ import {Icon} from './ui';
 import {indexedModels,loadSourceIndex,modelCaption,useSourceCatalogEpoch} from './source-catalog';
 import {RequirementComposer} from './requirement-composer';
 import {mentionedModels,tokenFor} from './requirement-tokens';
+import './requirements.css';
+import {useRequirementCatalog} from './requirement-catalog';
+import {RequirementCard,QuestionFlow,type CardActions} from './requirement-cards';
+import {RequirementReplayPanel,type RequirementReplay} from './requirement-replay';
+import {groupByModel,pairText,questionsOf,statusRank,statusOf,summaryOf,type RequirementInfo} from './requirement-review';
 import {MotionTestDefinitionView,type ModelRef,type MotionTestDefinition,type MotionTestOutcome,type MotionTestReview} from './motion-test-definition';
 
 type Test={id:string;definition:MotionTestDefinition;outcome:MotionTestOutcome|null;review?:MotionTestReview|null;stale:boolean;design_compared?:boolean;frame_count:number;duration_s:number};
@@ -38,9 +43,9 @@ export function useProjectModels(workspace?:string,revision?:string):Requirement
 /**
  * Project requirements. One catalog per project; each requirement checks one model.
  * Lives in the shared sidebar, independent of the focused tab: models without a tab are
- * prepared in the background to run, and replay opens the model's tab.
+ * prepared in the background to run, and replay opens a separate temporary view.
  */
-export function Requirements({project,projectRevision,projectRunnable,models,focusedModel,modelViews,ensureView,openModel,onSnapshot,onCreate,onEdit,onChanged,agentBusy=false}:{
+export function Requirements({project,projectRevision,projectRunnable,models,focusedModel,modelViews,ensureView,openModel,onSnapshot,onCreate,onEdit,onChanged,onAsk,agentBusy=false}:{
   /** Workspace that owns the catalog (project root, or a standalone design). */
   project:string;
   /** Revision of `project`; used to run requirements that check the project design itself. */
@@ -58,13 +63,19 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
   onCreate:(intent:string,model:ModelRef|null,mentioned:ModelRef[])=>Promise<void>|void;
   onEdit?:(id:string,intent:string,model:ModelRef|null,mentioned:ModelRef[])=>Promise<void>|void;
   onChanged:()=>void;
+  /** Send a message to the assistant (answers, allowance drafts, rule removal). `mentioned` models are prepared first. */
+  onAsk?:(request:string,mentioned:ModelRef[])=>Promise<void>|void;
   agentBusy?:boolean;
 }){
   const [reply,setReply]=useState<Reply|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState('');
+  const [requirementReplay,setRequirementReplay]=useState<RequirementReplay|null>(null);
   const [creating,setCreating]=useState(false),[intent,setIntent]=useState(''),[target,setTarget]=useState(''),[drafting,setDrafting]=useState(false),[editing,setEditing]=useState<string|null>(null);
   const [preparing,setPreparing]=useState(''),[starting,setStarting]=useState<string|null>(null),[stopRequested,setStopRequested]=useState(false);
   const [replayTarget,setReplayTarget]=useState<ReplayTarget|null>(null),[replayMotion,setReplayMotion]=useState<MotionSnapshot|null>(null),[frame,setFrame]=useState(0),[playing,setPlaying]=useState(false);
-  const latest=useRef({modelViews,onChanged,onSnapshot});latest.current={modelViews,onChanged,onSnapshot};
+  const catalog=useRequirementCatalog(project);
+  const latest=useRef({modelViews,onChanged,onSnapshot,project,projectRevision});latest.current={modelViews,onChanged,onSnapshot,project,projectRevision};
+  const replayRequest=useRef(0);
+  useEffect(()=>{setRequirementReplay(null);return()=>{replayRequest.current++;};},[project,projectRevision]);
   /** A start_run awaiting acceptance; Stop is queued until its run ID is known. */
   const pendingStart=useRef<{project:string;cancel:boolean}|null>(null);
   const epoch=useRef(0),sequence=useRef(0),pending=useRef(false),lastRead=useRef(0),runRef=useRef<Run|null>(null),notifiedRun=useRef(''),clock=useRef(0),draftCount=useRef(0);
@@ -174,7 +185,8 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
     }
   },[reply?.run?.id,reply?.run?.state]);
   // The assistant finished preparing: a requirement was saved, or it is waiting for answers.
-  useEffect(()=>{if(drafting&&(reply?.tests.length??0)!==draftCount.current)setDrafting(false);},[reply?.tests.length]);
+  const savedCount=(reply?.tests.length??0)+catalog.requirements.length;
+  useEffect(()=>{if(drafting&&savedCount!==draftCount.current)setDrafting(false);},[savedCount]);
   // Follow the replayed model's playback so leaving playback in the canvas hides the timeline.
   useEffect(()=>{
     if(!replayTarget)return;
@@ -203,11 +215,45 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
   const run=reply?.run;
   const executing=(id:string)=>starting===id&&!preparing||(activeRun(run)&&run?.test_id===id);
   const tests=reply?.tests??[];
-  const count=tests.length;
+  const reqs=catalog.requirements;
+  const count=tests.length+reqs.length;
   const choices:{key:string;label:string;model:ModelRef|null}[]=[
     ...models.map(item=>({key:modelKey(item.model),label:item.label,model:item.model as ModelRef|null})),
     ...(projectRunnable?[{key:'',label:'This design',model:null}]:[]),
   ];
+  const mentionedRefs=(text:string)=>mentionedModels(text).filter(ref=>models.some(item=>sameModel(item.model,ref))) as ModelRef[];
+  const requirementWorkspace=(info:RequirementInfo)=>{
+    const mentioned=mentionedRefs(info.text);
+    const candidates=mentioned.length?mentioned:[focusedModel];
+    return latest.current.modelViews().find(view=>candidates.some(model=>sameModel(model,view)))?.workspace??project;
+  };
+  const cardActions:CardActions={
+    busy:catalog.busy,agentBusy,run:catalog.run,
+    approve:info=>void catalog.approve(info,requirementWorkspace(info)).then(ok=>{if(ok)latest.current.onChanged();}),
+    remove:info=>void catalog.remove(info),
+    start:info=>void catalog.startRun(info.id,requirementWorkspace(info)),
+    cancel:runId=>void catalog.cancelRun(runId),
+    ask:async(prompt,info)=>{if(!onAsk)throw new Error('The assistant is not available here.');await onAsk(prompt,mentionedRefs(info.text));},
+    editWording:info=>composeRequirement(info),
+    replay:async(info,primitiveId,worst)=>{
+      const token=++replayRequest.current,sourceProject=latest.current.project,sourceRevision=latest.current.projectRevision;
+      const replay=await invoke<RequirementReplay>('requirement_replay',{
+        workspace:requirementWorkspace(info),
+        request:{requirement_id:info.id,primitive_id:primitiveId,state:worst.state},
+      });
+      if(token!==replayRequest.current||latest.current.project!==sourceProject||latest.current.projectRevision!==sourceRevision){
+        if(replay.view?.temporary)void invoke('close_requirement_replay',{workspace:replay.view.workspace}).catch(()=>{});
+        return;
+      }
+      setRequirementReplay({...replay,stateLabel:worst.state_label,pairLabel:pairText(worst.pair)});
+    },
+  };
+  /** Edit wording of a requirement: the composer, seeded with its text (chips included), goes to the assistant as an edit. */
+  function composeRequirement(info:RequirementInfo){
+    const model=mentionedRefs(info.text)[0]??focusedModel??null;
+    const fallback=choices.find(choice=>sameModel(choice.model,model))??choices[0];
+    setEditing(info.id);setIntent(info.text);setTarget(fallback?.key??'');setCreating(true);
+  }
   const canSubmit=!!intent.trim()&&!agentBusy&&intent.length<=4096&&!!pickTarget(intent);
   function compose(edit?:Test){
     const model=edit?edit.definition.model:focusedModel;
@@ -236,13 +282,24 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
     finally{setPreparing('');}
   }
   // Group by model in the order the project lists them; unknown models and unassigned last.
-  const groups=new Map<string,{label:string;detail?:string;model:ModelRef|null;tests:Test[]}>();
-  for(const item of models)groups.set(modelKey(item.model),{label:item.label,detail:item.detail,model:item.model,tests:[]});
+  const groups=new Map<string,{label:string;detail?:string;model:ModelRef|null;tests:Test[];reqs:RequirementInfo[]}>();
+  for(const item of models)groups.set(modelKey(item.model),{label:item.label,detail:item.detail,model:item.model,tests:[],reqs:[]});
   for(const test of tests){
     const key=modelKey(test.definition.model);
-    if(!groups.has(key))groups.set(key,{label:labelOf(test.definition.model),detail:test.definition.model?.entry,model:test.definition.model??null,tests:[]});
+    if(!groups.has(key))groups.set(key,{label:labelOf(test.definition.model),detail:test.definition.model?.entry,model:test.definition.model??null,tests:[],reqs:[]});
     groups.get(key)!.tests.push(test);
   }
+  // A requirement appears under every model its text mentions (P1.81).
+  for(const [key,list] of groupByModel(reqs)){
+    if(!groups.has(key)){
+      const [entry,builder]=key?JSON.parse(key) as [string,string]:['',''];
+      const model=key?{entry,builder}:null;
+      groups.set(key,{label:labelOf(model),detail:model?.entry,model,tests:[],reqs:[]});
+    }
+    groups.get(key)!.reqs.push(...list);
+  }
+  for(const group of groups.values())group.reqs.sort((a,b)=>statusRank(statusOf(a))-statusRank(statusOf(b)));
+  const asking=reqs.find(item=>item.approval!=='approved'&&questionsOf(item).length>0);
   const unassigned=groups.get('');if(unassigned){groups.delete('');groups.set('',unassigned);}
   const status=(item:Test)=>executing(item.id)
     ?{kind:'running',text:stopRequested||run?.state==='cancelling'?'Stopping':starting===item.id?'Starting':run?.state==='queued'?'Queued':'Running'}
@@ -251,10 +308,10 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
     :{kind:item.outcome.passed?'passed':'failed',text:item.outcome.passed?'Met':'Not met'};
   const canRun=(item:Test)=>!!item.definition.model||projectRunnable;
 
-  return <section className="motion-tests">
+  return <><section className="motion-tests">
     {!reply&&!error&&<p className="muted">Loading requirements…</p>}
     {reply&&count>0&&!creating&&<div className="test-heading test-list-heading"><span className="muted">{count} {count===1?'requirement':'requirements'}</span><button disabled={agentBusy||!choices.length} onClick={()=>compose()}><Icon name="plus" size={13}/>New requirement…</button></div>}
-    {reply&&!count&&!creating&&(drafting
+    {reply&&(catalog.loaded||!!catalog.error)&&!count&&!creating&&(drafting
       ?<div className="test-empty"><Icon name="sparkles" size={24}/><h3>{preparing||(agentBusy?'Preparing checks…':'Answer the assistant')}</h3><p>{preparing||agentBusy?'The assistant will save measurable checks here for you to review.':'The assistant needs more information before it can save checks. Reply in the Assistant panel.'}</p></div>
       :<div className="test-empty"><Icon name="tests" size={26}/><h3>No requirements yet</h3><p>{choices.length?'Describe a requirement for any model in this project. Review the checks, then check the requirement.':'Add a model to this project to define requirements for it.'}</p>{!!choices.length&&<button className="primary-button" disabled={agentBusy} onClick={()=>compose()}>New requirement…</button>}</div>)}
     {creating&&<form className="test-composer" onSubmit={event=>void submit(event)}>
@@ -266,8 +323,11 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
     {preparing&&!drafting&&<p className="muted" role="status">{preparing}</p>}
     {(starting&&!preparing||activeRun(run))&&<div className="test-run-status" role="status"><strong>{stopRequested||run?.state==='cancelling'?'Stopping check…':starting&&!activeRun(run)?'Starting check…':run?.state==='queued'?'Check queued':'Checking requirement…'}</strong><button disabled={stopRequested||run?.state==='cancelling'} onClick={()=>void stop()}>Stop check</button></div>}
     {run&&!activeRun(run)&&run.state!=='completed'&&<p className="muted" role="status">{run.state==='cancelled'?'Check stopped. Previous results preserved.':`Check could not finish: ${run.error?.message??'Run failed'}`}</p>}
-    {[...groups.entries()].filter(([,group])=>group.tests.length).map(([key,group])=><section className="requirement-group" key={key||'unassigned'} aria-label={`Requirements for ${group.label}`}>
+    {asking&&<QuestionFlow info={asking} questions={questionsOf(asking)} agentBusy={agentBusy} onSend={prompt=>cardActions.ask(prompt,asking)}/>}
+    {reqs.length>0&&<div className="rq-summary" role="status" aria-label="Requirement summary">{summaryOf(reqs).map(({key,label,count:n})=><span key={key} className="rq-badge">{n} {label}</span>)}</div>}
+    {[...groups.entries()].filter(([,group])=>group.tests.length||group.reqs.length).map(([key,group])=><section className="requirement-group" key={key||'unassigned'} aria-label={`Requirements for ${group.label}`}>
       <header className="requirement-group-heading"><Icon name={group.model?'cube':'tests'} size={13}/><strong>{group.label}</strong>{group.detail&&<small title={group.detail}>{group.detail.split('/').at(-1)}</small>}{!!group.model&&sameModel(group.model,focusedModel)&&<span className="muted">· open</span>}</header>
+      {group.reqs.map(item=><RequirementCard key={`${key}:${item.id}`} info={item} actions={cardActions}/>)}
       {group.tests.map(item=>{const state=status(item);return <article className="motion-test" key={item.id}>
         <div className="test-heading"><strong>{item.definition.name}</strong><span className={`test-status ${state.kind}`} title={item.outcome&&!item.stale&&item.design_compared===false?'Last result. The model is not loaded, so design changes since then are not compared yet.':undefined}>{state.text}</span></div>
         {!item.definition.model&&!projectRunnable&&<div className="requirement-assign"><label htmlFor={`assign-${item.id}`}>Assign to model</label><select id={`assign-${item.id}`} defaultValue="" disabled={busy||!models.length} onChange={event=>{const choice=models.find(model=>modelKey(model.model)===event.target.value);if(choice)void assign(item,choice.model);}}><option value="" disabled>Choose a model…</option>{models.map(model=><option key={modelKey(model.model)} value={modelKey(model.model)}>{model.label}</option>)}</select></div>}
@@ -283,5 +343,6 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
     {replayed&&replayTarget&&replayMotion?.playback?.recording_id===`motion-test:${replayed.id}`&&!replayed.stale&&<div className="test-timeline"><strong>{replayed.definition.name}</strong><label>Replay · {(frame/120).toFixed(3)} / {replayed.duration_s.toFixed(3)} s<input type="range" aria-label="Requirement replay time" min={0} max={replayed.frame_count-1} step={1} value={frame} disabled={busy} onChange={event=>{setPlaying(false);void replay(replayed,Number(event.target.value),replayTarget);}}/></label><button disabled={busy&&!playing} onClick={()=>{if(playing)setPlaying(false);else{clock.current=performance.now()-(frame>=replayed.frame_count-1?0:frame/120*1000);setPlaying(true);}}}>{playing?'Pause replay':'Play replay'}</button><p className="muted">Choose Leave playback in the model's Move panel to return to live movement.</p></div>}
     {reply&&count>0&&<details className="test-simulation-limits muted"><summary>Simulation limits</summary><p>Results apply to the saved simulation setup.</p><p>{reply.accuracy}</p></details>}
     {error&&<p role="alert" className="error">{error}</p>}
-  </section>;
+    {catalog.error&&catalog.error!==error&&<p role="alert" className="error">{catalog.error}</p>}
+  </section>{requirementReplay&&<RequirementReplayPanel replay={requirementReplay} onClose={()=>setRequirementReplay(null)}/>}</>;
 }

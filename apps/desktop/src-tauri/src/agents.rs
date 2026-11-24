@@ -231,6 +231,37 @@ pub async fn delete_requirement(
         .map_err(error)
 }
 
+/// User-only read/replay action. It returns a verified concrete state and
+/// never changes the approved requirement or project revision.
+#[tauri::command]
+pub async fn requirement_replay(
+    core: State<'_, Core>,
+    workspace: String,
+    request: cadpad_core::requirements::replay::ReplayRequest,
+) -> Result<Value, Value> {
+    core.replay_requirement_state(
+        "local-user",
+        &workspace,
+        &request.requirement_id,
+        &request.primitive_id,
+        request.state,
+    )
+    .await
+    .map(|reply| json!(reply))
+    .map_err(error)
+}
+
+#[tauri::command]
+pub async fn close_requirement_replay(
+    core: State<'_, Core>,
+    workspace: String,
+) -> Result<Value, Value> {
+    core.close_requirement_replay(&workspace)
+        .await
+        .map(|()| json!(true))
+        .map_err(error)
+}
+
 #[tauri::command]
 pub async fn clean_cache(core: State<'_, Core>) -> Result<Value, Value> {
     core.collect_cache()

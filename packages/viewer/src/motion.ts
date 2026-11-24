@@ -2,6 +2,7 @@ import * as THREE from 'three';
 export type Vec3=[number,number,number];
 export type Quaternion=[number,number,number,number];
 export interface Pose {position:Vec3;quaternion:Quaternion}
+export interface RequirementMove {op:'rotate'|'translate';parts:string[];axis?:'x'|'y'|'z'|[number,number,number];origin?:Vec3;angle_deg?:number;vector?:Vec3}
 export interface JointState {id:string;parent:string|null;child:string;kind:'fixed'|'prismatic'|'revolute'|'path';coordinate:number;unit:string;limits:[number,number]|null;axis_world:Vec3;origin_mm:Vec3;drivable?:boolean;path?:{length_m:number;closed:boolean;frame_rule:string;samples:PathSample[]}}
 export interface CollisionPolicy {accuracy:string;clearance_m:number;backoff_m:number;coverage_method:string;ignored_pairs:[string,string][]}
 export interface SimulationFrame {tick:number;time_s:number;poses:Record<string,Pose>}
@@ -54,6 +55,24 @@ export function previewJoint(snapshot:MotionSnapshot,id:string,target:number):{p
     poses[id]={position:position.toArray() as Vec3,quaternion:quaternion.toArray() as Quaternion};
   }
   return {poses,coordinate};
+}
+/** Apply the worker-normalized requirement moves to a fresh set of world poses. */
+export function applyRequirementMoves(poses:Record<string,Pose>,names:Record<string,string>,moves:RequirementMove[]):Record<string,Pose>{
+  const out:Record<string,Pose>=Object.fromEntries(Object.entries(poses).map(([id,pose])=>[id,{position:[...pose.position] as Vec3,quaternion:[...pose.quaternion] as Quaternion}]));
+  for(const move of moves){
+    const axis=move.axis==='x'?new THREE.Vector3(1,0,0):move.axis==='y'?new THREE.Vector3(0,1,0):move.axis==='z'?new THREE.Vector3(0,0,1):Array.isArray(move.axis)?new THREE.Vector3(...move.axis).normalize():null;
+    const rotation=move.op==='rotate'&&axis?new THREE.Quaternion().setFromAxisAngle(axis,(move.angle_deg??0)*Math.PI/180):null;
+    const origin=new THREE.Vector3(...(move.origin??[0,0,0]));
+    for(const [instance,name] of Object.entries(names)){
+      if(!move.parts.includes(name))continue;
+      const pose=out[instance];if(!pose)continue;
+      const position=new THREE.Vector3(...pose.position),quaternion=new THREE.Quaternion(...pose.quaternion);
+      if(move.op==='rotate'&&rotation){position.sub(origin).applyQuaternion(rotation).add(origin);quaternion.premultiply(rotation).normalize();}
+      else if(move.op==='translate'&&move.vector)position.add(new THREE.Vector3(...move.vector));
+      out[instance]={position:position.toArray() as Vec3,quaternion:quaternion.toArray() as Quaternion};
+    }
+  }
+  return out;
 }
 function lineCoordinate(ray:Ray,origin:Vec3,axis:Vec3):number|null{
   const a=vector(axis),d=vector(ray.direction),w=vector(origin).sub(vector(ray.origin)),cosine=a.dot(d),denominator=1-cosine*cosine;
