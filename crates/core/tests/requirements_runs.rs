@@ -734,6 +734,16 @@ async fn rebuilt_private_views_are_replaced_without_appearing_in_recents() {
         .into_iter()
         .find(|workspace| workspace != &p.workspace)
         .expect("private compiler view");
+    let raw_workspaces = p.core.list_workspaces().await;
+    assert!(raw_workspaces.contains(&original));
+    let listing = p
+        .core
+        .dispatch(&agent(), "get_project", json!({"workspace_id": null}))
+        .await
+        .unwrap();
+    let visible = listing["workspace_ids"].as_array().unwrap();
+    assert!(visible.contains(&json!(p.workspace)));
+    assert!(!visible.contains(&json!(original)));
     assert_eq!(
         p.core.workspace_summaries().await.as_array().unwrap().len(),
         1

@@ -740,7 +740,7 @@ impl Core {
                         Ok(json!(project))
                     }
                     None => Ok(json!(crate::project_result::WorkspaceListing {
-                        workspace_ids: self.list_workspaces().await,
+                        workspace_ids: self.list_visible_workspaces().await,
                         protocol_version: PROTOCOL_VERSION,
                         tools: definitions_ref().iter().map(|s| s.name.clone()).collect(),
                     })),

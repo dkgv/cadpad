@@ -509,6 +509,18 @@ impl Core {
     pub async fn list_workspaces(&self) -> Vec<String> {
         self.workspaces.lock().await.keys().cloned().collect()
     }
+    /// Workspace ids that may be exposed by user and agent listings.
+    /// Internal maintenance and forget-all paths use [`Self::list_workspaces`]
+    /// so ephemeral model/replay views still participate in cleanup.
+    pub(crate) async fn list_visible_workspaces(&self) -> Vec<String> {
+        self.workspaces
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, workspace)| !workspace.stored.ephemeral)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
     /// Admission checks must not hash display buffers or evaluate live motion.
     pub async fn has_workspace(&self, workspace_id: &str) -> bool {
         self.workspaces.lock().await.contains_key(workspace_id)

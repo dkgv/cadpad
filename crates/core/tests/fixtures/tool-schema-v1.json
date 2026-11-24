@@ -19687,7 +19687,7 @@
                 ]
               },
               "rerun_required": {
-                "description": "The result came from an imported project file; re-run it.",
+                "description": "The stored result must be rechecked.",
                 "type": "boolean"
               },
               "run": {
