@@ -1345,6 +1345,7 @@ fn activity(tool: &str) -> String {
         "get_motion" => "Reading the mechanism",
         "set_joint_coordinate" => "Moving a joint",
         "control_motion_tests" => "Working on motion tests",
+        "control_requirements" => "Working on requirements",
         "control_playback" => "Controlling playback",
         "capture_views" => "Capturing model views",
         "compare_views" => "Comparing before and after",
