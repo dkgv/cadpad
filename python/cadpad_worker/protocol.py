@@ -84,6 +84,9 @@ def main():
                 elif method == "match_mesh_edge":
                     from .edge_trace import match_mesh_segments
                     result = match_mesh_segments(model, args)
+                elif method == "evaluate_plan_chunk":
+                    from .requirements_eval import evaluate_plan_chunk
+                    result = evaluate_plan_chunk(model, args)
                 elif method == "remesh":
                     result = model.remesh(args)
                 elif method == "export":

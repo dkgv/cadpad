@@ -155,6 +155,8 @@ class Model:
             raise DomainError("UNSUPPORTED_OPERATION", "Build requires a fresh candidate worker")
         self.built = True
         self.revision = revision
+        # Parameter-sweep evaluation rebuilds the subject from these arguments.
+        self._build_args = args
         source_root = Path(args["source_root"]).resolve(strict=True)
         entry = args.get("entry_point", "model.py")
         entry_path = (source_root / entry).resolve(strict=True)
