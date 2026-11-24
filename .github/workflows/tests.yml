@@ -85,12 +85,35 @@ jobs:
           cargo nextest run --locked --profile ci
           --config 'profile.test.package."*".opt-level=3'
           -p cadpad-core -p cadpad-agent -p cadpad-mcp
+          -E 'not test(=results_are_identical_across_pool_sizes_and_caches)'
           --partition slice:${{ matrix.shard }}/4
       # Nextest does not run doctests. Keep Cargo's example compilation checks too.
       - if: matrix.shard == 1
         run: |
           cargo test --locked --config 'profile.test.package."*".opt-level=3' -p cadpad-core -p cadpad-agent -p cadpad-mcp --doc
           cargo test --locked --config 'profile.test.package."*".opt-level=3' -p cadpad-core -p cadpad-agent -p cadpad-mcp --examples --no-run
+
+  requirements-determinism:
+    name: Requirements determinism
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-tests-opt-deps
+          save-if: false
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked --python 3.12 --compile-bytecode
+      - run: >-
+          cargo test --locked --config 'profile.test.package."*".opt-level=3'
+          -p cadpad-core --test requirements_runs --
+          results_are_identical_across_pool_sizes_and_caches --exact
 
   python:
     name: Python tests
