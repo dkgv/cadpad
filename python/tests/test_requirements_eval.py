@@ -192,6 +192,26 @@ def test_serial_and_pool_results_are_byte_identical(tmp_path, workers):
     assert warm["cache"]["result_hits"] > 0 and canonical(warm) == canonical(reference)
 
 
+def test_sandbox_without_fork_runs_in_process_with_identical_results(tmp_path, monkeypatch):
+    import os
+    from cadpad_worker import requirements_eval as module
+
+    states = rotation_sweep([0, 5, 10, 355])
+    reference = evaluate_plan_chunk(sweep_model(tmp_path / "ref"), dict(states=states, limits=dict(workers=0),
+                                                                        cache=dict(results=False)))
+
+    def denied():
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fork", denied)
+    monkeypatch.setattr(module, "_FORK_PROBE", None)
+    other = evaluate_plan_chunk(sweep_model(tmp_path / "nofork"), dict(states=states, limits=dict(workers=3),
+                                                                       cache=dict(results=False)))
+    assert module._FORK_PROBE is False
+    assert canonical(other) == canonical(reference)
+    monkeypatch.setattr(module, "_FORK_PROBE", None)
+
+
 def test_request_validation(tmp_path):
     model = model_with(tmp_path, dict(a=box(1, 1, 1), b=box(1, 1, 1)))
     for states in ([], [dict(id="s", measurements=[dict(id="m", primitive="nope", a=["a"])])],
@@ -218,6 +238,26 @@ def build_project(tmp_path):
 def param_state(ext, id=None):
     return dict(id=id or f"e{ext}", params=dict(ext=ext), measurements=[
         interference("base", "slider"), dict(id="x", primitive="extent", a=["slider"], axis="x")])
+
+
+def test_forked_rebuild_after_parent_used_occt_thread_pool_does_not_hang(tmp_path):
+    # The parent's boolean spun up OCCT's thread pool; a forked child that
+    # inherits it must not wait for threads that exist only in the parent.
+    source = tmp_path / "project"
+    source.mkdir(parents=True)
+    (source / "model.py").write_text(
+        "import cadquery as cq\n"
+        "ext = parameter('ext', 10.0, minimum=0, maximum=40)\n"
+        "frame = cq.Workplane().box(40, 18, 60).faces('>Y').workplane().rect(34, 54).cutBlind(-16)\n"
+        "show(frame, name='frame')\n"
+        "show(cq.Workplane().box(10, 10, 10).translate((5 + ext, 0, 0)), name='slider')\n")
+    model = Model(tmp_path / "cache")
+    model.build(dict(source_root=str(source), generate_mesh=False), "r1")
+    states = [dict(id=f"s{v}", params=dict(ext=v), measurements=[
+        dict(id="x", primitive="extent", a=["slider"], axis="x")]) for v in (0, 5, 20)]
+    r = evaluate_plan_chunk(model, dict(states=states, limits=dict(workers=2, chunk_time_limit_s=60),
+                                        cache=dict(results=False)))
+    assert r["status"] == "complete" and r["cache"]["rebuilds"] == 3
 
 
 def test_param_sweep_rebuilds_once_per_value_and_caches_rebuilds(tmp_path):

@@ -43,3 +43,26 @@ def test_assembly_children_share_the_publishing_call(tmp_path):
     })
     assert {'kit/a', 'kit/b'} <= set(sources(result))
     assert all(source == {'file': 'model.py', 'line': 5} for source in sources(result).values())
+
+
+def test_parts_report_builder_function_features_and_constants(tmp_path):
+    result = build(tmp_path, {
+        'model.py': 'import cadquery as cq\n'
+                    'WIDTH = 30\nRATIOS = (0.5, 2)\nNAME = "x"\n_HIDDEN = 4\n'
+                    'def make_door():\n'
+                    '    body = cq.Workplane().box(WIDTH, 10, 2)\n'
+                    '    show(body, name="door", features={"top": body.faces(">Z"), "rim": body.edges(">Z")})\n'
+                    'make_door()\n'
+                    'show(cq.Workplane().box(5, 5, 5), name="cube")\n',
+    })
+    parts = {part['instance_id']: part for part in result['parts']}
+    assert parts['door']['builder_function'] == 'make_door'
+    assert 'builder_function' not in parts['cube']
+    assert parts['door']['source'] == {'file': 'model.py', 'line': 8}
+    kinds = parts['door']['feature_kinds']
+    assert (kinds['top']['entity'], kinds['top']['count']) == ('face', 1)
+    assert (kinds['rim']['entity'], kinds['rim']['count']) == ('edge', 4)
+    assert len(kinds['top']['hash']) == 64 and kinds['top']['hash'] != kinds['rim']['hash']
+    assert all(len(part['geometry_fingerprint']['sha256']) == 64 for part in parts.values())
+    constants = {item['name']: item['values'] for item in result['constants']}
+    assert constants == {'WIDTH': [30.0], 'RATIOS': [0.5, 2.0]}

@@ -282,11 +282,55 @@ class Outcome:
         self.status, self.value, self.seconds = status, value, seconds
 
 
+_FORK_PROBE = None
+
+
+def _fork_permitted():
+    """Whether this process may fork (the production sandbox denies it).
+
+    Probed once with a throwaway child; without fork the evaluator runs its
+    tasks in-process, serially, and judges task limits after the fact.
+    """
+    global _FORK_PROBE
+    if _FORK_PROBE is None:
+        try:
+            pid = os.fork()
+        except OSError:
+            _FORK_PROBE = False
+        else:
+            if pid == 0:
+                os._exit(0)
+            os.waitpid(pid, 0)
+            _FORK_PROBE = True
+    return _FORK_PROBE
+
+
 def _fork_available(workers):
-    return workers > 0 and "fork" in mp.get_all_start_methods() and hasattr(signal, "setitimer")
+    return (workers > 0 and "fork" in mp.get_all_start_methods() and hasattr(signal, "setitimer")
+            and _fork_permitted())
+
+
+def _single_threaded_occt():
+    """Make OCCT run on the calling thread only.
+
+    The parent has usually already used OCCT's default thread pool (parallel
+    booleans while building the model). A forked child inherits the pool object
+    but none of its threads, so the first parallel operation would wait forever
+    for workers that do not exist. Children never parallelise internally; the
+    process pool is their parallelism.
+    """
+    try:
+        from OCP.OSD import OSD_ThreadPool
+        # Re-initialising to one thread (the caller) replaces the dead pool;
+        # only this works. Limiting launched threads or disabling OCCT threads
+        # still waits on the missing workers.
+        OSD_ThreadPool.DefaultPool_s().Init(1)
+    except Exception:  # noqa: BLE001 - best effort; older kernels lack the pool API
+        pass
 
 
 def _child_loop(conn, alarm_s):
+    _single_threaded_occt()
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
     fn, tasks = _ACTIVE
     while True:

@@ -94,6 +94,40 @@ def circular_producers_unchanged():
                for kind in (cq.Face, cq.Edge))
 
 
+MAX_CONSTANTS = 256
+MAX_CONSTANT_VALUES = 16
+
+
+def module_constants(namespace, adapted=None):
+    """Numeric module-level constants of the entry file, for `model` provenance.
+
+    Only plain finite int/float values and short tuples/lists of them count;
+    underscore names, helpers injected by the worker and callables never do.
+    Values are the raw numbers in the source (their unit is the author's).
+    """
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    # Project models run through a generated adapter that loads the user's
+    # file as `cadpad_source`; its constants are the model's, the adapter's
+    # own namespace holds none. The model file wins on a name clash.
+    merged = dict(namespace)
+    if adapted:
+        merged.update(adapted)
+    found = []
+    for name, value in merged.items():
+        if name.startswith("_") or not name.isidentifier():
+            continue
+        if number(value):
+            values = [float(value)]
+        elif (isinstance(value, (tuple, list)) and 0 < len(value) <= MAX_CONSTANT_VALUES
+              and all(number(item) for item in value)):
+            values = [float(item) for item in value]
+        else:
+            continue
+        found.append(dict(name=name, values=values))
+    return sorted(found, key=lambda item: item["name"])[:MAX_CONSTANTS]
+
+
 @dataclass
 class Part:
     name: str
@@ -103,6 +137,8 @@ class Part:
     density: float | None
     fingerprint: str | None = None
     source: dict | None = None
+    # Enclosing project function of the publishing show() call; None at module level.
+    function: str | None = None
 
 
 class Model:
@@ -202,7 +238,13 @@ class Model:
                 except (OSError, ValueError):
                     path = None
                 if path is not None and path.is_relative_to(source_root) and path.suffix == ".py":
-                    return dict(file=path.relative_to(source_root).as_posix(), line=frame.f_lineno)
+                    # Comprehensions and lambdas belong to the function around them.
+                    outer = frame
+                    while outer is not None and outer.f_code.co_name.startswith("<") and outer.f_code.co_name != "<module>":
+                        outer = outer.f_back
+                    name = outer.f_code.co_name if outer is not None else "<module>"
+                    return dict(file=path.relative_to(source_root).as_posix(), line=frame.f_lineno,
+                                function=None if name.startswith("<") else name)
                 frame = frame.f_back
             return None
 
@@ -237,7 +279,9 @@ class Model:
             finite(position)
             if density is not None and (not math.isfinite(density) or density <= 0):
                 raise DomainError("INVALID_PARAMETER", "Density must be positive kg/m³")
-            self.parts[name] = Part(name, shape, tuple(position), features or {}, density, source=source)
+            function = source.get("function") if source else None
+            source = dict(file=source["file"], line=source["line"]) if source else None
+            self.parts[name] = Part(name, shape, tuple(position), features or {}, density, source=source, function=function)
 
         def dimension(name, part, start, end, *, label=None, parameter=None):
             if not isinstance(name, str) or not name or name.startswith(("saved:", "overall:")):
@@ -350,7 +394,7 @@ class Model:
         if len(self.parts) > 1:
             for part in self.parts.values():
                 part.fingerprint = geometry_fingerprint(part.shape)
-        result = dict(collision_validation=collision_validation, parts=[self.describe(part, mesh=generate_mesh) for part in self.parts.values()],
+        result = dict(collision_validation=collision_validation, constants=module_constants(namespace, getattr(sys.modules.get('cadpad_source'), '__dict__', None)), parts=[self.describe(part, mesh=generate_mesh) for part in self.parts.values()],
                       parameters=self.parameters, annotations=self.annotations,
                       units="mm", revision=revision,
                       dependencies=dependencies)
@@ -397,18 +441,28 @@ class Model:
                 self._intrinsic_properties[fingerprint] = intrinsic
         intrinsic = copy.deepcopy(intrinsic)
         feature_entities = {}
+        feature_kinds = {}
         if part.features:
             faces, edges = shape.Faces(), shape.Edges()
             for name, selected in part.features.items():
                 selected = selected.vals() if isinstance(selected, cq.Workplane) else [selected]
                 feature_entities[name] = [f"{kind}:{i}" for kind, entities in (("face", faces), ("edge", edges))
                                           for i, entity in enumerate(entities) if any(entity.isSame(s) for s in selected)]
+                ids = feature_entities[name]
+                n_faces = sum(1 for item in ids if item.startswith("face:"))
+                n_edges = len(ids) - n_faces
+                # The hash identifies the selection within this exact geometry.
+                digest = hashlib.sha256(json.dumps([part.fingerprint, name, sorted(ids)]).encode()).hexdigest()
+                feature_kinds[name] = dict(entity="mixed" if n_faces and n_edges else "edge" if n_edges else "face",
+                                           count=len(ids), faces=n_faces, edges=n_edges, hash=digest)
         result = dict(id=hashlib.sha256(part.name.encode()).hexdigest()[:24], instance_id=part.name,
                       name=part.name, position=list(part.position), **intrinsic,
-                      features=feature_entities, accuracy="exact", units="mm",
+                      features=feature_entities, feature_kinds=feature_kinds, accuracy="exact", units="mm",
                       geometry_fingerprint=dict(format=FINGERPRINT_FORMAT, sha256=part.fingerprint))
         if part.source is not None:
             result["source"] = dict(part.source)
+        if part.function is not None:
+            result["builder_function"] = part.function
         if part.density is not None and result["volume"] is not None:
             result["mass_kg"] = result["volume"] * 1e-9 * part.density
         result["dimensions"] = [dict(id=f"{part.name}:{axis}", kind="overall", axis=axis, value=value, unit="mm")
