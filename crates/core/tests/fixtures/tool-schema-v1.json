@@ -8941,6 +8941,41 @@
             ],
             "type": "object"
           },
+          "FeatureKind": {
+            "properties": {
+              "count": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "edges": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "entity": {
+                "description": "`face`, `edge` or `mixed`.",
+                "type": "string"
+              },
+              "faces": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "hash": {
+                "description": "Identifies the selection within this exact geometry.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "entity",
+              "count",
+              "faces",
+              "edges",
+              "hash"
+            ],
+            "type": "object"
+          },
           "Fingerprint": {
             "properties": {
               "format": {
@@ -9270,6 +9305,13 @@
                 "format": "double",
                 "type": "number"
               },
+              "builder_function": {
+                "description": "Project function whose `show()` published this part.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "dimensions": {
                 "items": {
                   "$ref": "#/$defs/OverallDimension"
@@ -9285,6 +9327,14 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "feature_kinds": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/FeatureKind"
+                },
+                "default": {},
+                "description": "Entity kind, counts and selection hash per named feature.",
+                "type": "object"
               },
               "features": {
                 "additionalProperties": {
@@ -9358,6 +9408,7 @@
               "face_count",
               "edge_count",
               "features",
+              "feature_kinds",
               "accuracy",
               "units",
               "geometry_fingerprint",
@@ -18972,6 +19023,21 @@
             ],
             "type": "string"
           },
+          "Failure": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
           "FeatureRef": {
             "description": "A feature (face/edge, or a set of them) of a published part:\n`@cabinet/door#hinge_hole`. Resolution order on each build: explicit name,\nthen history name, then exact geometric reference. Each resolves exactly or\nfails; there is no closest match.",
             "oneOf": [
@@ -19584,6 +19650,18 @@
                 "description": "Hash of the draft IR (what a review of the draft would approve).",
                 "type": "string"
               },
+              "draft_hashes": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/StoredHashes"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Requirement, manifest and plan hashes of the compiled draft, to pass to\n`approve_requirement`; null while the draft has errors."
+              },
               "id": {
                 "type": "string"
               },
@@ -19612,6 +19690,18 @@
                 "description": "The result came from an imported project file; re-run it.",
                 "type": "boolean"
               },
+              "run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RunInfo"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "The project's latest requirement run when it was of this requirement\n(queued, running, cancelling or finished). Set by the tool; absent in\ncatalog-only replies."
+              },
               "status": {
                 "anyOf": [
                   {
@@ -19635,12 +19725,14 @@
               "approval",
               "text",
               "draft_hash",
+              "draft_hashes",
               "print",
               "rendered",
               "diagnostics",
               "approved",
               "last_result",
-              "rerun_required"
+              "rerun_required",
+              "run"
             ],
             "type": "object"
           },
@@ -19684,6 +19776,49 @@
                 "type": "string"
               }
             ]
+          },
+          "RunInfo": {
+            "description": "The state of a run as the UI reads it.",
+            "properties": {
+              "actor": {
+                "type": "string"
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Failure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "requirement_id": {
+                "type": "string"
+              },
+              "revision": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/State"
+              },
+              "workspace_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "workspace_id",
+              "revision",
+              "requirement_id",
+              "actor",
+              "state",
+              "error"
+            ],
+            "type": "object"
           },
           "SetDef": {
             "additionalProperties": false,
@@ -19753,6 +19888,17 @@
                 "type": "string"
               }
             ]
+          },
+          "State": {
+            "enum": [
+              "queued",
+              "running",
+              "cancelling",
+              "completed",
+              "cancelled",
+              "failed"
+            ],
+            "type": "string"
           },
           "StateSpace": {
             "description": "Where the model is when we measure; a claim holds at every state of its\nspace (spec §3.3). Sampling is always explicit.",

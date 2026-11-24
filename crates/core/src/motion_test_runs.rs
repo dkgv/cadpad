@@ -12,6 +12,42 @@ use tokio::sync::watch;
 pub const MAX_RUNS: usize = 8;
 pub const MAX_ACTOR_RUNS: usize = 2;
 pub const DEADLINE_S: u64 = 60;
+/// Sweep cap of a requirement run (spec section 6.4): past it the run is
+/// cancelled and the previous result kept.
+pub const REQUIREMENT_DEADLINE_S: u64 = 120;
+
+/// What a queue admits and how it words its refusals. Motion tests and
+/// requirement runs share the queue mechanics and differ only here.
+#[derive(Clone, Copy, Debug)]
+pub struct Kind {
+    pub resource: &'static str,
+    pub busy: &'static str,
+    pub stale: &'static str,
+    pub cancelled: &'static str,
+    pub deadline_s: u64,
+    pub deadline_hint: &'static str,
+    pub subject: &'static str,
+}
+impl Kind {
+    pub const MOTION_TEST: Kind = Kind {
+        resource: "motion_test_runs",
+        busy: "A simulation test is already active or test capacity is full; stop a run or wait for completion",
+        stale: "This simulation run is no longer current",
+        cancelled: "Simulation test cancelled; previous result is preserved",
+        deadline_s: DEADLINE_S,
+        deadline_hint: "shorten the test or simplify the mechanism",
+        subject: "Simulation test",
+    };
+    pub const REQUIREMENT: Kind = Kind {
+        resource: "requirement_runs",
+        busy: "A requirement run is already active for this project or run capacity is full; stop it or wait for completion",
+        stale: "This requirement run is no longer current",
+        cancelled: "Requirement run cancelled; previous result is preserved",
+        deadline_s: REQUIREMENT_DEADLINE_S,
+        deadline_hint: "narrow the sweep or simplify the model",
+        subject: "Requirement run",
+    };
+}
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -47,8 +83,12 @@ struct Entry {
     cancel: watch::Sender<bool>,
     timed_out: bool,
 }
-#[derive(Default)]
-pub(crate) struct Runs(Mutex<BTreeMap<String, Entry>>);
+pub(crate) struct Runs(Mutex<BTreeMap<String, Entry>>, Kind);
+impl Default for Runs {
+    fn default() -> Self {
+        Self::new(Kind::MOTION_TEST)
+    }
+}
 struct Inner {
     runs: Arc<Runs>,
     workspace: String,
@@ -64,6 +104,9 @@ impl Drop for CancelOnDrop {
     }
 }
 impl Runs {
+    pub(crate) fn new(kind: Kind) -> Self {
+        Self(Mutex::default(), kind)
+    }
     pub(crate) fn cancel_actor(&self, actor: &str) -> usize {
         let mut entries = self.0.lock().unwrap();
         let mut count = 0;
@@ -117,7 +160,11 @@ impl Runs {
             ("application", active.len(), MAX_RUNS),
         ] {
             if observed >= limit {
-                return Err(Error::Domain { code:"RESOURCE_LIMIT".into(),message:"A simulation test is already active or test capacity is full; stop a run or wait for completion".into(),details:serde_json::json!({"resource":"motion_test_runs","scope":scope,"limit":limit,"observed":observed,"retryable":true}) });
+                return Err(Error::Domain {
+                    code: "RESOURCE_LIMIT".into(),
+                    message: self.1.busy.into(),
+                    details: serde_json::json!({"resource":self.1.resource,"scope":scope,"limit":limit,"observed":observed,"retryable":true}),
+                });
             }
         }
         let id = crate::id();
@@ -150,9 +197,7 @@ impl Runs {
         let entry = entries
             .get_mut(workspace)
             .filter(|entry| entry.status.id == id)
-            .ok_or_else(|| {
-                Error::domain("STALE_ENTITY", "This simulation run is no longer current")
-            })?;
+            .ok_or_else(|| Error::domain("STALE_ENTITY", self.1.stale))?;
         if entry.status.actor != actor && actor != "local-user" {
             return Err(Error::domain(
                 "UNSUPPORTED_OPERATION",
@@ -216,10 +261,7 @@ impl Lease {
     }
     pub(crate) fn check(&self) -> Result<()> {
         if *self.signal().borrow() {
-            Err(Error::domain(
-                "CANCELLED",
-                "Simulation test cancelled; previous result is preserved",
-            ))
+            Err(Error::domain("CANCELLED", self.0.runs.1.cancelled))
         } else {
             Ok(())
         }
@@ -227,16 +269,67 @@ impl Lease {
     pub(crate) fn finish<T>(&self, result: &mut Result<T>) -> Option<Status> {
         let mut status = None;
         self.update(|entry| {
-            if entry.timed_out && result.as_ref().is_err_and(|error| error.code()=="CANCELLED") {
-                *result=Err(Error::domain("RESOURCE_LIMIT",format!("Simulation test exceeded {DEADLINE_S} seconds; shorten the test or simplify the mechanism")));
+            if entry.timed_out
+                && result
+                    .as_ref()
+                    .is_err_and(|error| error.code() == "CANCELLED")
+            {
+                let kind = self.0.runs.1;
+                *result = Err(Error::domain(
+                    "RESOURCE_LIMIT",
+                    format!(
+                        "{} exceeded {} seconds; {}",
+                        kind.subject, kind.deadline_s, kind.deadline_hint
+                    ),
+                ));
             }
             match result {
-                Ok(_) => { entry.status.state=State::Completed; entry.status.error=None; }
-                Err(error) => { entry.status.state=if error.code()=="CANCELLED" { State::Cancelled } else { State::Failed }; entry.status.error=Some(Failure { code:error.code().into(),message:error.to_string().chars().take(4096).collect() }); }
+                Ok(_) => {
+                    entry.status.state = State::Completed;
+                    entry.status.error = None;
+                }
+                Err(error) => {
+                    entry.status.state = if error.code() == "CANCELLED" {
+                        State::Cancelled
+                    } else {
+                        State::Failed
+                    };
+                    entry.status.error = Some(Failure {
+                        code: error.code().into(),
+                        message: error.to_string().chars().take(4096).collect(),
+                    });
+                }
             }
-            status=Some(entry.status.clone());
+            status = Some(entry.status.clone());
         });
         status
+    }
+}
+/// Cancels a run when its actor is revoked and when its deadline passes; both
+/// watchers stop when this guard drops.
+pub(crate) struct Watchers(Vec<tokio::task::JoinHandle<()>>);
+impl Drop for Watchers {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+impl Lease {
+    pub(crate) fn watch(&self, mut actor_signal: watch::Receiver<bool>) -> Watchers {
+        let actor_lease = self.clone();
+        let actor_watch = tokio::spawn(async move {
+            if *actor_signal.borrow() || actor_signal.changed().await.is_ok() {
+                actor_lease.cancel();
+            }
+        });
+        let deadline_lease = self.clone();
+        let seconds = self.0.runs.1.deadline_s;
+        let deadline_watch = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+            deadline_lease.timeout();
+        });
+        Watchers(vec![actor_watch, deadline_watch])
     }
 }
 impl Drop for Inner {
@@ -252,7 +345,20 @@ impl Drop for Inner {
             } else {
                 State::Failed
             };
-            entry.status.error=Some(Failure { code:if entry.timed_out { "RESOURCE_LIMIT" } else if cancelled { "CANCELLED" } else { "RUN_INTERRUPTED" }.into(),message:"Simulation test ended without committing a result; previous result is preserved".into() });
+            entry.status.error = Some(Failure {
+                code: if entry.timed_out {
+                    "RESOURCE_LIMIT"
+                } else if cancelled {
+                    "CANCELLED"
+                } else {
+                    "RUN_INTERRUPTED"
+                }
+                .into(),
+                message: format!(
+                    "{} ended without committing a result; previous result is preserved",
+                    self.runs.1.subject
+                ),
+            });
         }
     }
 }
@@ -326,6 +432,19 @@ mod tests {
         task.await.unwrap();
         assert_eq!(runs.status("a").unwrap().state, State::Cancelled);
         assert!(runs.start("a", "r", "test", "actor").is_ok());
+    }
+    #[test]
+    fn requirement_queue_is_separate_and_words_its_own_deadline() {
+        let runs = Arc::new(Runs::new(Kind::REQUIREMENT));
+        let lease = runs.start("p", "r", "req", "actor").unwrap();
+        assert!(runs.start("p", "r", "req2", "actor").is_err());
+        lease.timeout();
+        let mut result: Result<()> = Err(Error::domain("CANCELLED", "x"));
+        let status = lease.finish(&mut result).unwrap();
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), "RESOURCE_LIMIT");
+        assert!(error.to_string().contains("120 seconds"), "{error}");
+        assert_eq!(status.state, State::Failed);
     }
     #[test]
     fn deadline_failure_is_distinct_from_stop_and_actor_revocation_targets_only_owned_runs() {

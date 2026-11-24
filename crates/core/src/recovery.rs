@@ -293,6 +293,7 @@ impl Core {
             &draft.id,
             actor,
             crate::JobKind::RepairDisplay,
+            false,
         )
         .await
     }

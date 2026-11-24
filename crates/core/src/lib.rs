@@ -173,6 +173,8 @@ pub struct Job {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredWorkspace {
+    #[serde(default)]
+    ephemeral: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,6 +269,10 @@ pub struct Core {
     worker_cache: Arc<worker_cache::WorkerCache>,
     native_admission_gate: Arc<Mutex<()>>,
     motion_test_runs: Arc<motion_test_runs::Runs>,
+    requirement_runs: Arc<motion_test_runs::Runs>,
+    requirement_auto_runs: Arc<requirements::run::AutoRunQueue>,
+    /// Built model views per project for requirement runs, reused while current.
+    requirement_views: Arc<requirements::run::ModelViewCache>,
 }
 fn id() -> String {
     Uuid::new_v4().to_string()
@@ -380,6 +386,10 @@ impl Core {
                     "Workspace directory does not match its identity",
                 ));
             }
+            if workspace.stored.ephemeral {
+                tokio::fs::remove_dir_all(entry.path()).await?;
+                continue;
+            }
             workspaces.insert(workspace.stored.id.clone(), workspace);
         }
         let workspaces = Arc::new(Mutex::new(workspaces));
@@ -394,6 +404,11 @@ impl Core {
             worker_cache,
             native_admission_gate: Arc::new(Mutex::new(())),
             motion_test_runs: Arc::new(motion_test_runs::Runs::default()),
+            requirement_views: Arc::default(),
+            requirement_auto_runs: Arc::default(),
+            requirement_runs: Arc::new(motion_test_runs::Runs::new(
+                motion_test_runs::Kind::REQUIREMENT,
+            )),
             actor_tokens: Arc::new(std::sync::Mutex::new(HashMap::new())),
             _process_lock: process_lock,
             views: views::ViewService::default(),
@@ -438,6 +453,10 @@ impl Core {
         ))
     }
     pub async fn create_workspace(&self, actor: &str) -> Result<String> {
+        self.create_workspace_with_lifetime(actor, false).await
+    }
+
+    async fn create_workspace_with_lifetime(&self, actor: &str, ephemeral: bool) -> Result<String> {
         let mut workspaces = self.workspaces.lock().await;
         let title = format!("Untitled {}", workspaces.len() + 1);
         let workspace_id = id();
@@ -451,6 +470,7 @@ impl Core {
             restored_from: None,
         };
         let stored = StoredWorkspace {
+            ephemeral,
             model_parent: None,
             model_source_revision: None,
             geometry_cache: Value::Null,
@@ -675,7 +695,7 @@ impl Core {
         draft_id: &str,
         actor: &str,
     ) -> Result<Job> {
-        self.queue_job(workspace_id, base, draft_id, actor, JobKind::Build)
+        self.queue_job(workspace_id, base, draft_id, actor, JobKind::Build, true)
             .await
     }
     pub(crate) async fn queue_job(
@@ -685,6 +705,7 @@ impl Core {
         draft_id: &str,
         actor: &str,
         kind: JobKind,
+        check_requirements: bool,
     ) -> Result<Job> {
         let _memory = self.pin_workspace(workspace_id).await?;
         let (job, snapshot, receive) = {
@@ -716,7 +737,7 @@ impl Core {
             ws.cancellation.insert(job.id.clone(), send);
             (job, snapshot, receive)
         };
-        self.launch_job(workspace_id, &job, snapshot, receive);
+        self.launch_job(workspace_id, &job, snapshot, receive, check_requirements);
         Ok(job)
     }
 
@@ -763,6 +784,7 @@ impl Core {
         job: &Job,
         snapshot: Draft,
         receive: watch::Receiver<bool>,
+        check_requirements: bool,
     ) {
         self.job_activity(workspace_id, job);
         let kind = job.kind.clone();
@@ -771,8 +793,14 @@ impl Core {
         let workspace_id = workspace_id.to_string();
         tokio::spawn(async move {
             if kind == JobKind::Build {
-                core.run_build(&workspace_id, &job_id, snapshot, receive)
-                    .await;
+                core.run_build(
+                    &workspace_id,
+                    &job_id,
+                    snapshot,
+                    receive,
+                    check_requirements,
+                )
+                .await;
             } else {
                 core.run_display_repair(&workspace_id, &job_id, snapshot, receive)
                     .await;
@@ -825,6 +853,7 @@ impl Core {
         job_id: &str,
         draft: Draft,
         cancel: watch::Receiver<bool>,
+        check_requirements: bool,
     ) {
         let Ok(_memory) = self.pin_workspace(workspace_id).await else {
             return;
@@ -1176,12 +1205,26 @@ impl Core {
         }
         self.display_use.touch(workspace_id, &ws.stored.current);
         ws.cancellation.remove(job_id);
-        self.job_activity(workspace_id, &ws.stored.jobs[job_id]);
+        let job = &ws.stored.jobs[job_id];
+        self.job_activity(workspace_id, job);
+        let built_revision = if check_requirements && job.state == JobState::Succeeded {
+            job.resulting_revision.clone()
+        } else {
+            None
+        };
+        let owner = ws.stored.model_parent.clone();
         drop(workspaces);
         // Publication and terminal job persistence finish before the next
         // queued constructor can inspect the newly committed base revision.
         drop(slot);
         self.worker_cache.schedule();
+        if let Some(revision) = built_revision {
+            self.schedule_requirement_auto_run(
+                owner.as_deref().unwrap_or(workspace_id),
+                workspace_id,
+                &revision,
+            );
+        }
     }
     pub async fn get_job(&self, workspace_id: &str, job_id: &str) -> Result<Job> {
         let workspaces = self.workspaces.lock().await;

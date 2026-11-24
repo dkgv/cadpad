@@ -79,6 +79,7 @@ impl Catalog {
 
 fn stub(stored: &StoredWorkspace) -> StoredWorkspace {
     StoredWorkspace {
+        ephemeral: stored.ephemeral,
         schema_version: stored.schema_version,
         id: stored.id.clone(),
         current: stored.current.clone(),

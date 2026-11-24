@@ -28,7 +28,8 @@ impl Core {
             .entry(actor.into())
             .or_insert_with(|| watch::channel(false).0)
             .send_replace(true);
-        let mut count = self.motion_test_runs.cancel_actor(actor);
+        let mut count =
+            self.motion_test_runs.cancel_actor(actor) + self.requirement_runs.cancel_actor(actor);
         for workspace in workspaces.values() {
             for (job_id, cancel) in &workspace.cancellation {
                 if workspace

@@ -185,12 +185,12 @@ fn param_key(p: &ParamRef, manifest: &Manifest) -> Option<String> {
 }
 
 /// A state as the worker takes it: `params` plus ordered rigid `moves`.
-struct WorkerState {
-    params: BTreeMap<String, f64>,
-    moves: Vec<Value>,
+pub(super) struct WorkerState {
+    pub(super) params: BTreeMap<String, f64>,
+    pub(super) moves: Vec<Value>,
 }
 
-fn worker_state(
+pub(super) fn worker_state(
     claim: &str,
     state: &ConcreteState,
     manifest: &Manifest,

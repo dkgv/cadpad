@@ -26,6 +26,8 @@ pub mod provenance;
 pub mod quantity;
 pub mod refs;
 pub mod relink;
+pub mod replay;
+pub mod run;
 pub mod settings;
 pub mod snapshot;
 pub mod states;

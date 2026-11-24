@@ -13,10 +13,12 @@
 //! hash matches no entity, several entities, or another broken reference
 //! wants it too, the reference is `gone` / `ambiguous` and needs review.
 //! Nothing is matched approximately.
-use super::bind::{glob_match, model_key};
+use super::bind::{glob_match, model_key, part_ref_key};
+use super::ir::{AxisRef, FeatureRef, PartName, PartRef, Target};
 use super::manifest::{FeatureLink, Manifest, MemberLink, ParamLink};
 use super::settings::ProjectSettings;
 use super::snapshot::WorkspaceSnapshot;
+use super::states::{ConcreteState, StateValue};
 use super::worker_plan::split_part_key;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -194,6 +196,38 @@ fn list(keys: &BTreeSet<&String>) -> String {
         .map(|k| k.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn rename_state_parts(state: &mut ConcreteState, renamed: &BTreeMap<String, String>) {
+    let rename = |part: &mut PartRef| {
+        if let Some((_, name)) = renamed
+            .get(&part_ref_key(part))
+            .and_then(|key| split_part_key(key))
+        {
+            part.part = PartName::Name(name.to_owned());
+        }
+    };
+    for value in &mut state.values {
+        let (moving, axis) = match value {
+            StateValue::Rotate { moving, axis, .. } => (moving, axis),
+            StateValue::Translate {
+                moving, direction, ..
+            } => (moving, direction),
+            _ => continue,
+        };
+        match moving {
+            Target::Part(part) => rename(part),
+            Target::Parts(parts) => parts.iter_mut().for_each(rename),
+            Target::Set(_) => {}
+        }
+        if let AxisRef::Feature(feature) = axis {
+            match feature {
+                FeatureRef::Explicit { part, .. }
+                | FeatureRef::History { part, .. }
+                | FeatureRef::Geometric { part, .. } => rename(part),
+            }
+        }
+    }
 }
 
 /// Resolve unique-by-hash candidates for references that disappeared.
@@ -540,7 +574,11 @@ pub fn relink(
                 Some(new)
                     if new.model == old.model
                         && new.part == old.part
-                        && new.mapped_to == old.mapped_to => {}
+                        && new.mapped_to.as_ref()
+                            == old
+                                .mapped_to
+                                .as_ref()
+                                .map(|key| renamed.get(key).unwrap_or(key)) => {}
                 Some(new) => push(
                     &mut changes,
                     ChangeKind::ChipRemapped,
@@ -606,18 +644,23 @@ pub fn relink(
             );
         }
         if f.states != approved.states {
-            let ids: BTreeSet<&String> = approved
-                .states
+            let mut before = approved.states.clone();
+            for state in before.values_mut().flatten() {
+                rename_state_parts(state, &renamed);
+            }
+            let ids: BTreeSet<&String> = before
                 .keys()
                 .chain(f.states.keys())
-                .filter(|k| approved.states.get(*k) != f.states.get(*k))
+                .filter(|k| before.get(*k) != f.states.get(*k))
                 .collect();
-            changes.push(Change {
-                kind: ChangeKind::StatesChanged,
-                effect: Effect::RunChanged,
-                at: "states".into(),
-                message: format!("expanded states changed for {}", list(&ids)),
-            });
+            if !ids.is_empty() {
+                changes.push(Change {
+                    kind: ChangeKind::StatesChanged,
+                    effect: Effect::RunChanged,
+                    at: "states".into(),
+                    message: format!("expanded states changed for {}", list(&ids)),
+                });
+            }
         }
     }
 

@@ -329,6 +329,52 @@ impl Core {
         cached_view: Option<&str>,
         preview: Option<crate::StlPreviewSink>,
     ) -> Result<(String, crate::Job)> {
+        self.open_project_model_view(
+            workspace,
+            revision,
+            entry,
+            builder,
+            actor,
+            cached_view,
+            preview,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_requirement_model(
+        &self,
+        workspace: &str,
+        revision: &str,
+        entry: &str,
+        builder: &str,
+        actor: &str,
+        cached_view: Option<&str>,
+    ) -> Result<(String, crate::Job)> {
+        self.open_project_model_view(
+            workspace,
+            revision,
+            entry,
+            builder,
+            actor,
+            cached_view,
+            None,
+            false,
+        )
+        .await
+    }
+
+    async fn open_project_model_view(
+        &self,
+        workspace: &str,
+        revision: &str,
+        entry: &str,
+        builder: &str,
+        actor: &str,
+        cached_view: Option<&str>,
+        preview: Option<crate::StlPreviewSink>,
+        check_requirements: bool,
+    ) -> Result<(String, crate::Job)> {
         let _memory = self.pin_workspace(workspace).await?;
         let standalone_stl =
             builder == MODEL_FILE_BUILDER && portable::model_file_format(entry) == Some("stl");
@@ -516,6 +562,7 @@ impl Core {
             // The source revision identifies the parent project snapshot for reuse.
             let source = &parent.stored;
             let mut stored = crate::StoredWorkspace {
+                ephemeral: !check_requirements,
                 model_parent: Some(
                     source
                         .model_parent
@@ -630,10 +677,20 @@ impl Core {
         drop(construction);
         if let Some(job) = completed {
             self.job_activity(&workspace_id, &job);
+            if check_requirements && let Some(revision) = &job.resulting_revision {
+                self.schedule_requirement_auto_run(workspace, &workspace_id, revision);
+            }
             return Ok((workspace_id, job));
         }
         match self
-            .work_on_project_builder(&workspace_id, &base, entry, builder, actor)
+            .build_project_model(
+                &workspace_id,
+                &base,
+                entry,
+                builder,
+                actor,
+                check_requirements,
+            )
             .await
         {
             Ok(job) => Ok((workspace_id, job)),
@@ -650,6 +707,19 @@ impl Core {
         entry: &str,
         builder: &str,
         actor: &str,
+    ) -> Result<crate::Job> {
+        self.build_project_model(workspace, revision, entry, builder, actor, true)
+            .await
+    }
+
+    async fn build_project_model(
+        &self,
+        workspace: &str,
+        revision: &str,
+        entry: &str,
+        builder: &str,
+        actor: &str,
+        check_requirements: bool,
     ) -> Result<crate::Job> {
         let _memory = self.pin_workspace(workspace).await?;
         let publication = if builder == MODEL_FILE_BUILDER {
@@ -700,7 +770,15 @@ impl Core {
             draft
         };
         drop(publication);
-        self.build(workspace, revision, &draft.id, actor).await
+        self.queue_job(
+            workspace,
+            revision,
+            &draft.id,
+            actor,
+            crate::JobKind::Build,
+            check_requirements,
+        )
+        .await
     }
     async fn project_builder_adapter(
         &self,
@@ -870,7 +948,8 @@ impl Core {
     }
     async fn entry_analysis_request(&self, method: &str, params: Value) -> Result<Value> {
         let (_send, cancel) = tokio::sync::watch::channel(false);
-        self.entry_analysis_with_cancel(method, params, cancel).await
+        self.entry_analysis_with_cancel(method, params, cancel)
+            .await
     }
 
     pub(crate) async fn entry_analysis_with_cancel(

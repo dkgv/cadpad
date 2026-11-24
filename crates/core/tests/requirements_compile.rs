@@ -144,6 +144,17 @@ fn allowances_apply_per_pair_and_state() {
         "{:?}",
         c.diagnostics
     );
+    let unused = c
+        .diagnostics
+        .iter()
+        .find(|d| d.code == DiagnosticCode::WAllowUnused)
+        .unwrap();
+    assert_eq!(
+        unused.severity,
+        cadpad_core::requirements::Severity::Warning
+    );
+    assert!(unused.span.is_some());
+    assert!(unused.fix.is_none());
     assert!(!c.has_errors());
 }
 
@@ -207,6 +218,15 @@ fn binding_errors_block_the_plan_and_suggest_fixes() {
         .iter()
         .find(|d| d.code == DiagnosticCode::EBindPartMissing)
         .unwrap();
+    assert_eq!(d.at, "text");
+    assert!(
+        d.span.is_some(),
+        "binding diagnostic should point into prose: {d:?}"
+    );
+    assert!(matches!(
+        d.fix,
+        Some(cadpad_core::requirements::Fix::AskUser { .. })
+    ));
     assert!(format!("{:?}", d.fix).contains("frames"));
 }
 
@@ -217,11 +237,12 @@ fn text_values_not_in_the_prose_are_downgraded_not_rejected() {
     v["claims"][0]["args"]["bed"]["list"][0]["quantity"]["value"] = 300.0.into();
     let c = run(&v.to_string(), s);
     assert!(!c.has_errors(), "{:?}", c.diagnostics);
-    assert!(
-        c.downgrades.iter().any(|d| d.at == "claims[0].args.bed[0]"),
-        "{:?}",
-        c.downgrades
-    );
+    let downgrade = c
+        .downgrades
+        .iter()
+        .find(|d| d.at == "claims[0].args.bed[0]")
+        .expect("unsourced LLM value should be downgraded");
+    assert_eq!(downgrade.was, Source::Text);
     let printed = c.print.unwrap().render();
     assert!(
         printed.contains("Numbers I chose: bed x 300 mm, bed y 256 mm, bed z 256 mm"),
@@ -233,6 +254,14 @@ fn text_values_not_in_the_prose_are_downgraded_not_rejected() {
     };
     assert!(
         matches!(&items[0], cadpad_core::requirements::Arg::Quantity(l) if l.source == Source::Inferred)
+    );
+    // The compiled, reviewable value is what an approval hashes; it records
+    // the inferred value instead of treating the assistant's `text` label as
+    // user-confirmed provenance.
+    assert!(c.hashes.is_some());
+    assert_eq!(
+        c.requirement.claims[0].args["bed"],
+        cadpad_core::requirements::Arg::List(items.clone())
     );
 }
 

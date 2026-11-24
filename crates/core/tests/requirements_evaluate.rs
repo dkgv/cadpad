@@ -614,6 +614,9 @@ fn timings_are_outside_the_hash_and_w_slow_names_the_costliest_claim() {
     assert_eq!(slow.timings.costliest.as_deref(), Some("c2"));
     let w = &slow.warnings[0];
     assert_eq!(w.code, DiagnosticCode::WSlow);
+    assert_eq!(w.at, "claims[c2]");
+    assert_eq!(w.severity, cadpad_core::requirements::Severity::Warning);
+    assert!(w.fix.is_none());
     assert!(
         w.message.contains("c2") && w.message.contains("30.5"),
         "{}",

@@ -934,30 +934,7 @@ impl Core {
         let task_lease = lease.clone();
         let (send, receive) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            struct Watchers(Vec<tokio::task::JoinHandle<()>>);
-            impl Drop for Watchers {
-                fn drop(&mut self) {
-                    for task in &self.0 {
-                        task.abort();
-                    }
-                }
-            }
-            let mut actor_signal = core.actor_signal(&actor);
-            let actor_lease = task_lease.clone();
-            let actor_watch = tokio::spawn(async move {
-                if *actor_signal.borrow() || actor_signal.changed().await.is_ok() {
-                    actor_lease.cancel();
-                }
-            });
-            let deadline_lease = task_lease.clone();
-            let deadline_watch = tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    crate::motion_test_runs::DEADLINE_S,
-                ))
-                .await;
-                deadline_lease.timeout();
-            });
-            let _watchers = Watchers(vec![actor_watch, deadline_watch]);
+            let _watchers = task_lease.watch(core.actor_signal(&actor));
             let view = args.workspace_id.clone();
             let mut result = core
                 .control_motion_tests_inner(&actor, args, Some(task_lease.clone()))

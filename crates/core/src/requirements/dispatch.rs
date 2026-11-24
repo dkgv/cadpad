@@ -28,11 +28,20 @@ const DEFAULT_CHUNK_LIMIT_S: f64 = 120.0;
 
 /// A model's built view: the workspace to address and the revision it was
 /// built at.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct ModelView {
     pub workspace: String,
     pub revision: String,
+    // Clones held by running checks keep a retired workspace alive.
+    pub(super) lease: Option<Arc<tokio::sync::oneshot::Sender<()>>>,
 }
+
+impl PartialEq for ModelView {
+    fn eq(&self, other: &Self) -> bool {
+        self.workspace == other.workspace && self.revision == other.revision
+    }
+}
+impl Eq for ModelView {}
 
 /// A compile-ready snapshot plus the built views it was read from, so plan
 /// chunks can be dispatched to the same workers afterwards.
@@ -49,7 +58,9 @@ impl Core {
     ///
     /// Reads the project source catalog, then builds a private view for each
     /// model in `referenced` (all catalog models when `None`) with the same
-    /// machinery model tabs use, without opening any UI tab. A model that
+    /// machinery model tabs use, without opening any UI tab. If the caller
+    /// addressed an existing model view, read its current built revision.
+    /// A model that
     /// fails to build is listed with its build error; models outside
     /// `referenced` are listed as not built. `cached_views` maps models to
     /// view workspaces from an earlier snapshot, reused when still current.
@@ -68,25 +79,36 @@ impl Core {
         let catalog = self
             .project_source_catalog(&project, &revision, None)
             .await?;
+        let current_model = self.requirement_view_model(workspace).await?;
         let mut builds = BTreeMap::new();
         let mut views = BTreeMap::new();
         for (model, _) in models_from_catalog(&catalog) {
             if referenced.is_some_and(|wanted| !wanted.contains(&model)) {
                 continue;
             }
-            let opened = self
-                .open_project_model_reusing(
-                    &project,
-                    &revision,
-                    &model.entry,
-                    &model.builder,
-                    actor,
-                    cached_views.get(&model).map(String::as_str),
-                )
-                .await;
-            let built = match opened {
-                Ok((view, job)) => self.read_built_view(&view, &job.id, &model).await,
-                Err(error) => Err(error.to_string()),
+            let built = if current_model.as_ref() == Some(&model) {
+                self.requirement_model_snapshot(workspace, &model).await
+            } else {
+                let opened = self
+                    .open_requirement_model(
+                        &project,
+                        &revision,
+                        &model.entry,
+                        &model.builder,
+                        actor,
+                        cached_views.get(&model).map(String::as_str),
+                    )
+                    .await;
+                match opened {
+                    Ok((view, job)) => {
+                        let built = self.read_built_view(&view, &job.id, &model).await;
+                        if built.is_err() && cached_views.get(&model) != Some(&view) {
+                            let _ = self.forget_workspace(&view).await;
+                        }
+                        built
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
             };
             if let Ok((view, project_json)) = built {
                 views.insert(model.clone(), view);
@@ -99,6 +121,15 @@ impl Core {
             snapshot: super::snapshot::snapshot_from_values(&catalog, &builds),
             views,
         })
+    }
+
+    pub(crate) async fn requirement_view_model(&self, workspace: &str) -> Result<Option<ModelRef>> {
+        let all = self.workspace(workspace).await?;
+        let stored = &all[workspace].stored;
+        Ok(stored.model_parent.as_ref().and_then(|_| {
+            crate::project_entry::inputs_model_entry(&stored.current_revision().inputs)
+                .map(|(entry, builder)| ModelRef { entry, builder })
+        }))
     }
 
     /// Wait for the build job of a model view, then read it. Returns the view
@@ -144,6 +175,14 @@ impl Core {
                     .to_string());
             }
         }
+        self.requirement_model_snapshot(view, model).await
+    }
+
+    async fn requirement_model_snapshot(
+        &self,
+        view: &str,
+        model: &ModelRef,
+    ) -> std::result::Result<(ModelView, Value), String> {
         let mut project = self.get_project(view).await.map_err(|e| e.to_string())?;
         name_adapter_builders(&mut project, model);
         let revision = project["revision"].as_str().unwrap_or_default().to_string();
@@ -151,6 +190,7 @@ impl Core {
             ModelView {
                 workspace: view.to_string(),
                 revision,
+                lease: None,
             },
             project,
         ))

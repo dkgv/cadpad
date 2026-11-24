@@ -99,14 +99,17 @@ pub struct RequirementEntry {
     /// Canonical print of the draft; absent while it has errors.
     #[serde(default)]
     pub draft_print: Option<Print>,
+    /// Hashes of the draft's last compile; absent while it has errors. What
+    /// a review of the draft would approve.
+    #[serde(default)]
+    pub draft_hashes: Option<StoredHashes>,
     #[serde(default)]
     pub approved: Option<Approved>,
     /// Last evaluation result of the approved plan (placeholder JSON until
     /// the run lifecycle fills it).
     #[serde(default)]
     pub last_result: Option<Value>,
-    /// Set when the entry was imported from a project file: its result is
-    /// historical and must be re-run.
+    /// The stored result is historical, following import or a new approval.
     #[serde(default, skip_serializing_if = "is_false")]
     pub rerun_required: bool,
 }
@@ -135,6 +138,7 @@ impl RequirementEntry {
             draft: compiled.requirement.clone(),
             draft_diagnostics: vec![],
             draft_print: None,
+            draft_hashes: None,
             approved: None,
             last_result: None,
             rerun_required: false,
@@ -149,6 +153,7 @@ impl RequirementEntry {
         self.draft = compiled.requirement.clone();
         self.draft_diagnostics = compiled.diagnostics.clone();
         self.draft_print = compiled.print.clone();
+        self.draft_hashes = compiled.hashes.as_ref().map(StoredHashes::from);
     }
 
     pub fn approval(&self) -> Approval {
@@ -170,6 +175,9 @@ impl RequirementEntry {
         {
             return Some(RequirementStatus::NeedsReview);
         }
+        if self.rerun_required {
+            return Some(RequirementStatus::Pending);
+        }
         self.last_result
             .as_ref()
             .and_then(|r| serde_json::from_value(r.get("status")?.clone()).ok())
@@ -183,7 +191,12 @@ impl RequirementEntry {
     /// Size and identity limits, with clear errors.
     pub fn validate(&self, id: &str) -> Result<()> {
         validate_id(id)?;
-        if self.draft.id != id || self.approved.as_ref().is_some_and(|a| a.requirement.id != id) {
+        if self.draft.id != id
+            || self
+                .approved
+                .as_ref()
+                .is_some_and(|a| a.requirement.id != id)
+        {
             return Err(invalid("Requirement ID does not match its catalog key"));
         }
         let size = serde_json::to_vec(self)?.len();
@@ -245,6 +258,10 @@ pub struct RequirementInfo {
     pub text: String,
     /// Hash of the draft IR (what a review of the draft would approve).
     pub draft_hash: String,
+    /// Requirement, manifest and plan hashes of the compiled draft, to pass to
+    /// `approve_requirement`; null while the draft has errors.
+    #[serde(default)]
+    pub draft_hashes: Option<StoredHashes>,
     /// Canonical print of the draft; absent while it has errors.
     pub print: Option<Print>,
     pub rendered: Option<String>,
@@ -253,8 +270,13 @@ pub struct RequirementInfo {
     /// The approved version, which is what runs.
     pub approved: Option<ApprovedInfo>,
     pub last_result: Option<Value>,
-    /// The result came from an imported project file; re-run it.
+    /// The stored result must be rechecked.
     pub rerun_required: bool,
+    /// The project's latest requirement run when it was of this requirement
+    /// (queued, running, cancelling or finished). Set by the tool; absent in
+    /// catalog-only replies.
+    #[serde(default)]
+    pub run: Option<super::run::RunInfo>,
 }
 
 impl RequirementInfo {
@@ -266,6 +288,7 @@ impl RequirementInfo {
             approval: entry.approval(),
             text: entry.draft.text.clone(),
             draft_hash: entry.draft.content_hash(),
+            draft_hashes: entry.draft_hashes.clone(),
             print: entry.draft_print.clone(),
             rendered: entry.draft_print.as_ref().map(Print::render),
             diagnostics: entry.draft_diagnostics.clone(),
@@ -276,6 +299,7 @@ impl RequirementInfo {
             }),
             last_result: entry.last_result.clone(),
             rerun_required: entry.rerun_required,
+            run: None,
         }
     }
 }
@@ -348,8 +372,9 @@ impl Core {
     ) -> Result<CatalogReply> {
         let _memory = self.pin_workspace(workspace_id).await?;
         self.ensure_actor_active(actor)?;
-        let (owner, mut catalog, current) =
-            self.load_requirements(actor, workspace_id, expected).await?;
+        let (owner, mut catalog, current) = self
+            .load_requirements(actor, workspace_id, expected)
+            .await?;
         let _owner_memory = self.pin_workspace(&owner).await?;
         let id = compiled.requirement.id.clone();
         validate_id(&id)?;
@@ -378,7 +403,11 @@ impl Core {
     pub async fn approve_requirement(&self, request: ApproveRequest) -> Result<CatalogReply> {
         let _memory = self.pin_workspace(&request.workspace_id).await?;
         let (owner, mut catalog, current) = self
-            .load_requirements(USER, &request.workspace_id, request.expected_catalog.as_deref())
+            .load_requirements(
+                USER,
+                &request.workspace_id,
+                request.expected_catalog.as_deref(),
+            )
             .await?;
         let _owner_memory = self.pin_workspace(&owner).await?;
         let draft = catalog
@@ -388,11 +417,14 @@ impl Core {
             .draft
             .clone();
         let settings = project_settings();
-        let snapshot = snapshot_for(self, &request.workspace_id).await?;
+        let snapshot = snapshot_for(self, &request.workspace_id, USER).await?;
         let compiled = compile(&draft, &snapshot, &settings);
         if compiled.has_errors() {
-            let errors: Vec<&Diagnostic> =
-                compiled.diagnostics.iter().filter(|d| d.is_error()).collect();
+            let errors: Vec<&Diagnostic> = compiled
+                .diagnostics
+                .iter()
+                .filter(|d| d.is_error())
+                .collect();
             let summary = errors
                 .iter()
                 .take(3)
@@ -401,10 +433,7 @@ impl Core {
                 .join("; ");
             return Err(Error::Domain {
                 code: "REQUIREMENT_HAS_ERRORS".into(),
-                message: format!(
-                    "Cannot approve: {} error(s). {summary}",
-                    errors.len()
-                ),
+                message: format!("Cannot approve: {} error(s). {summary}", errors.len()),
                 details: serde_json::to_value(&compiled.diagnostics)?,
             });
         }
@@ -437,9 +466,8 @@ impl Core {
             settings_hash: settings.content_hash(),
         });
         entry.set_draft(&compiled);
-        // A new approval is a new plan: any earlier result no longer applies.
-        entry.last_result = None;
-        entry.rerun_required = false;
+        // Keep the earlier verdict visible as history until this plan runs.
+        entry.rerun_required = entry.last_result.is_some();
         self.commit_requirement_catalog(USER, &owner, &request.workspace_id, &current, &catalog)
             .await?;
         reply(owner, &catalog)
@@ -449,10 +477,18 @@ impl Core {
     pub async fn delete_requirement(&self, request: DeleteRequest) -> Result<CatalogReply> {
         let _memory = self.pin_workspace(&request.workspace_id).await?;
         let (owner, mut catalog, current) = self
-            .load_requirements(USER, &request.workspace_id, request.expected_catalog.as_deref())
+            .load_requirements(
+                USER,
+                &request.workspace_id,
+                request.expected_catalog.as_deref(),
+            )
             .await?;
         let _owner_memory = self.pin_workspace(&owner).await?;
-        if catalog.get(&request.id).and_then(Saved::requirement).is_none() {
+        if catalog
+            .get(&request.id)
+            .and_then(Saved::requirement)
+            .is_none()
+        {
             return Err(invalid("Unknown requirement"));
         }
         catalog.remove(&request.id);
@@ -522,7 +558,10 @@ mod tests {
         // The approved version and its result are untouched.
         let approved = entry.approved.as_ref().unwrap();
         assert_eq!(approved.requirement, c.requirement);
-        assert_eq!(entry.last_result, Some(serde_json::json!({"status": "met"})));
+        assert_eq!(
+            entry.last_result,
+            Some(serde_json::json!({"status": "met"}))
+        );
         // Restoring the approved text makes it current again.
         entry.set_draft(&c);
         assert_eq!(entry.approval(), Approval::Approved);
@@ -549,7 +588,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let digest = crate::portable::bytes_hash(&bytes);
         std::fs::create_dir(dir.path().join("motion-tests")).unwrap();
-        std::fs::write(dir.path().join(format!("motion-tests/{digest}.json")), &bytes).unwrap();
+        std::fs::write(
+            dir.path().join(format!("motion-tests/{digest}.json")),
+            &bytes,
+        )
+        .unwrap();
         let loaded = load(dir.path(), Some(&digest)).unwrap();
         assert!(loaded["t"].test().is_some());
         let entry = loaded[&id].requirement().unwrap();
@@ -588,7 +631,9 @@ mod tests {
             .to_string();
         assert!(err.contains("limited to 1024 KiB"), "{err}");
         // A key that does not match the IR id is refused.
-        let err = RequirementEntry::new_draft(&c).validate("other").unwrap_err();
+        let err = RequirementEntry::new_draft(&c)
+            .validate("other")
+            .unwrap_err();
         assert_eq!(err.code(), "INVALID_REQUIREMENT");
     }
 }

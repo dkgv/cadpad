@@ -137,6 +137,7 @@ impl Core {
             .collect();
         draft.external_fingerprint = external_fingerprint;
         let stored = StoredWorkspace {
+            ephemeral: false,
             model_parent: None,
             model_source_revision: None,
             geometry_cache: Value::Null,
@@ -699,6 +700,7 @@ impl Core {
         candidates.sort_by(|a, b| b.stored.id.cmp(&a.stored.id));
         let mut seen = std::collections::HashSet::new();
         let mut summaries=candidates.into_iter().filter(|ws| {
+            if ws.stored.ephemeral { return false; }
             let has_content = ws.archived.as_ref().map_or_else(|| {
                 let revision = ws.stored.current_revision();
                 revision.model["parts"].as_array().is_some_and(|parts| !parts.is_empty())
@@ -751,6 +753,8 @@ impl Core {
     /// Bound project folders on disk are left untouched.
     pub async fn forget_workspace(&self, workspace: &str) -> Result<()> {
         self.motion_test_runs.forget(workspace);
+        self.requirement_runs.forget(workspace);
+        self.forget_requirement_views(workspace).await;
         let ui_points_here = tokio::fs::read(self.root.join("ui.json"))
             .await
             .ok()
@@ -767,7 +771,11 @@ impl Core {
             }
             drop(ws.worker.take());
             let directory = self.root.join("workspaces").join(workspace);
-            let remaining = workspaces.keys().cloned().collect::<Vec<_>>();
+            let remaining = workspaces
+                .values()
+                .filter(|ws| !ws.stored.ephemeral)
+                .map(|ws| ws.stored.id.clone())
+                .collect::<Vec<_>>();
             (directory, remaining)
         };
         if tokio::fs::try_exists(&directory).await.unwrap_or(false) {
