@@ -42,6 +42,13 @@ async function openMotionSection(title){await click([...document.querySelectorAl
 async function flush(ms=5){await act(async()=>{await new Promise(resolve=>setTimeout(resolve,ms));});}
 async function setValue(element,value,event='input'){
   await act(async()=>{
+    if(element.getAttribute('contenteditable')==='true'){
+      // The requirement composer is a contenteditable; text typed after any chip keeps the chip.
+      const node=dom.window.document.createTextNode(value);element.append(node);
+      const range=dom.window.document.createRange();range.setStart(node,value.length);range.collapse(true);
+      dom.window.getSelection().removeAllRanges();dom.window.getSelection().addRange(range);
+      element.dispatchEvent(new dom.window.Event('input',{bubbles:true}));await new Promise(resolve=>setTimeout(resolve,10));return;
+    }
     const proto=element instanceof dom.window.HTMLTextAreaElement?dom.window.HTMLTextAreaElement.prototype:element instanceof dom.window.HTMLSelectElement?dom.window.HTMLSelectElement.prototype:dom.window.HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(proto,'value').set.call(element,value);
     element.dispatchEvent(new dom.window.Event(event,{bubbles:true}));await new Promise(resolve=>setTimeout(resolve,10));
@@ -348,7 +355,8 @@ test('free text motion tests expose actual criteria and simulation assumptions b
   assert.ok(button('Check requirement'));assert.ok(document.querySelector('[aria-label="Delete requirement Lever pushes shoe"]'));
   assert.match(document.querySelector('.test-status').textContent,/Ready to check/);
   await click(document.querySelector('[aria-label="Edit requirement Lever pushes shoe"]'));
-  assert.equal(document.getElementById('test-intent').value,definition.intent);
+  assert.equal(document.getElementById('test-intent').textContent,definition.intent);
+  await act(async()=>document.getElementById('test-intent').replaceChildren());
   await setValue(document.getElementById('test-intent'),'Push the shoe at least 7 mm.');
   await click(button('Update checks'));
   const edit=harness.calls.findLast(([name])=>name==='agent_start')[1].prompt;

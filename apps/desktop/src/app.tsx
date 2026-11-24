@@ -1314,11 +1314,13 @@ export function App({host}:{host?:SessionHost}={}) {
   },[project?.workspace_id,project?.revision,external?.changed,external?.fingerprint,external?.conflicts?.length,working,trackExternal,host?.openingModel]);
   useEffect(()=>{if(job?.state==='failed'&&external?.changed)setExternalReloadFailed(true);},[job?.state,external?.changed]);
   /** Ask the assistant to save a requirement for a project model, which need not be open. */
-  async function prepareMotionTest(intent:string,model:{entry:string;builder:string}|null,id?:string){
+  async function prepareMotionTest(intent:string,model:{entry:string;builder:string}|null,id?:string,mentioned:{entry:string;builder:string}[]=[]){
     // Models without a tab get a background workspace so the assistant can inspect them.
     const view=model&&host?.ensureModelView?await host.ensureModelView(model.entry,model.builder):null;
     const target=model?`the project model ${model.builder} in ${model.entry}`:'this design';
-    const request=(id?`Edit the saved CAD requirement with ID ${id} for ${target}. List saved requirements and inspect its existing definition first.\n`:`Create a saved CAD requirement for ${target} from this free-text requirement:\n`)+intent+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';
+    const others=mentioned.filter(item=>!model||item.entry!==model.entry||item.builder!==model.builder);
+    const mentions=mentioned.length>1||others.length?`\nThe requirement mentions these project models (as @[Label](entry#builder) tokens): ${mentioned.map(item=>`${item.builder} in ${item.entry}`).join('; ')}. Consider every one of them when inspecting and writing checks.`:'';
+    const request=(id?`Edit the saved CAD requirement with ID ${id} for ${target}. List saved requirements and inspect its existing definition first.\n`:`Create a saved CAD requirement for ${target} from this free-text requirement:\n`)+intent+mentions+'\nInspect the current assembly and save explicit starting conditions, actions and measurable pass/fail checks. Ask for missing targets, tolerances or simulation assumptions; do not invent acceptance criteria. If the requirement cannot be expressed with supported checks, explain what is missing instead of claiming it is verified. Prepare and save the requirement and its simulation checks only: do not run them. The user will review the saved checks in Requirements and click Check requirement. Explain the prepared checks in plain language. CAD simulation only.';
     setPanel('assistant');setPrompt(request);await sendPrompt(request,undefined,undefined,view?.workspace);
   }
   function intendedSelection(current:Project|null):Entity|null {
@@ -1465,7 +1467,7 @@ export function App({host}:{host?:SessionHost}={}) {
     openModel={host?.onOpenModel?model=>host.onOpenModel!(model.entry,model.builder):undefined}
     onSnapshot={snapshot=>{if(snapshot.workspace_id!==project.workspace_id)return;setSimulationRunning(false);setPlaybackRunning(false);pendingTargets.current.clear();receiveMotion(snapshot);}}
     onChanged={()=>{const workspace=project.workspace_id;void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace&&currentProject.current?.revision===next.revision){currentProject.current=next;setProject(next);}}).catch(e=>setError(message(e)));}}
-    agentBusy={agentWorking||agentSending} onCreate={(intent,model)=>prepareMotionTest(intent,model)} onEdit={(id,intent,model)=>prepareMotionTest(intent,model,id)}/>;
+    agentBusy={agentWorking||agentSending} onCreate={(intent,model,mentioned)=>prepareMotionTest(intent,model,undefined,mentioned)} onEdit={(id,intent,model,mentioned)=>prepareMotionTest(intent,model,id,mentioned)}/>;
   const requirementsPanel=(<aside className="motion-sidebar inspector-page" id="panel-test" aria-label="Requirements"><div className="motion-sidebar-content">{requirementsBody}</div></aside>);
   const explorer=displayProject||project;
   const selectedMesh=explorer?.model.parts.some(part=>part.instance_id===selection?.instance_id&&part.accuracy==='mesh');

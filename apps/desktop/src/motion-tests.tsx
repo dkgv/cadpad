@@ -3,6 +3,8 @@ import {invoke} from '@tauri-apps/api/core';
 import type {MotionSnapshot} from '@cadpad/viewer';
 import {Icon} from './ui';
 import {indexedModels,loadSourceIndex,modelCaption,useSourceCatalogEpoch} from './source-catalog';
+import {RequirementComposer} from './requirement-composer';
+import {mentionedModels,tokenFor} from './requirement-tokens';
 import {MotionTestDefinitionView,type ModelRef,type MotionTestDefinition,type MotionTestOutcome,type MotionTestReview} from './motion-test-definition';
 
 type Test={id:string;definition:MotionTestDefinition;outcome:MotionTestOutcome|null;review?:MotionTestReview|null;stale:boolean;design_compared?:boolean;frame_count:number;duration_s:number};
@@ -52,8 +54,9 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
   openModel?:(model:ModelRef)=>Promise<void>|void;
   /** Replay snapshots, for a host that shows the replayed workspace itself. */
   onSnapshot?:(snapshot:MotionSnapshot)=>void;
-  onCreate:(intent:string,model:ModelRef|null)=>Promise<void>|void;
-  onEdit?:(id:string,intent:string,model:ModelRef|null)=>Promise<void>|void;
+  /** `model` is the single target for now (first mention, else the focused model); `mentioned` lists every model the text mentions. */
+  onCreate:(intent:string,model:ModelRef|null,mentioned:ModelRef[])=>Promise<void>|void;
+  onEdit?:(id:string,intent:string,model:ModelRef|null,mentioned:ModelRef[])=>Promise<void>|void;
   onChanged:()=>void;
   agentBusy?:boolean;
 }){
@@ -205,19 +208,30 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
     ...models.map(item=>({key:modelKey(item.model),label:item.label,model:item.model as ModelRef|null})),
     ...(projectRunnable?[{key:'',label:'This design',model:null}]:[]),
   ];
+  const canSubmit=!!intent.trim()&&!agentBusy&&intent.length<=4096&&!!pickTarget(intent);
   function compose(edit?:Test){
     const model=edit?edit.definition.model:focusedModel;
     const fallback=choices.find(choice=>sameModel(choice.model,model))??choices[0];
-    setEditing(edit?.id??null);setIntent(edit?.definition.intent??'');setTarget(fallback?.key??'');setCreating(true);
+    // Seed the focused (or edited) model as a chip so the target is visible and easy to change.
+    const seed=models.find(item=>sameModel(item.model,model));
+    const chip=seed?tokenFor({label:seed.label,entry:seed.model.entry,builder:seed.model.builder})+' ':'';
+    setEditing(edit?.id??null);setIntent(chip+(edit?.definition.intent??''));setTarget(fallback?.key??'');setCreating(true);
+  }
+  /** Today's single-model flow: the first mentioned model that is still in the project, else the focused one. */
+  function pickTarget(text:string){
+    const mentioned=mentionedModels(text).filter(ref=>models.some(item=>sameModel(item.model,ref))) as ModelRef[];
+    const choice=(mentioned.length?choices.find(item=>sameModel(item.model,mentioned[0])):undefined)??choices.find(item=>item.key===target)??choices[0];
+    return choice?{choice,mentioned}:null;
   }
   async function submit(event:React.FormEvent){
     event.preventDefault();
-    const text=intent.trim(),choice=choices.find(item=>item.key===target);
-    if(!text||agentBusy||!choice)return;
+    const text=intent.trim(),pick=pickTarget(text);
+    if(!text||agentBusy||!pick)return;
+    const {choice,mentioned}=pick;
     draftCount.current=count;setCreating(false);setDrafting(true);setError('');
     try{
       if(choice.model)setPreparing(`Preparing ${choice.label}…`);
-      if(editing&&onEdit)await onEdit(editing,text,choice.model);else await onCreate(text,choice.model);
+      if(editing&&onEdit)await onEdit(editing,text,choice.model,mentioned);else await onCreate(text,choice.model,mentioned);
     }catch(value){setDrafting(false);setError(errorText(value));}
     finally{setPreparing('');}
   }
@@ -244,12 +258,9 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
       ?<div className="test-empty"><Icon name="sparkles" size={24}/><h3>{preparing||(agentBusy?'Preparing checks…':'Answer the assistant')}</h3><p>{preparing||agentBusy?'The assistant will save measurable checks here for you to review.':'The assistant needs more information before it can save checks. Reply in the Assistant panel.'}</p></div>
       :<div className="test-empty"><Icon name="tests" size={26}/><h3>No requirements yet</h3><p>{choices.length?'Describe a requirement for any model in this project. Review the checks, then check the requirement.':'Add a model to this project to define requirements for it.'}</p>{!!choices.length&&<button className="primary-button" disabled={agentBusy} onClick={()=>compose()}>New requirement…</button>}</div>)}
     {creating&&<form className="test-composer" onSubmit={event=>void submit(event)}>
-      <label htmlFor="test-model">Model</label>
-      <select id="test-model" value={target} onChange={event=>setTarget(event.target.value)}>{choices.map(choice=><option key={choice.key} value={choice.key}>{choice.label}</option>)}</select>
-      <label htmlFor="test-intent">What should the model do?</label>
-      <textarea id="test-intent" autoFocus value={intent} maxLength={4096} onChange={event=>setIntent(event.target.value)} placeholder="The carriage should move at least 50 mm."/>
-      <p className="muted">The assistant prepares steps and pass/fail checks for the chosen model, even if it isn't open. You review them before running.</p>
-      <div className="test-composer-actions"><button className="primary-button" type="submit" disabled={!intent.trim()||agentBusy||!choices.some(choice=>choice.key===target)}>{editing?'Update checks':'Prepare requirement'}</button><button type="button" onClick={()=>setCreating(false)}>Cancel</button></div>
+      <RequirementComposer id="test-intent" label="What should the model do?" value={intent} onChange={setIntent} models={models} autoFocus onSubmit={()=>{if(canSubmit)void submit({preventDefault(){}} as React.FormEvent);}} placeholder="@ a model: it should move at least 50 mm."/>
+      <p className="muted">The assistant prepares steps and pass/fail checks for the mentioned models, even if they aren't open. You review them before running.</p>
+      <div className="test-composer-actions"><button className="primary-button" type="submit" disabled={!canSubmit}>{editing?'Update checks':'Prepare requirement'}</button><button type="button" onClick={()=>setCreating(false)}>Cancel</button></div>
     </form>}
     {count>0&&drafting&&!creating&&<p className="muted" role="status">{preparing||(agentBusy?'The assistant is preparing checks…':'Waiting for your reply in the Assistant panel.')}</p>}
     {preparing&&!drafting&&<p className="muted" role="status">{preparing}</p>}
