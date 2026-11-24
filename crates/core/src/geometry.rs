@@ -91,6 +91,9 @@ pub struct PartProperties {
     pub face_count: u64,
     pub edge_count: u64,
     pub features: BTreeMap<String, Vec<String>>,
+    /// Entity kind, counts and selection hash per named feature.
+    #[serde(default)]
+    pub feature_kinds: BTreeMap<String, FeatureKind>,
     pub accuracy: Accuracy,
     pub units: Units,
     pub geometry_fingerprint: Fingerprint,
@@ -99,6 +102,19 @@ pub struct PartProperties {
     pub mass_kg: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceLocation>,
+    /// Project function whose `show()` published this part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_function: Option<String>,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct FeatureKind {
+    /// `face`, `edge` or `mixed`.
+    pub entity: String,
+    pub count: u64,
+    pub faces: u64,
+    pub edges: u64,
+    /// Identifies the selection within this exact geometry.
+    pub hash: String,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
