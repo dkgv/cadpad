@@ -1,0 +1,101 @@
+[
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "machine",
+            "entry": "machine.py"
+          },
+          "part": {
+            "glob": "clamp_*"
+          }
+        }
+      },
+      "b": "others"
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "note": "overlap tolerance ε (project setting)",
+        "source": "library",
+        "unit": "mm3",
+        "value": 0.001
+      }
+    },
+    "id": "c1.1",
+    "origin": {
+      "claim": "c1",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "moves_freely"
+    },
+    "pairing": "each_pair",
+    "primitive": "interference",
+    "quantifier": "for_all",
+    "span": [
+      0,
+      68
+    ],
+    "states": {
+      "factors": [
+        {
+          "kind": "param",
+          "param": {
+            "name": "clamp_theta"
+          },
+          "values": {
+            "from": {
+              "note": "declared lower bound",
+              "source": "model",
+              "unit": "deg",
+              "value": 48.0
+            },
+            "shape": "range",
+            "step": {
+              "note": "default sampling",
+              "source": "inferred",
+              "unit": "deg",
+              "value": 2.0
+            },
+            "to": {
+              "note": "declared upper bound",
+              "source": "model",
+              "unit": "deg",
+              "value": 132.0
+            }
+          }
+        },
+        {
+          "kind": "param",
+          "param": {
+            "name": "comb_travel"
+          },
+          "values": {
+            "shape": "list",
+            "values": [
+              {
+                "note": "TOWER_COMB_TRAVEL",
+                "source": "model",
+                "unit": "mm",
+                "value": 0.0
+              },
+              {
+                "note": "TOWER_COMB_TRAVEL",
+                "source": "model",
+                "unit": "mm",
+                "value": 4.0
+              },
+              {
+                "note": "TOWER_COMB_TRAVEL",
+                "source": "model",
+                "unit": "mm",
+                "value": 8.0
+              }
+            ]
+          }
+        }
+      ],
+      "kind": "product"
+    }
+  }
+]

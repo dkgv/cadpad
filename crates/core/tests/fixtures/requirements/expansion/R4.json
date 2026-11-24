@@ -1,0 +1,132 @@
+[
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "machine",
+            "entry": "machine.py"
+          },
+          "part": {
+            "glob": "tower_arm_*"
+          }
+        }
+      },
+      "b": "others"
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "note": "overlap tolerance ε (project setting)",
+        "source": "library",
+        "unit": "mm3",
+        "value": 0.001
+      }
+    },
+    "id": "c1.1",
+    "origin": {
+      "claim": "c1",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "moves_freely"
+    },
+    "pairing": "each_pair",
+    "primitive": "interference",
+    "quantifier": "for_all",
+    "source": "inferred",
+    "span": [
+      0,
+      40
+    ],
+    "states": {
+      "kind": "param",
+      "param": {
+        "name": "extension"
+      },
+      "values": {
+        "from": {
+          "note": "extension lower bound",
+          "source": "model",
+          "unit": "one",
+          "value": 5.0
+        },
+        "shape": "range",
+        "step": {
+          "note": "default sampling",
+          "source": "inferred",
+          "unit": "one",
+          "value": 1.0
+        },
+        "to": {
+          "note": "extension upper bound",
+          "source": "model",
+          "unit": "one",
+          "value": 15.0
+        }
+      }
+    }
+  },
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "machine",
+            "entry": "machine.py"
+          },
+          "part": {
+            "glob": "tower_arm_*"
+          }
+        }
+      },
+      "b": {
+        "part": {
+          "model": {
+            "builder": "machine",
+            "entry": "machine.py"
+          },
+          "part": {
+            "name": "racket_envelope"
+          }
+        }
+      }
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "note": "overlap tolerance ε (project setting)",
+        "source": "library",
+        "unit": "mm3",
+        "value": 0.001
+      }
+    },
+    "id": "c2.1",
+    "origin": {
+      "claim": "c2",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "clear_of"
+    },
+    "pairing": "each_pair",
+    "primitive": "interference",
+    "quantifier": "for_all",
+    "source": "inferred",
+    "span": [
+      0,
+      40
+    ],
+    "states": {
+      "kind": "param",
+      "param": {
+        "name": "extension"
+      },
+      "values": {
+        "shape": "value",
+        "value": {
+          "note": "fully retracted",
+          "source": "model",
+          "unit": "one",
+          "value": 5.0
+        }
+      }
+    }
+  }
+]

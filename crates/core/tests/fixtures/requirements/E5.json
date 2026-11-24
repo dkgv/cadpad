@@ -1,0 +1,89 @@
+{
+  "ir_version": 1,
+  "id": "e5",
+  "name": "Bracket printable",
+  "text": "@[bracket](bracket.py#bracket) fits a 256 mm bed and is one solid",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "fits_bed",
+      "span": [
+        31,
+        48
+      ],
+      "args": {
+        "a": {
+          "part": {
+            "model": {
+              "entry": "bracket.py",
+              "builder": "bracket"
+            },
+            "part": {
+              "name": "bracket"
+            }
+          }
+        },
+        "bed": {
+          "list": [
+            {
+              "quantity": {
+                "value": 256.0,
+                "unit": "mm"
+              }
+            },
+            {
+              "quantity": {
+                "value": 256.0,
+                "unit": "mm",
+                "source": "inferred",
+                "note": "only one bed number given"
+              }
+            },
+            {
+              "quantity": {
+                "value": 256.0,
+                "unit": "mm",
+                "source": "inferred",
+                "note": "only one bed number given"
+              }
+            }
+          ]
+        },
+        "orientation": {
+          "token": {
+            "text": "as_modelled",
+            "source": "inferred",
+            "note": "orientation not stated"
+          }
+        }
+      }
+    },
+    {
+      "id": "c2",
+      "rule": "single_solid",
+      "span": [
+        53,
+        65
+      ],
+      "args": {
+        "a": {
+          "part": {
+            "model": {
+              "entry": "bracket.py",
+              "builder": "bracket"
+            },
+            "part": {
+              "name": "bracket"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "answers": [
+    {
+      "phrase": "fits",
+      "answer": "fits a print bed"
+    }
+  ]
+}

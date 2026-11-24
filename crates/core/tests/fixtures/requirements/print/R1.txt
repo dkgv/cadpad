@@ -1,0 +1,5 @@
+Turntable rotates freely
+  Inferred: set turntable = 5 parts
+  1. Turntable (5 parts) does not overlap base, turntable rotated about z 0°–360°, checked every 5° (73 states).
+  Numbers I chose: rotation from 0°, rotation to 360°, rotation step 5°
+     ▸ details: 365 checks · overlap tolerance ε 0.001 mm³ · accuracy exact (interference) · rotation from 0° (my proposal; full turn, answered by user) · rotation to 360° (my proposal; full turn, answered by user) · rotation step 5° (my proposal; default sampling) · turntable = clamp_1, clamp_2, rotor, tower_1, tower_2

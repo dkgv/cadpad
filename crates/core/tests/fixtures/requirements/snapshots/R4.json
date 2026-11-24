@@ -1,0 +1,50 @@
+{
+  "models": [
+    {
+      "model": {
+        "entry": "machine.py",
+        "builder": "machine"
+      },
+      "built": {
+        "fingerprint": "fp-rotor-tower_arm_1",
+        "parts": [
+          {
+            "name": "rotor",
+            "geometry_hash": "h-rotor"
+          },
+          {
+            "name": "tower_arm_1",
+            "geometry_hash": "h-tower_arm_1"
+          },
+          {
+            "name": "tower_arm_2",
+            "geometry_hash": "h-tower_arm_2"
+          },
+          {
+            "name": "racket_envelope",
+            "geometry_hash": "h-racket_envelope"
+          }
+        ],
+        "params": [
+          {
+            "name": "extension",
+            "value": {
+              "value": 5.0,
+              "unit": "one"
+            },
+            "min": {
+              "value": 5.0,
+              "unit": "one"
+            },
+            "max": {
+              "value": 15.0,
+              "unit": "one"
+            }
+          }
+        ],
+        "joints": [],
+        "constants": []
+      }
+    }
+  ]
+}

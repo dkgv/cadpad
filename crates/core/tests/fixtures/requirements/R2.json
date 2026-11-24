@@ -1,0 +1,99 @@
+{
+  "ir_version": 1,
+  "id": "r2",
+  "name": "Clamps slide freely",
+  "text": "string clamps must be able to slide freely without clashing anywhere",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "moves_freely",
+      "span": [
+        0,
+        68
+      ],
+      "args": {
+        "moving": {
+          "part": {
+            "model": {
+              "entry": "machine.py",
+              "builder": "machine"
+            },
+            "part": {
+              "glob": "clamp_*"
+            }
+          }
+        },
+        "against": "others",
+        "over": {
+          "states": {
+            "kind": "product",
+            "factors": [
+              {
+                "kind": "param",
+                "param": {
+                  "name": "clamp_theta"
+                },
+                "values": {
+                  "shape": "range",
+                  "from": {
+                    "value": 48.0,
+                    "unit": "deg",
+                    "source": "model",
+                    "note": "declared lower bound"
+                  },
+                  "to": {
+                    "value": 132.0,
+                    "unit": "deg",
+                    "source": "model",
+                    "note": "declared upper bound"
+                  },
+                  "step": {
+                    "value": 2.0,
+                    "unit": "deg",
+                    "source": "inferred",
+                    "note": "default sampling"
+                  }
+                }
+              },
+              {
+                "kind": "param",
+                "param": {
+                  "name": "comb_travel"
+                },
+                "values": {
+                  "shape": "list",
+                  "values": [
+                    {
+                      "value": 0.0,
+                      "unit": "mm",
+                      "source": "model",
+                      "note": "TOWER_COMB_TRAVEL"
+                    },
+                    {
+                      "value": 4.0,
+                      "unit": "mm",
+                      "source": "model",
+                      "note": "TOWER_COMB_TRAVEL"
+                    },
+                    {
+                      "value": 8.0,
+                      "unit": "mm",
+                      "source": "model",
+                      "note": "TOWER_COMB_TRAVEL"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "answers": [
+    {
+      "phrase": "freely",
+      "answer": "no overlap anywhere in the motion"
+    }
+  ]
+}

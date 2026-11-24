@@ -1,0 +1,75 @@
+[
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "cabinet",
+            "entry": "cabinet.py"
+          },
+          "part": {
+            "name": "door"
+          }
+        }
+      },
+      "b": {
+        "part": {
+          "model": {
+            "builder": "cabinet",
+            "entry": "cabinet.py"
+          },
+          "part": {
+            "name": "frame"
+          }
+        }
+      }
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "note": "overlap tolerance ε (project setting)",
+        "source": "library",
+        "unit": "mm3",
+        "value": 0.001
+      }
+    },
+    "id": "c1.1",
+    "origin": {
+      "claim": "c1",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "moves_freely"
+    },
+    "pairing": "each_pair",
+    "primitive": "interference",
+    "quantifier": "for_all",
+    "span": [
+      0,
+      97
+    ],
+    "states": {
+      "kind": "param",
+      "param": {
+        "name": "door_angle"
+      },
+      "values": {
+        "from": {
+          "note": "closed position",
+          "source": "model",
+          "unit": "deg",
+          "value": 0.0
+        },
+        "shape": "range",
+        "step": {
+          "note": "default sampling",
+          "source": "inferred",
+          "unit": "deg",
+          "value": 2.0
+        },
+        "to": {
+          "unit": "deg",
+          "value": 110.0
+        }
+      }
+    }
+  }
+]

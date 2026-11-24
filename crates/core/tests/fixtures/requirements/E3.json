@@ -1,0 +1,122 @@
+{
+  "ir_version": 1,
+  "id": "e3",
+  "name": "Door opens to 110°",
+  "text": "@[door](cabinet.py#cabinet/door) opens to 110° without hitting @[frame](cabinet.py#cabinet/frame)",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "moves_freely",
+      "span": [
+        0,
+        97
+      ],
+      "args": {
+        "moving": {
+          "part": {
+            "model": {
+              "entry": "cabinet.py",
+              "builder": "cabinet"
+            },
+            "part": {
+              "name": "door"
+            }
+          }
+        },
+        "against": {
+          "part": {
+            "model": {
+              "entry": "cabinet.py",
+              "builder": "cabinet"
+            },
+            "part": {
+              "name": "frame"
+            }
+          }
+        },
+        "over": {
+          "states": {
+            "kind": "param",
+            "param": {
+              "name": "door_angle"
+            },
+            "values": {
+              "shape": "range",
+              "from": {
+                "value": 0.0,
+                "unit": "deg",
+                "source": "model",
+                "note": "closed position"
+              },
+              "to": {
+                "value": 110.0,
+                "unit": "deg"
+              },
+              "step": {
+                "value": 2.0,
+                "unit": "deg",
+                "source": "inferred",
+                "note": "default sampling"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "allow": [
+    {
+      "pair": [
+        {
+          "part": {
+            "model": {
+              "entry": "cabinet.py",
+              "builder": "cabinet"
+            },
+            "part": {
+              "name": "door"
+            }
+          }
+        },
+        {
+          "part": {
+            "model": {
+              "entry": "cabinet.py",
+              "builder": "cabinet"
+            },
+            "part": {
+              "name": "frame"
+            }
+          }
+        }
+      ],
+      "kind": "touch",
+      "at": {
+        "kind": "param",
+        "param": {
+          "name": "door_angle"
+        },
+        "values": {
+          "shape": "value",
+          "value": {
+            "value": 0.0,
+            "unit": "deg",
+            "source": "model"
+          }
+        }
+      },
+      "reason": "closed door rests on frame",
+      "source": "inferred",
+      "span": [
+        55,
+        62
+      ]
+    }
+  ],
+  "answers": [
+    {
+      "phrase": "opens",
+      "answer": "to the limit without hitting; no stop required"
+    }
+  ]
+}

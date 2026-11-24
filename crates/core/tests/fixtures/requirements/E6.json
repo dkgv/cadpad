@@ -1,0 +1,44 @@
+{
+  "ir_version": 1,
+  "id": "e6",
+  "name": "Shaft bore H7",
+  "text": "shaft hole in @[housing](housing.py#housing) is 8 mm H7",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "fit",
+      "span": [
+        0,
+        55
+      ],
+      "args": {
+        "feature": {
+          "feature": {
+            "kind": "explicit",
+            "part": {
+              "model": {
+                "entry": "housing.py",
+                "builder": "housing"
+              },
+              "part": {
+                "name": "housing"
+              }
+            },
+            "name": "shaft_bore"
+          }
+        },
+        "class": {
+          "token": {
+            "text": "H7"
+          }
+        },
+        "nominal": {
+          "quantity": {
+            "value": 8.0,
+            "unit": "mm"
+          }
+        }
+      }
+    }
+  ]
+}

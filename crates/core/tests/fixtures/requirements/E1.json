@@ -1,0 +1,130 @@
+{
+  "ir_version": 1,
+  "id": "e1",
+  "name": "Lid fits box",
+  "text": "@[lid](lid.py#lid) must close on @[box](box.py#box) with 0.2–0.4 mm gap at the rim",
+  "covers": [
+    {
+      "model": {
+        "entry": "lid.py",
+        "builder": "lid"
+      },
+      "part": {
+        "model": {
+          "entry": "enclosure.py",
+          "builder": "enclosure"
+        },
+        "part": {
+          "name": "lid"
+        }
+      }
+    },
+    {
+      "model": {
+        "entry": "box.py",
+        "builder": "box"
+      },
+      "part": {
+        "model": {
+          "entry": "enclosure.py",
+          "builder": "enclosure"
+        },
+        "part": {
+          "name": "box"
+        }
+      }
+    }
+  ],
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "measure",
+      "span": [
+        52,
+        82
+      ],
+      "args": {
+        "fn": {
+          "text": "gap"
+        },
+        "a": {
+          "feature": {
+            "kind": "explicit",
+            "part": {
+              "model": {
+                "entry": "enclosure.py",
+                "builder": "enclosure"
+              },
+              "part": {
+                "name": "lid"
+              }
+            },
+            "name": "rim_inner"
+          }
+        },
+        "b": {
+          "feature": {
+            "kind": "explicit",
+            "part": {
+              "model": {
+                "entry": "enclosure.py",
+                "builder": "enclosure"
+              },
+              "part": {
+                "name": "box"
+              }
+            },
+            "name": "lip_outer"
+          }
+        },
+        "cmp": {
+          "compare": {
+            "op": "in",
+            "lo": {
+              "value": 0.2,
+              "unit": "mm"
+            },
+            "hi": {
+              "value": 0.4,
+              "unit": "mm"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "c2",
+      "rule": "no_overlap",
+      "span": [
+        19,
+        32
+      ],
+      "source": "inferred",
+      "note": "\"close on\" implies no overlap",
+      "args": {
+        "a": {
+          "part": {
+            "model": {
+              "entry": "enclosure.py",
+              "builder": "enclosure"
+            },
+            "part": {
+              "name": "lid"
+            }
+          }
+        },
+        "b": {
+          "part": {
+            "model": {
+              "entry": "enclosure.py",
+              "builder": "enclosure"
+            },
+            "part": {
+              "name": "box"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+{
+  "ir_version": 1,
+  "id": "r3",
+  "name": "Slab bolts to upright",
+  "text": "ensure slab attaches to beam cleanly using m8s",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "bolted",
+      "span": [
+        0,
+        46
+      ],
+      "args": {
+        "p1": {
+          "part": {
+            "model": {
+              "entry": "frame.py",
+              "builder": "frame"
+            },
+            "part": {
+              "name": "slab"
+            }
+          }
+        },
+        "p2": {
+          "part": {
+            "model": {
+              "entry": "frame.py",
+              "builder": "frame"
+            },
+            "part": {
+              "name": "upright_near"
+            }
+          }
+        },
+        "fasteners": {
+          "part": {
+            "model": {
+              "entry": "frame.py",
+              "builder": "frame"
+            },
+            "part": {
+              "glob": "flange_bolt_*"
+            }
+          }
+        },
+        "size": {
+          "token": {
+            "text": "M8"
+          }
+        },
+        "hole": {
+          "compare": {
+            "op": "in",
+            "lo": {
+              "value": 8.4,
+              "unit": "mm",
+              "source": "inferred",
+              "note": "clearance hole for M8, not stated"
+            },
+            "hi": {
+              "value": 9.0,
+              "unit": "mm",
+              "source": "inferred",
+              "note": "clearance hole for M8, not stated"
+            }
+          }
+        },
+        "protrusion": {
+          "compare": {
+            "op": ">=",
+            "value": {
+              "value": 1.0,
+              "unit": "mm",
+              "source": "inferred",
+              "note": "engagement, not stated"
+            }
+          }
+        },
+        "bearing": {
+          "compare": {
+            "op": ">=",
+            "value": {
+              "value": 100.0,
+              "unit": "mm2",
+              "source": "inferred",
+              "note": "bearing area, not stated"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "allow": [
+    {
+      "pair": [
+        {
+          "part": {
+            "model": {
+              "entry": "frame.py",
+              "builder": "frame"
+            },
+            "part": {
+              "glob": "stub_nut_*"
+            }
+          }
+        },
+        {
+          "part": {
+            "model": {
+              "entry": "frame.py",
+              "builder": "frame"
+            },
+            "part": {
+              "name": "upright_far"
+            }
+          }
+        }
+      ],
+      "kind": "interference",
+      "max": {
+        "value": 0.5,
+        "unit": "mm3",
+        "source": "inferred",
+        "note": "crush ribs"
+      },
+      "reason": "crush ribs, 0.25 mm interference by design",
+      "source": "inferred"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+Bracket printable
+  1. Bracket fits within 256 × 256 × 256 mm, as modelled.
+  2. Bracket is one valid solid.
+  Numbers I chose: bed y 256 mm, bed z 256 mm, orientation as modelled
+     ▸ details: 4 checks · accuracy exact (extent, valid_solid_count) · bed y 256 mm (my proposal; only one bed number given) · bed z 256 mm (my proposal; only one bed number given) · orientation as modelled (my proposal; orientation not stated)

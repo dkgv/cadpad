@@ -1,0 +1,5 @@
+Door opens to 110°
+  1. Door does not overlap frame, door_angle 0°–110°, checked every 2° (56 states).
+  2. Inferred: door may touch frame, at door_angle 0° (closed door rests on frame). [from "hitting"]
+  Numbers I chose: door_angle step 2°
+     ▸ details: 56 checks · overlap tolerance ε 0.001 mm³ · accuracy exact (interference) · door_angle from 0° (from the model; closed position) · door_angle step 2° (my proposal; default sampling) · allowance 1 door_angle 0° (from the model)

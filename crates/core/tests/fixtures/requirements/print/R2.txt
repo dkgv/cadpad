@@ -1,0 +1,4 @@
+Clamps slide freely
+  1. clamp_* (clamp_1, clamp_2, clamp_3) does not overlap all other parts (base, rotor, tower_1), clamp_theta 48°–132°, checked every 2° × comb_travel at 0, 4, 8 mm (129 states).
+  Numbers I chose: clamp_theta step 2°
+     ▸ details: 1161 checks · overlap tolerance ε 0.001 mm³ · accuracy exact (interference) · clamp_theta from 48° (from the model; declared lower bound) · clamp_theta to 132° (from the model; declared upper bound) · clamp_theta step 2° (my proposal; default sampling) · comb_travel values 0, 4, 8 mm (from the model; TOWER_COMB_TRAVEL)

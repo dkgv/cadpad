@@ -1,0 +1,346 @@
+{
+  "ir_version": 1,
+  "id": "x1",
+  "name": "Variant coverage",
+  "text": "arm swings through the slot, stays within 1.5 mm of the guide, and looks neat",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "no_overlap",
+      "quantifier": "exists",
+      "span": [
+        0,
+        27
+      ],
+      "args": {
+        "a": {
+          "part": {
+            "model": {
+              "entry": "mech.py",
+              "builder": "mech"
+            },
+            "part": {
+              "name": "arm"
+            }
+          }
+        },
+        "b": {
+          "part": {
+            "model": {
+              "entry": "mech.py",
+              "builder": "mech"
+            },
+            "part": {
+              "name": "slot"
+            }
+          }
+        },
+        "at": {
+          "states": {
+            "kind": "product",
+            "factors": [
+              {
+                "kind": "joint",
+                "joint": {
+                  "model": {
+                    "entry": "mech.py",
+                    "builder": "mech"
+                  },
+                  "name": "elbow"
+                },
+                "range": {
+                  "from": {
+                    "value": 0.0,
+                    "unit": "deg"
+                  },
+                  "to": {
+                    "value": 90.0,
+                    "unit": "deg"
+                  },
+                  "step": {
+                    "value": 10.0,
+                    "unit": "deg"
+                  }
+                }
+              },
+              {
+                "kind": "translate",
+                "moving": {
+                  "parts": [
+                    {
+                      "model": {
+                        "entry": "mech.py",
+                        "builder": "mech"
+                      },
+                      "part": {
+                        "name": "arm"
+                      }
+                    },
+                    {
+                      "model": {
+                        "entry": "mech.py",
+                        "builder": "mech"
+                      },
+                      "part": {
+                        "name": "hand"
+                      }
+                    }
+                  ]
+                },
+                "direction": {
+                  "vector": [
+                    0.0,
+                    1.0,
+                    0.0
+                  ]
+                },
+                "range": {
+                  "from": {
+                    "value": 0.0,
+                    "unit": "mm"
+                  },
+                  "to": {
+                    "value": 5.0,
+                    "unit": "mm"
+                  },
+                  "step": {
+                    "value": 1.0,
+                    "unit": "mm"
+                  }
+                }
+              },
+              {
+                "kind": "rotate",
+                "moving": {
+                  "part": {
+                    "model": {
+                      "entry": "mech.py",
+                      "builder": "mech"
+                    },
+                    "part": {
+                      "name": "arm"
+                    }
+                  }
+                },
+                "axis": {
+                  "feature": {
+                    "kind": "history",
+                    "part": {
+                      "model": {
+                        "entry": "mech.py",
+                        "builder": "mech"
+                      },
+                      "part": {
+                        "name": "arm"
+                      }
+                    },
+                    "name": "make_arm/hole#1/wall"
+                  }
+                },
+                "range": {
+                  "from": {
+                    "value": 0.0,
+                    "unit": "deg"
+                  },
+                  "to": {
+                    "value": 45.0,
+                    "unit": "deg"
+                  },
+                  "step": {
+                    "value": 5.0,
+                    "unit": "deg"
+                  }
+                }
+              },
+              {
+                "kind": "rotate",
+                "moving": {
+                  "part": {
+                    "model": {
+                      "entry": "mech.py",
+                      "builder": "mech"
+                    },
+                    "part": {
+                      "name": "arm"
+                    }
+                  }
+                },
+                "axis": {
+                  "feature": {
+                    "kind": "geometric",
+                    "part": {
+                      "model": {
+                        "entry": "mech.py",
+                        "builder": "mech"
+                      },
+                      "part": {
+                        "name": "arm"
+                      }
+                    },
+                    "entity": "edge",
+                    "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+                  }
+                },
+                "range": {
+                  "from": {
+                    "value": 0.0,
+                    "unit": "rad"
+                  },
+                  "to": {
+                    "value": 1.0,
+                    "unit": "rad"
+                  },
+                  "step": {
+                    "value": 1.0,
+                    "unit": "rad"
+                  }
+                }
+              },
+              {
+                "kind": "rest"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "c2",
+      "rule": "measure",
+      "span": [
+        29,
+        61
+      ],
+      "args": {
+        "fn": {
+          "text": "distance"
+        },
+        "a": {
+          "part": {
+            "model": {
+              "entry": "mech.py",
+              "builder": "mech"
+            },
+            "part": {
+              "name": "arm"
+            }
+          }
+        },
+        "b": {
+          "part": {
+            "model": {
+              "entry": "mech.py",
+              "builder": "mech"
+            },
+            "part": {
+              "name": "guide"
+            }
+          }
+        },
+        "cmp": {
+          "compare": {
+            "op": "approx",
+            "target": {
+              "value": 1.5,
+              "unit": "mm"
+            },
+            "tol": {
+              "value": 0.1,
+              "unit": "mm",
+              "source": "inferred",
+              "note": "no tolerance stated"
+            }
+          }
+        },
+        "rigid": {
+          "bool": true
+        },
+        "count": {
+          "number": 3.0
+        },
+        "origin": {
+          "model": {
+            "entry": "mech.py",
+            "builder": "mech"
+          }
+        },
+        "motor": {
+          "joint": {
+            "model": {
+              "entry": "mech.py",
+              "builder": "mech"
+            },
+            "name": "elbow"
+          }
+        }
+      }
+    },
+    {
+      "id": "c3",
+      "rule": "measure",
+      "span": [
+        0,
+        3
+      ],
+      "args": {
+        "fn": {
+          "text": "valid_solid"
+        },
+        "a": {
+          "part": {
+            "model": {
+              "entry": "mech.py",
+              "builder": "mech"
+            },
+            "part": {
+              "name": "arm"
+            }
+          }
+        },
+        "cmp": {
+          "compare": {
+            "op": "is_true"
+          }
+        }
+      }
+    },
+    {
+      "id": "c4",
+      "rule": "measure",
+      "span": [
+        0,
+        3
+      ],
+      "args": {
+        "fn": {
+          "text": "valid_solid"
+        },
+        "a": {
+          "part": {
+            "model": {
+              "entry": "mech.py",
+              "builder": "mech"
+            },
+            "part": {
+              "name": "arm"
+            }
+          }
+        },
+        "cmp": {
+          "compare": {
+            "op": "is_false"
+          }
+        }
+      }
+    }
+  ],
+  "unsupported": [
+    {
+      "span": [
+        67,
+        77
+      ],
+      "reason": "aesthetic judgement is not checkable"
+    }
+  ]
+}

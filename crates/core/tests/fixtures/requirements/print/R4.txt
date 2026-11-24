@@ -1,0 +1,5 @@
+Tower arms retract
+  1. Inferred: tower_arm_* (tower_arm_1, tower_arm_2) does not overlap all other parts (racket_envelope, rotor), extension 5–15, checked every 1 (11 states). [from "turntable tower arms must be retractable"]
+  2. Inferred: tower_arm_* (tower_arm_1, tower_arm_2) is clear of racket_envelope, at extension 5. [from "turntable tower arms must be retractable"]
+  Numbers I chose: extension step 1
+     ▸ details: 46 checks · overlap tolerance ε 0.001 mm³ · accuracy exact (interference) · extension from 5 (from the model; extension lower bound) · extension to 15 (from the model; extension upper bound) · extension step 1 (my proposal; default sampling) · extension 5 (from the model; fully retracted)

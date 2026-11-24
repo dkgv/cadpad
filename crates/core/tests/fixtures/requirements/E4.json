@@ -1,0 +1,79 @@
+{
+  "ir_version": 1,
+  "id": "e4",
+  "name": "Clip snap engagement",
+  "text": "@[clip](snap.py#snap/clip) must overlap @[boss](snap.py#snap/boss) by 0.3–0.5 mm",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "measure",
+      "span": [
+        0,
+        80
+      ],
+      "args": {
+        "fn": {
+          "text": "overlap_depth"
+        },
+        "a": {
+          "feature": {
+            "kind": "explicit",
+            "part": {
+              "model": {
+                "entry": "snap.py",
+                "builder": "snap"
+              },
+              "part": {
+                "name": "clip"
+              }
+            },
+            "name": "hook_lip"
+          }
+        },
+        "b": {
+          "feature": {
+            "kind": "explicit",
+            "part": {
+              "model": {
+                "entry": "snap.py",
+                "builder": "snap"
+              },
+              "part": {
+                "name": "boss"
+              }
+            },
+            "name": "ledge"
+          }
+        },
+        "along": {
+          "feature": {
+            "kind": "explicit",
+            "part": {
+              "model": {
+                "entry": "snap.py",
+                "builder": "snap"
+              },
+              "part": {
+                "name": "clip"
+              }
+            },
+            "name": "insertion_axis"
+          }
+        },
+        "cmp": {
+          "compare": {
+            "op": "in",
+            "lo": {
+              "value": 0.3,
+              "unit": "mm"
+            },
+            "hi": {
+              "value": 0.5,
+              "unit": "mm"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

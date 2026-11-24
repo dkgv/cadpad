@@ -1,0 +1,2117 @@
+[
+ {
+  "text": "The clearance must be 0.2–0.4 mm everywhere.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "0.2–0.4 mm",
+    "lo": 0.2,
+    "hi": 0.4,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Hole is 8 mm H7",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "8 mm",
+    "value": 8,
+    "unit": "mm"
+   },
+   {
+    "kind": "fit",
+    "matched": "H7",
+    "letter": "H",
+    "grade": 7,
+    "hole": true
+   }
+  ]
+ },
+ {
+  "text": "Door opens to 110° without hitting the frame.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "110°",
+    "value": 110,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "use M8 bolts",
+  "expect": [
+   {
+    "kind": "thread",
+    "matched": "M8",
+    "diameter_mm": 8
+   }
+  ]
+ },
+ {
+  "text": "shaft h6",
+  "expect": [
+   {
+    "kind": "fit",
+    "matched": "h6",
+    "letter": "h",
+    "grade": 6,
+    "hole": false
+   }
+  ]
+ },
+ {
+  "text": "tolerance ±0.1 mm and 5 N",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "±0.1 mm",
+    "upper": 0.1,
+    "lower": -0.1,
+    "unit": "mm",
+    "symmetric": true
+   },
+   {
+    "kind": "quantity",
+    "matched": "5 N",
+    "value": 5,
+    "unit": "N"
+   }
+  ]
+ },
+ {
+  "text": "Wall thickness is 3mm.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3mm",
+    "value": 3,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Minimum gap 2 cm.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 cm",
+    "value": 2,
+    "unit": "cm"
+   }
+  ]
+ },
+ {
+  "text": "Span of 4 m between supports.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "4 m",
+    "value": 4,
+    "unit": "m"
+   }
+  ]
+ },
+ {
+  "text": "Set the offset to 25 µm.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "25 µm",
+    "value": 25,
+    "unit": "um"
+   }
+  ]
+ },
+ {
+  "text": "Surface finish target 1 μm Ra.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1 μm",
+    "value": 1,
+    "unit": "um"
+   }
+  ]
+ },
+ {
+  "text": "Roughness of 3 um is acceptable.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 um",
+    "value": 3,
+    "unit": "um"
+   }
+  ]
+ },
+ {
+  "text": "Plate has 2 microns deviation.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 microns",
+    "value": 2,
+    "unit": "um"
+   }
+  ]
+ },
+ {
+  "text": "Lapped to 5 micrometres flatness.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "5 micrometres",
+    "value": 5,
+    "unit": "um"
+   }
+  ]
+ },
+ {
+  "text": "Bore diameter 12 inches.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "12 inches",
+    "value": 12,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Feature is 3in wide.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3in",
+    "value": 3,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Dimension 3 inch long.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 inch",
+    "value": 3,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Flange size 3 in.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 in",
+    "value": 3,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Shaft length 3 in, approx.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 in",
+    "value": 3,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Pipe OD 3\" nominal.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3\"",
+    "value": 3,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Slope of 15 deg maximum.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "15 deg",
+    "value": 15,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Angle of 45 degrees.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "45 degrees",
+    "value": 45,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Angle of 30° to the datum.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "30°",
+    "value": 30,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Rotation 1.5 rad is needed.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1.5 rad",
+    "value": 1.5,
+    "unit": "rad"
+   }
+  ]
+ },
+ {
+  "text": "Angle 2 radians exactly.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 radians",
+    "value": 2,
+    "unit": "rad"
+   }
+  ]
+ },
+ {
+  "text": "Plate area 400 mm2 total.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "400 mm2",
+    "value": 400,
+    "unit": "mm2"
+   }
+  ]
+ },
+ {
+  "text": "Plate area 400 mm² total.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "400 mm²",
+    "value": 400,
+    "unit": "mm2"
+   }
+  ]
+ },
+ {
+  "text": "Plate area 400 mm^2 total.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "400 mm^2",
+    "value": 400,
+    "unit": "mm2"
+   }
+  ]
+ },
+ {
+  "text": "Section 12 cm2 of material.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "12 cm2",
+    "value": 12,
+    "unit": "cm2"
+   }
+  ]
+ },
+ {
+  "text": "Section 12 cm² of material.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "12 cm²",
+    "value": 12,
+    "unit": "cm2"
+   }
+  ]
+ },
+ {
+  "text": "Volume 27 mm3 measured.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "27 mm3",
+    "value": 27,
+    "unit": "mm3"
+   }
+  ]
+ },
+ {
+  "text": "Volume 27 mm³ measured.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "27 mm³",
+    "value": 27,
+    "unit": "mm3"
+   }
+  ]
+ },
+ {
+  "text": "Volume 27 mm^3 measured.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "27 mm^3",
+    "value": 27,
+    "unit": "mm3"
+   }
+  ]
+ },
+ {
+  "text": "Block volume 9 cm3 measured.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "9 cm3",
+    "value": 9,
+    "unit": "cm3"
+   }
+  ]
+ },
+ {
+  "text": "Block volume 9 cm³ measured.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "9 cm³",
+    "value": 9,
+    "unit": "cm3"
+   }
+  ]
+ },
+ {
+  "text": "Part mass 250 g.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "250 g",
+    "value": 250,
+    "unit": "g"
+   }
+  ]
+ },
+ {
+  "text": "Part mass 250 grams.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "250 grams",
+    "value": 250,
+    "unit": "g"
+   }
+  ]
+ },
+ {
+  "text": "Part mass 2 kg max.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 kg",
+    "value": 2,
+    "unit": "kg"
+   }
+  ]
+ },
+ {
+  "text": "Part mass 2 kilograms.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 kilograms",
+    "value": 2,
+    "unit": "kg"
+   }
+  ]
+ },
+ {
+  "text": "Cycle time 30 s per part.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "30 s",
+    "value": 30,
+    "unit": "s"
+   }
+  ]
+ },
+ {
+  "text": "Cycle time 30 sec per part.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "30 sec",
+    "value": 30,
+    "unit": "s"
+   }
+  ]
+ },
+ {
+  "text": "Cycle time 30 seconds.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "30 seconds",
+    "value": 30,
+    "unit": "s"
+   }
+  ]
+ },
+ {
+  "text": "Load of 50 N applied.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "50 N",
+    "value": 50,
+    "unit": "N"
+   }
+  ]
+ },
+ {
+  "text": "Load of 50 newtons applied.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "50 newtons",
+    "value": 50,
+    "unit": "N"
+   }
+  ]
+ },
+ {
+  "text": "Impulse 5 N·s required.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "5 N·s",
+    "value": 5,
+    "unit": "N_s"
+   }
+  ]
+ },
+ {
+  "text": "Impulse 5 N s required.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "5 N s",
+    "value": 5,
+    "unit": "N_s"
+   }
+  ]
+ },
+ {
+  "text": "Impulse 5 N*s required.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "5 N*s",
+    "value": 5,
+    "unit": "N_s"
+   }
+  ]
+ },
+ {
+  "text": "Impulse 5 N-s required.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "5 N-s",
+    "value": 5,
+    "unit": "N_s"
+   }
+  ]
+ },
+ {
+  "text": "Impulse 1.5E3 N·s needed.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1.5E3 N·s",
+    "value": 1500,
+    "unit": "N_s"
+   }
+  ]
+ },
+ {
+  "text": "Gap 0.5 mm nominal.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "0.5 mm",
+    "value": 0.5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Gap .5 mm nominal.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": ".5 mm",
+    "value": 0.5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Offset -5 mm from datum.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "-5 mm",
+    "value": -5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Offset −5 mm from datum.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "−5 mm",
+    "value": -5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Between (−5 mm, 5 mm).",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "−5 mm",
+    "value": -5,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "5 mm",
+    "value": 5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Sign at start: -0.5 mm.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "-0.5 mm",
+    "value": -0.5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Shift +3 mm across.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "+3 mm",
+    "value": 3,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Gap 1e-5 m.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1e-5 m",
+    "value": 1e-05,
+    "unit": "m"
+   }
+  ]
+ },
+ {
+  "text": "Gap 1E-5 m.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1E-5 m",
+    "value": 1e-05,
+    "unit": "m"
+   }
+  ]
+ },
+ {
+  "text": "Span 1,000 mm.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1,000 mm",
+    "value": 1000,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Length 1.5E3 mm.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1.5E3 mm",
+    "value": 1500,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Cut 1/2 in.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1/2 in",
+    "value": 0.5,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Use a 3/8in drive.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3/8in",
+    "value": 0.375,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Pin length: half a millimetre.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "half a millimetre",
+    "value": 0.5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Stroke: a quarter of a degree.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "a quarter of a degree",
+    "value": 0.25,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Shims: five millimetres thick.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "five millimetres",
+    "value": 5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Rotate by twelve deg max.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "twelve deg",
+    "value": 12,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Span of one metre between posts.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "one metre",
+    "value": 1,
+    "unit": "m"
+   }
+  ]
+ },
+ {
+  "text": "Give half a metre of clearance.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "half a metre",
+    "value": 0.5,
+    "unit": "m"
+   }
+  ]
+ },
+ {
+  "text": "Gap of half an inch.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "half an inch",
+    "value": 0.5,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Lower limit zero millimetres.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "zero millimetres",
+    "value": 0,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Offset of twenty micrometres.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "twenty micrometres",
+    "value": 20,
+    "unit": "um"
+   }
+  ]
+ },
+ {
+  "text": "Tilt fourteen degrees max.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "fourteen degrees",
+    "value": 14,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Radius 2 meters.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 meters",
+    "value": 2,
+    "unit": "m"
+   }
+  ]
+ },
+ {
+  "text": "Width 7 millimeters.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "7 millimeters",
+    "value": 7,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Height 2 centimeters.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 centimeters",
+    "value": 2,
+    "unit": "cm"
+   }
+  ]
+ },
+ {
+  "text": "Mass 3 gram.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 gram",
+    "value": 3,
+    "unit": "g"
+   }
+  ]
+ },
+ {
+  "text": "Mass 4 kilogram.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "4 kilogram",
+    "value": 4,
+    "unit": "kg"
+   }
+  ]
+ },
+ {
+  "text": "Force 2 newton.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 newton",
+    "value": 2,
+    "unit": "N"
+   }
+  ]
+ },
+ {
+  "text": "Pause 3 sec.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 sec",
+    "value": 3,
+    "unit": "s"
+   }
+  ]
+ },
+ {
+  "text": "Balance −3 kg in the model.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "−3 kg",
+    "value": -3,
+    "unit": "kg"
+   }
+  ]
+ },
+ {
+  "text": "Set to 0.5 mm, 1.0 mm.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "0.5 mm",
+    "value": 0.5,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "1.0 mm",
+    "value": 1.0,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Clearance 0.2 mm to 0.4 mm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "0.2 mm to 0.4 mm",
+    "lo": 0.2,
+    "hi": 0.4,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Clearance 0.2-0.4mm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "0.2-0.4mm",
+    "lo": 0.2,
+    "hi": 0.4,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Clearance 0.2—0.4 mm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "0.2—0.4 mm",
+    "lo": 0.2,
+    "hi": 0.4,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Clearance 0.2 to 0.4 mm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "0.2 to 0.4 mm",
+    "lo": 0.2,
+    "hi": 0.4,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Clearance 0.2..0.4 mm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "0.2..0.4 mm",
+    "lo": 0.2,
+    "hi": 0.4,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Clearance 0.2…0.4 mm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "0.2…0.4 mm",
+    "lo": 0.2,
+    "hi": 0.4,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Span 1,000–2,000 mm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "1,000–2,000 mm",
+    "lo": 1000,
+    "hi": 2000,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Gap 1.0–1.5 cm, bore 4 mm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "1.0–1.5 cm",
+    "lo": 1.0,
+    "hi": 1.5,
+    "unit": "cm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "4 mm",
+    "value": 4,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Tolerance ±0.1 mm.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "±0.1 mm",
+    "upper": 0.1,
+    "lower": -0.1,
+    "unit": "mm",
+    "symmetric": true
+   }
+  ]
+ },
+ {
+  "text": "Set ±0.1 on the bore.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "±0.1",
+    "upper": 0.1,
+    "lower": -0.1,
+    "unit": null,
+    "symmetric": true
+   }
+  ]
+ },
+ {
+  "text": "Tolerance: plus or minus 0.1 mm.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "plus or minus 0.1 mm",
+    "upper": 0.1,
+    "lower": -0.1,
+    "unit": "mm",
+    "symmetric": true
+   }
+  ]
+ },
+ {
+  "text": "fit +/-0.1mm here.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "+/-0.1mm",
+    "upper": 0.1,
+    "lower": -0.1,
+    "unit": "mm",
+    "symmetric": true
+   }
+  ]
+ },
+ {
+  "text": "fit +-0.1 here.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "+-0.1",
+    "upper": 0.1,
+    "lower": -0.1,
+    "unit": null,
+    "symmetric": true
+   }
+  ]
+ },
+ {
+  "text": "Fit +0/+15 µm on the bore.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "+0/+15 µm",
+    "upper": 15,
+    "lower": 0,
+    "unit": "um",
+    "symmetric": false
+   }
+  ]
+ },
+ {
+  "text": "Shaft +0.1/-0.05 mm.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "+0.1/-0.05 mm",
+    "upper": 0.1,
+    "lower": -0.05,
+    "unit": "mm",
+    "symmetric": false
+   }
+  ]
+ },
+ {
+  "text": "Bore +0.015/0 mm.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "+0.015/0 mm",
+    "upper": 0.015,
+    "lower": 0,
+    "unit": "mm",
+    "symmetric": false
+   }
+  ]
+ },
+ {
+  "text": "Tolerance ±0.1 mm and +0/+15 µm.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "±0.1 mm",
+    "upper": 0.1,
+    "lower": -0.1,
+    "unit": "mm",
+    "symmetric": true
+   },
+   {
+    "kind": "tolerance",
+    "matched": "+0/+15 µm",
+    "upper": 15,
+    "lower": 0,
+    "unit": "um",
+    "symmetric": false
+   }
+  ]
+ },
+ {
+  "text": "Thickness: 0.25 mm ±0.01 mm",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "0.25 mm",
+    "value": 0.25,
+    "unit": "mm"
+   },
+   {
+    "kind": "tolerance",
+    "matched": "±0.01 mm",
+    "upper": 0.01,
+    "lower": -0.01,
+    "unit": "mm",
+    "symmetric": true
+   }
+  ]
+ },
+ {
+  "text": "Depth 4 mm (tolerance ±0.05 mm).",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "4 mm",
+    "value": 4,
+    "unit": "mm"
+   },
+   {
+    "kind": "tolerance",
+    "matched": "±0.05 mm",
+    "upper": 0.05,
+    "lower": -0.05,
+    "unit": "mm",
+    "symmetric": true
+   }
+  ]
+ },
+ {
+  "text": "Fit H7/g6 here.",
+  "expect": [
+   {
+    "kind": "fit",
+    "matched": "H7",
+    "letter": "H",
+    "grade": 7,
+    "hole": true
+   },
+   {
+    "kind": "fit",
+    "matched": "g6",
+    "letter": "g",
+    "grade": 6,
+    "hole": false
+   }
+  ]
+ },
+ {
+  "text": "Use K7 and m6.",
+  "expect": [
+   {
+    "kind": "fit",
+    "matched": "K7",
+    "letter": "K",
+    "grade": 7,
+    "hole": true
+   },
+   {
+    "kind": "fit",
+    "matched": "m6",
+    "letter": "m",
+    "grade": 6,
+    "hole": false
+   }
+  ]
+ },
+ {
+  "text": "Use M12 with h9 shaft and H8 hole.",
+  "expect": [
+   {
+    "kind": "thread",
+    "matched": "M12",
+    "diameter_mm": 12
+   },
+   {
+    "kind": "fit",
+    "matched": "h9",
+    "letter": "h",
+    "grade": 9,
+    "hole": false
+   },
+   {
+    "kind": "fit",
+    "matched": "H8",
+    "letter": "H",
+    "grade": 8,
+    "hole": true
+   }
+  ]
+ },
+ {
+  "text": "M10x1.5 tapped hole, depth 12 mm, H7 bore.",
+  "expect": [
+   {
+    "kind": "thread",
+    "matched": "M10x1.5",
+    "diameter_mm": 10,
+    "pitch_mm": 1.5
+   },
+   {
+    "kind": "quantity",
+    "matched": "12 mm",
+    "value": 12,
+    "unit": "mm"
+   },
+   {
+    "kind": "fit",
+    "matched": "H7",
+    "letter": "H",
+    "grade": 7,
+    "hole": true
+   }
+  ]
+ },
+ {
+  "text": "Bolt M8x1.25 at 45°, pitch 1.25 mm.",
+  "expect": [
+   {
+    "kind": "thread",
+    "matched": "M8x1.25",
+    "diameter_mm": 8,
+    "pitch_mm": 1.25
+   },
+   {
+    "kind": "quantity",
+    "matched": "45°",
+    "value": 45,
+    "unit": "deg"
+   },
+   {
+    "kind": "quantity",
+    "matched": "1.25 mm",
+    "value": 1.25,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Hole is 8 mm H7 and shaft h6.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "8 mm",
+    "value": 8,
+    "unit": "mm"
+   },
+   {
+    "kind": "fit",
+    "matched": "H7",
+    "letter": "H",
+    "grade": 7,
+    "hole": true
+   },
+   {
+    "kind": "fit",
+    "matched": "h6",
+    "letter": "h",
+    "grade": 6,
+    "hole": false
+   }
+  ]
+ },
+ {
+  "text": "M6 screws, 12 pcs, 3 mm apart.",
+  "expect": [
+   {
+    "kind": "thread",
+    "matched": "M6",
+    "diameter_mm": 6
+   },
+   {
+    "kind": "quantity",
+    "matched": "3 mm",
+    "value": 3,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Key slot 5 mm wide, 3 mm deep, see M5.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "5 mm",
+    "value": 5,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "3 mm",
+    "value": 3,
+    "unit": "mm"
+   },
+   {
+    "kind": "thread",
+    "matched": "M5",
+    "diameter_mm": 5
+   }
+  ]
+ },
+ {
+  "text": "Shaft h6 runs 0.2–0.4 mm from face at 30°.",
+  "expect": [
+   {
+    "kind": "fit",
+    "matched": "h6",
+    "letter": "h",
+    "grade": 6,
+    "hole": false
+   },
+   {
+    "kind": "range",
+    "matched": "0.2–0.4 mm",
+    "lo": 0.2,
+    "hi": 0.4,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "30°",
+    "value": 30,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Rotate 90° within 2 s, load 50 N.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "90°",
+    "value": 90,
+    "unit": "deg"
+   },
+   {
+    "kind": "quantity",
+    "matched": "2 s",
+    "value": 2,
+    "unit": "s"
+   },
+   {
+    "kind": "quantity",
+    "matched": "50 N",
+    "value": 50,
+    "unit": "N"
+   }
+  ]
+ },
+ {
+  "text": "The gap is 0.5 mm, 5 N load, and 2 kg mass.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "0.5 mm",
+    "value": 0.5,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "5 N",
+    "value": 5,
+    "unit": "N"
+   },
+   {
+    "kind": "quantity",
+    "matched": "2 kg",
+    "value": 2,
+    "unit": "kg"
+   }
+  ]
+ },
+ {
+  "text": "Plate 2 m long, area 400 cm².",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 m",
+    "value": 2,
+    "unit": "m"
+   },
+   {
+    "kind": "quantity",
+    "matched": "400 cm²",
+    "value": 400,
+    "unit": "cm2"
+   }
+  ]
+ },
+ {
+  "text": "Set the start to +2.5 s.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "+2.5 s",
+    "value": 2.5,
+    "unit": "s"
+   }
+  ]
+ },
+ {
+  "text": "Use 1.5 mm and -2 mm shims.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1.5 mm",
+    "value": 1.5,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "-2 mm",
+    "value": -2,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Thread M8 is 5 mm long.",
+  "expect": [
+   {
+    "kind": "thread",
+    "matched": "M8",
+    "diameter_mm": 8
+   },
+   {
+    "kind": "quantity",
+    "matched": "5 mm",
+    "value": 5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Dial 1.5 in. from edge.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1.5 in",
+    "value": 1.5,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Gap 3 in, bore 2 in.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 in",
+    "value": 3,
+    "unit": "in"
+   },
+   {
+    "kind": "quantity",
+    "matched": "2 in",
+    "value": 2,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Hole 1 inch; cavity 2 inches.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1 inch",
+    "value": 1,
+    "unit": "in"
+   },
+   {
+    "kind": "quantity",
+    "matched": "2 inches",
+    "value": 2,
+    "unit": "in"
+   }
+  ]
+ },
+ {
+  "text": "Rod 1,000 mm and 5 N·s.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "1,000 mm",
+    "value": 1000,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "5 N·s",
+    "value": 5,
+    "unit": "N_s"
+   }
+  ]
+ },
+ {
+  "text": "Tilt 5 degrees to the axis.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "5 degrees",
+    "value": 5,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Angle of two degrees.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "two degrees",
+    "value": 2,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Speed 2 m and time 3 s.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 m",
+    "value": 2,
+    "unit": "m"
+   },
+   {
+    "kind": "quantity",
+    "matched": "3 s",
+    "value": 3,
+    "unit": "s"
+   }
+  ]
+ },
+ {
+  "text": "Torque 12 N and 9 cm2 area.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "12 N",
+    "value": 12,
+    "unit": "N"
+   },
+   {
+    "kind": "quantity",
+    "matched": "9 cm2",
+    "value": 9,
+    "unit": "cm2"
+   }
+  ]
+ },
+ {
+  "text": "Ring 2 in, 90°.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "2 in",
+    "value": 2,
+    "unit": "in"
+   },
+   {
+    "kind": "quantity",
+    "matched": "90°",
+    "value": 90,
+    "unit": "deg"
+   }
+  ]
+ },
+ {
+  "text": "Count 5 mm2, 4 mm3 and 3 g.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "5 mm2",
+    "value": 5,
+    "unit": "mm2"
+   },
+   {
+    "kind": "quantity",
+    "matched": "4 mm3",
+    "value": 4,
+    "unit": "mm3"
+   },
+   {
+    "kind": "quantity",
+    "matched": "3 g",
+    "value": 3,
+    "unit": "g"
+   }
+  ]
+ },
+ {
+  "text": "Use M3 and M4x0.7 screws.",
+  "expect": [
+   {
+    "kind": "thread",
+    "matched": "M3",
+    "diameter_mm": 3
+   },
+   {
+    "kind": "thread",
+    "matched": "M4x0.7",
+    "diameter_mm": 4,
+    "pitch_mm": 0.7
+   }
+  ]
+ },
+ {
+  "text": "Mount with h5 and K6 fits, 2 mm gap.",
+  "expect": [
+   {
+    "kind": "fit",
+    "matched": "h5",
+    "letter": "h",
+    "grade": 5,
+    "hole": false
+   },
+   {
+    "kind": "fit",
+    "matched": "K6",
+    "letter": "K",
+    "grade": 6,
+    "hole": true
+   },
+   {
+    "kind": "quantity",
+    "matched": "2 mm",
+    "value": 2,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Max 500 N·s over 10 s.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "500 N·s",
+    "value": 500,
+    "unit": "N_s"
+   },
+   {
+    "kind": "quantity",
+    "matched": "10 s",
+    "value": 10,
+    "unit": "s"
+   }
+  ]
+ },
+ {
+  "text": "Pitch 0.5 mm between teeth.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "0.5 mm",
+    "value": 0.5,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Torque limit 5 N to 15 N.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "5 N to 15 N",
+    "lo": 5,
+    "hi": 15,
+    "unit": "N"
+   }
+  ]
+ },
+ {
+  "text": "Span 4 cm..6 cm.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "4 cm..6 cm",
+    "lo": 4,
+    "hi": 6,
+    "unit": "cm"
+   }
+  ]
+ },
+ {
+  "text": "Offset 0.5 mm to 1 mm between plates.",
+  "expect": [
+   {
+    "kind": "range",
+    "matched": "0.5 mm to 1 mm",
+    "lo": 0.5,
+    "hi": 1,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Lift 3 mm, drop 3 mm.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 mm",
+    "value": 3,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "3 mm",
+    "value": 3,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Plate thickness +0.1/-0.05 mm, hole H7.",
+  "expect": [
+   {
+    "kind": "tolerance",
+    "matched": "+0.1/-0.05 mm",
+    "upper": 0.1,
+    "lower": -0.05,
+    "unit": "mm",
+    "symmetric": false
+   },
+   {
+    "kind": "fit",
+    "matched": "H7",
+    "letter": "H",
+    "grade": 7,
+    "hole": true
+   }
+  ]
+ },
+ {
+  "text": "Bearing at 3 mm 1 g 2 s.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "3 mm",
+    "value": 3,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "1 g",
+    "value": 1,
+    "unit": "g"
+   },
+   {
+    "kind": "quantity",
+    "matched": "2 s",
+    "value": 2,
+    "unit": "s"
+   }
+  ]
+ },
+ {
+  "text": "Dowel 6 mm, fit g6 with 0.1 mm play.",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "6 mm",
+    "value": 6,
+    "unit": "mm"
+   },
+   {
+    "kind": "fit",
+    "matched": "g6",
+    "letter": "g",
+    "grade": 6,
+    "hole": false
+   },
+   {
+    "kind": "quantity",
+    "matched": "0.1 mm",
+    "value": 0.1,
+    "unit": "mm"
+   }
+  ]
+ },
+ {
+  "text": "Shim 0.05 mm, load 2 N·s?",
+  "expect": [
+   {
+    "kind": "quantity",
+    "matched": "0.05 mm",
+    "value": 0.05,
+    "unit": "mm"
+   },
+   {
+    "kind": "quantity",
+    "matched": "2 N·s",
+    "value": 2,
+    "unit": "N_s"
+   }
+  ]
+ },
+ {
+  "text": "Gap 1,5 mm and 2,25 mm.",
+  "expect": []
+ },
+ {
+  "text": "Use 5 bolts.",
+  "expect": []
+ },
+ {
+  "text": "Count is 8.",
+  "expect": []
+ },
+ {
+  "text": "Parameter 5 controls the feed.",
+  "expect": []
+ },
+ {
+  "text": "Tower_5 is ready.",
+  "expect": []
+ },
+ {
+  "text": "See v2 of the spec.",
+  "expect": []
+ },
+ {
+  "text": "Issued 2026-11-23 for review.",
+  "expect": []
+ },
+ {
+  "text": "Between 5 to 15 parts.",
+  "expect": []
+ },
+ {
+  "text": "Step 5 is complete.",
+  "expect": []
+ },
+ {
+  "text": "Fits in 4 in the box.",
+  "expect": []
+ },
+ {
+  "text": "4 in gap between plates.",
+  "expect": []
+ },
+ {
+  "text": "Size 1,5 mm plate.",
+  "expect": []
+ },
+ {
+  "text": "Mount with H0 insert.",
+  "expect": []
+ },
+ {
+  "text": "Bore H20 nominal.",
+  "expect": []
+ },
+ {
+  "text": "Use H7x in the drawing.",
+  "expect": []
+ },
+ {
+  "text": "5 sides of the box.",
+  "expect": []
+ },
+ {
+  "text": "Forms 8 mmx wide.",
+  "expect": []
+ },
+ {
+  "text": "3 gaps total.",
+  "expect": []
+ },
+ {
+  "text": "Test 2 Ns total.",
+  "expect": []
+ },
+ {
+  "text": "Model M rev A.",
+  "expect": []
+ },
+ {
+  "text": "Pack of 10 pieces.",
+  "expect": []
+ },
+ {
+  "text": "Count from 1 to 10.",
+  "expect": []
+ },
+ {
+  "text": "Sets 2-3 parts.",
+  "expect": []
+ },
+ {
+  "text": "Clearance 0.5 - 0.7.",
+  "expect": []
+ },
+ {
+  "text": "Scale 1:50 drawing.",
+  "expect": []
+ },
+ {
+  "text": "Ratio 3:1 approved.",
+  "expect": []
+ },
+ {
+  "text": "Phone 555-1234 is listed.",
+  "expect": []
+ },
+ {
+  "text": "The ID is ABC123.",
+  "expect": []
+ },
+ {
+  "text": "Version 3.2.1 released.",
+  "expect": []
+ },
+ {
+  "text": "Delay 10 ms.",
+  "expect": []
+ },
+ {
+  "text": "Change 5 kms.",
+  "expect": []
+ },
+ {
+  "text": "Price is 5 USD.",
+  "expect": []
+ },
+ {
+  "text": "Speed 3 mph.",
+  "expect": []
+ },
+ {
+  "text": "Cure 3h at 60C.",
+  "expect": []
+ },
+ {
+  "text": "A 12 gauge wire.",
+  "expect": []
+ },
+ {
+  "text": "Level 4 in sequence.",
+  "expect": []
+ },
+ {
+  "text": "Step 3 in the process.",
+  "expect": []
+ },
+ {
+  "text": "Hole H only.",
+  "expect": []
+ },
+ {
+  "text": "Quantity: 12.",
+  "expect": []
+ },
+ {
+  "text": "Parameters: 1 2 3.",
+  "expect": []
+ },
+ {
+  "text": "Between parts 3 and 5 are fine.",
+  "expect": []
+ },
+ {
+  "text": "Use M alone in notes.",
+  "expect": []
+ },
+ {
+  "text": "Meeting on 2026-11-24.",
+  "expect": []
+ },
+ {
+  "text": "Revision 2 of 5 approved.",
+  "expect": []
+ },
+ {
+  "text": "Sections 3, 4 and 5.",
+  "expect": []
+ },
+ {
+  "text": "Rev 2.1.0 pending.",
+  "expect": []
+ },
+ {
+  "text": "Pressure 5 bar.",
+  "expect": []
+ },
+ {
+  "text": "Rate 60 Hz.",
+  "expect": []
+ },
+ {
+  "text": "Call 1-800-555-0100 today.",
+  "expect": []
+ },
+ {
+  "text": "Lid fits box (E1).",
+  "expect": []
+ },
+ {
+  "text": "Requirements R1 and R2 apply.",
+  "expect": []
+ },
+ {
+  "text": "Case E6: lid closes.",
+  "expect": []
+ },
+ {
+  "text": "Step P5 is next.",
+  "expect": []
+ },
+ {
+  "text": "See (E5) for the bracket.",
+  "expect": []
+ },
+ {
+  "text": "Req R6 covers it.",
+  "expect": []
+ },
+ {
+  "text": "Check E3 later.",
+  "expect": []
+ },
+ {
+  "text": "Part S4 is red.",
+  "expect": []
+ },
+ {
+  "text": "Table T8 lists them.",
+  "expect": []
+ },
+ {
+  "text": "Bore E9 clearance.",
+  "expect": [
+   {
+    "kind": "fit",
+    "matched": "E9",
+    "letter": "E",
+    "grade": 9,
+    "hole": true
+   }
+  ]
+ },
+ {
+  "text": "Slot P5 and h5 shaft.",
+  "expect": [
+   {
+    "kind": "fit",
+    "matched": "P5",
+    "letter": "P",
+    "grade": 5,
+    "hole": true
+   },
+   {
+    "kind": "fit",
+    "matched": "h5",
+    "letter": "h",
+    "grade": 5,
+    "hole": false
+   }
+  ]
+ }
+]

@@ -1,0 +1,69 @@
+[
+  {
+    "args": {
+      "a": {
+        "set": "turntable"
+      },
+      "b": {
+        "part": {
+          "model": {
+            "builder": "machine",
+            "entry": "machine.py"
+          },
+          "part": {
+            "name": "base"
+          }
+        }
+      }
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "note": "overlap tolerance ε (project setting)",
+        "source": "library",
+        "unit": "mm3",
+        "value": 0.001
+      }
+    },
+    "id": "c1.1",
+    "origin": {
+      "claim": "c1",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "moves_freely"
+    },
+    "pairing": "each_pair",
+    "primitive": "interference",
+    "quantifier": "for_all",
+    "span": [
+      0,
+      61
+    ],
+    "states": {
+      "axis": "z",
+      "kind": "rotate",
+      "moving": {
+        "set": "turntable"
+      },
+      "range": {
+        "from": {
+          "note": "full turn, answered by user",
+          "source": "inferred",
+          "unit": "deg",
+          "value": 0.0
+        },
+        "step": {
+          "note": "default sampling",
+          "source": "inferred",
+          "unit": "deg",
+          "value": 5.0
+        },
+        "to": {
+          "note": "full turn, answered by user",
+          "source": "inferred",
+          "unit": "deg",
+          "value": 360.0
+        }
+      }
+    }
+  }
+]

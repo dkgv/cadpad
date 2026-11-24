@@ -29,6 +29,7 @@ pub mod project_entry;
 pub mod project_result;
 pub mod projects;
 pub mod recovery;
+pub mod requirements;
 pub mod runtime;
 mod snapshots;
 mod source_files;

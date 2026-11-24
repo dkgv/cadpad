@@ -1,0 +1,118 @@
+{
+  "ir_version": 1,
+  "id": "r4",
+  "name": "Tower arms retract",
+  "text": "turntable tower arms must be retractable",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "moves_freely",
+      "span": [
+        0,
+        40
+      ],
+      "source": "inferred",
+      "note": "answer to: retractable to what end?",
+      "args": {
+        "moving": {
+          "part": {
+            "model": {
+              "entry": "machine.py",
+              "builder": "machine"
+            },
+            "part": {
+              "glob": "tower_arm_*"
+            }
+          }
+        },
+        "against": "others",
+        "over": {
+          "states": {
+            "kind": "param",
+            "param": {
+              "name": "extension"
+            },
+            "values": {
+              "shape": "range",
+              "from": {
+                "value": 5.0,
+                "unit": "one",
+                "source": "model",
+                "note": "extension lower bound"
+              },
+              "to": {
+                "value": 15.0,
+                "unit": "one",
+                "source": "model",
+                "note": "extension upper bound"
+              },
+              "step": {
+                "value": 1.0,
+                "unit": "one",
+                "source": "inferred",
+                "note": "default sampling"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "c2",
+      "rule": "clear_of",
+      "span": [
+        0,
+        40
+      ],
+      "source": "inferred",
+      "note": "clear of the racket envelope for loading",
+      "args": {
+        "a": {
+          "part": {
+            "model": {
+              "entry": "machine.py",
+              "builder": "machine"
+            },
+            "part": {
+              "glob": "tower_arm_*"
+            }
+          }
+        },
+        "envelope": {
+          "part": {
+            "model": {
+              "entry": "machine.py",
+              "builder": "machine"
+            },
+            "part": {
+              "name": "racket_envelope"
+            }
+          }
+        },
+        "at": {
+          "states": {
+            "kind": "param",
+            "param": {
+              "name": "extension"
+            },
+            "values": {
+              "shape": "value",
+              "value": {
+                "value": 5.0,
+                "unit": "one",
+                "source": "model",
+                "note": "fully retracted"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "answers": [
+    {
+      "phrase": "retractable",
+      "answer": "clear of the racket envelope for loading"
+    }
+  ]
+}

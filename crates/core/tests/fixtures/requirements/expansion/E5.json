@@ -1,0 +1,178 @@
+[
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "bracket",
+            "entry": "bracket.py"
+          },
+          "part": {
+            "name": "bracket"
+          }
+        }
+      },
+      "axis": {
+        "axis": "x"
+      }
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "unit": "mm",
+        "value": 256.0
+      }
+    },
+    "id": "c1.1",
+    "note": "x",
+    "origin": {
+      "claim": "c1",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "fits_bed"
+    },
+    "pairing": "whole",
+    "primitive": "extent",
+    "quantifier": "for_all",
+    "span": [
+      31,
+      48
+    ],
+    "states": {
+      "kind": "rest"
+    }
+  },
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "bracket",
+            "entry": "bracket.py"
+          },
+          "part": {
+            "name": "bracket"
+          }
+        }
+      },
+      "axis": {
+        "axis": "y"
+      }
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "note": "only one bed number given",
+        "source": "inferred",
+        "unit": "mm",
+        "value": 256.0
+      }
+    },
+    "id": "c1.2",
+    "note": "y",
+    "origin": {
+      "claim": "c1",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "fits_bed"
+    },
+    "pairing": "whole",
+    "primitive": "extent",
+    "quantifier": "for_all",
+    "span": [
+      31,
+      48
+    ],
+    "states": {
+      "kind": "rest"
+    }
+  },
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "bracket",
+            "entry": "bracket.py"
+          },
+          "part": {
+            "name": "bracket"
+          }
+        }
+      },
+      "axis": {
+        "axis": "z"
+      }
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "note": "only one bed number given",
+        "source": "inferred",
+        "unit": "mm",
+        "value": 256.0
+      }
+    },
+    "id": "c1.3",
+    "note": "z",
+    "origin": {
+      "claim": "c1",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "fits_bed"
+    },
+    "pairing": "whole",
+    "primitive": "extent",
+    "quantifier": "for_all",
+    "span": [
+      31,
+      48
+    ],
+    "states": {
+      "kind": "rest"
+    }
+  },
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "bracket",
+            "entry": "bracket.py"
+          },
+          "part": {
+            "name": "bracket"
+          }
+        }
+      }
+    },
+    "cmp": {
+      "hi": {
+        "note": "exactly one solid",
+        "source": "library",
+        "unit": "one",
+        "value": 1.0
+      },
+      "lo": {
+        "note": "exactly one solid",
+        "source": "library",
+        "unit": "one",
+        "value": 1.0
+      },
+      "op": "in"
+    },
+    "id": "c2.1",
+    "origin": {
+      "claim": "c2",
+      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "rule": "single_solid"
+    },
+    "pairing": "each",
+    "primitive": "valid_solid_count",
+    "quantifier": "for_all",
+    "span": [
+      53,
+      65
+    ],
+    "states": {
+      "kind": "rest"
+    }
+  }
+]

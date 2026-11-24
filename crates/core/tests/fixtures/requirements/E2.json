@@ -1,0 +1,188 @@
+{
+  "ir_version": 1,
+  "id": "e2",
+  "name": "PCB fits case",
+  "text": "@[pcb](pcb.py#pcb) must fit in @[case](case.py#case) with 2 mm around it and the USB port lined up with the cutout",
+  "covers": [
+    {
+      "model": {
+        "entry": "pcb.py",
+        "builder": "pcb"
+      },
+      "part": {
+        "model": {
+          "entry": "device.py",
+          "builder": "device"
+        },
+        "part": {
+          "name": "pcb"
+        }
+      }
+    },
+    {
+      "model": {
+        "entry": "case.py",
+        "builder": "case"
+      },
+      "part": {
+        "model": {
+          "entry": "device.py",
+          "builder": "device"
+        },
+        "part": {
+          "name": "case"
+        }
+      }
+    }
+  ],
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "no_overlap",
+      "span": [
+        19,
+        30
+      ],
+      "args": {
+        "a": {
+          "part": {
+            "model": {
+              "entry": "device.py",
+              "builder": "device"
+            },
+            "part": {
+              "name": "pcb"
+            }
+          }
+        },
+        "b": {
+          "part": {
+            "model": {
+              "entry": "device.py",
+              "builder": "device"
+            },
+            "part": {
+              "name": "case"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "c2",
+      "rule": "measure",
+      "span": [
+        53,
+        72
+      ],
+      "args": {
+        "fn": {
+          "text": "clearance_along"
+        },
+        "a": {
+          "part": {
+            "model": {
+              "entry": "device.py",
+              "builder": "device"
+            },
+            "part": {
+              "name": "pcb/board"
+            }
+          }
+        },
+        "b": {
+          "feature": {
+            "kind": "explicit",
+            "part": {
+              "model": {
+                "entry": "device.py",
+                "builder": "device"
+              },
+              "part": {
+                "name": "case"
+              }
+            },
+            "name": "inner_walls"
+          }
+        },
+        "directions": {
+          "list": [
+            {
+              "text": "+x"
+            },
+            {
+              "text": "-x"
+            },
+            {
+              "text": "+y"
+            },
+            {
+              "text": "-y"
+            }
+          ]
+        },
+        "cmp": {
+          "compare": {
+            "op": ">=",
+            "value": {
+              "value": 2.0,
+              "unit": "mm"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "c3",
+      "rule": "aligned",
+      "span": [
+        77,
+        114
+      ],
+      "args": {
+        "a": {
+          "part": {
+            "model": {
+              "entry": "device.py",
+              "builder": "device"
+            },
+            "part": {
+              "name": "pcb/J1"
+            }
+          }
+        },
+        "b": {
+          "feature": {
+            "kind": "explicit",
+            "part": {
+              "model": {
+                "entry": "device.py",
+                "builder": "device"
+              },
+              "part": {
+                "name": "case"
+              }
+            },
+            "name": "usb_cutout"
+          }
+        },
+        "tol": {
+          "quantity": {
+            "value": 0.2,
+            "unit": "mm",
+            "source": "inferred",
+            "note": "no tolerance stated"
+          }
+        },
+        "margin": {
+          "quantity": {
+            "value": 0.3,
+            "unit": "mm",
+            "source": "inferred",
+            "note": "no margin stated"
+          }
+        }
+      }
+    }
+  ]
+}

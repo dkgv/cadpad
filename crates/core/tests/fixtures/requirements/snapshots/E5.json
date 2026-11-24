@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "model": {
+        "entry": "bracket.py",
+        "builder": "bracket"
+      },
+      "built": {
+        "fingerprint": "fp-bracket",
+        "parts": [
+          {
+            "name": "bracket",
+            "geometry_hash": "h-bracket"
+          }
+        ],
+        "params": [],
+        "joints": [],
+        "constants": []
+      }
+    }
+  ]
+}

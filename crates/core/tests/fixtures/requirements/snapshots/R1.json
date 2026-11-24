@@ -1,0 +1,42 @@
+{
+  "models": [
+    {
+      "model": {
+        "entry": "machine.py",
+        "builder": "machine"
+      },
+      "built": {
+        "fingerprint": "fp-base-rotor",
+        "parts": [
+          {
+            "name": "base",
+            "geometry_hash": "h-base"
+          },
+          {
+            "name": "rotor",
+            "geometry_hash": "h-rotor"
+          },
+          {
+            "name": "tower_1",
+            "geometry_hash": "h-tower_1"
+          },
+          {
+            "name": "tower_2",
+            "geometry_hash": "h-tower_2"
+          },
+          {
+            "name": "clamp_1",
+            "geometry_hash": "h-clamp_1"
+          },
+          {
+            "name": "clamp_2",
+            "geometry_hash": "h-clamp_2"
+          }
+        ],
+        "params": [],
+        "joints": [],
+        "constants": []
+      }
+    }
+  ]
+}

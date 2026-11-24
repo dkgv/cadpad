@@ -1,0 +1,1231 @@
+{
+  "$defs": {
+    "AllowKind": {
+      "oneOf": [
+        {
+          "const": "touch",
+          "description": "Contact with overlap up to ε.",
+          "type": "string"
+        },
+        {
+          "const": "interference",
+          "description": "Overlap up to `max`.",
+          "type": "string"
+        }
+      ]
+    },
+    "Allowance": {
+      "additionalProperties": false,
+      "description": "Declared intended contact between two groups of parts (spec §3.5).\nEverything else clashing is a failure.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/StateSpace"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Limit the allowance to some states."
+        },
+        "kind": {
+          "$ref": "#/$defs/AllowKind"
+        },
+        "max": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Literal"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Required for `interference` (a volume); there is no unbounded allowance."
+        },
+        "pair": {
+          "items": {
+            "$ref": "#/$defs/Target"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "span": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pair",
+        "kind",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Answer": {
+      "additionalProperties": false,
+      "description": "The user's answer to a question about a vague word (\"freely\": no overlap).",
+      "properties": {
+        "answer": {
+          "description": "The chosen reading, in the user's words (shown in the review).",
+          "type": "string"
+        },
+        "phrase": {
+          "description": "The word or phrase asked about, as in the vague-word table.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "phrase",
+        "answer"
+      ],
+      "type": "object"
+    },
+    "Arg": {
+      "description": "A rule or primitive argument. Which keys a rule takes and what kind each\nmust be is the library's signature (checked at typecheck, not here).",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "$ref": "#/$defs/ModelRef"
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "part": {
+              "$ref": "#/$defs/PartRef"
+            }
+          },
+          "required": [
+            "part"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "set": {
+              "$ref": "#/$defs/SetRef"
+            }
+          },
+          "required": [
+            "set"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "others",
+          "description": "Every part of the subject not in the claim's moving set.",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "param": {
+              "$ref": "#/$defs/ParamRef"
+            }
+          },
+          "required": [
+            "param"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "joint": {
+              "$ref": "#/$defs/JointRef"
+            }
+          },
+          "required": [
+            "joint"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "feature": {
+              "$ref": "#/$defs/FeatureRef"
+            }
+          },
+          "required": [
+            "feature"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "axis": {
+              "$ref": "#/$defs/AxisRef"
+            }
+          },
+          "required": [
+            "axis"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "quantity": {
+              "$ref": "#/$defs/Literal"
+            }
+          },
+          "required": [
+            "quantity"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Plain number (counts, ratios).",
+          "properties": {
+            "number": {
+              "format": "double",
+              "type": "number"
+            }
+          },
+          "required": [
+            "number"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Structural keyword from the library: a primitive name (`fn`), a\ndirection (`\"+x\"`). Carries no provenance; the library fixes the\nallowed words.",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A word taken from the prose or from elsewhere, with provenance:\nthread size `M8`, fit class `H7`, an orientation, a preset name.",
+          "properties": {
+            "token": {
+              "$ref": "#/$defs/Token"
+            }
+          },
+          "required": [
+            "token"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bool": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "bool"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "compare": {
+              "$ref": "#/$defs/Comparator"
+            }
+          },
+          "required": [
+            "compare"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "states": {
+              "$ref": "#/$defs/StateSpace"
+            }
+          },
+          "required": [
+            "states"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "list": {
+              "items": {
+                "$ref": "#/$defs/Arg"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "list"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AxisRef": {
+      "description": "Axis or direction of a rigid state space.",
+      "oneOf": [
+        {
+          "enum": [
+            "x",
+            "y",
+            "z"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "World-space vector (need not be normalised, must be non-zero).",
+          "properties": {
+            "vector": {
+              "items": {
+                "format": "double",
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "vector"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Cylinder axis, line edge or plane normal of a feature.",
+          "properties": {
+            "feature": {
+              "$ref": "#/$defs/FeatureRef"
+            }
+          },
+          "required": [
+            "feature"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Claim": {
+      "additionalProperties": false,
+      "description": "One checkable statement: a library rule or primitive applied to arguments.",
+      "properties": {
+        "args": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Arg"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "note": {
+          "description": "Why, for `inferred` claims; shown in the review.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quantifier": {
+          "$ref": "#/$defs/Quantifier"
+        },
+        "rule": {
+          "description": "Library rule (`moves_freely`) or primitive (`measure` with `fn` arg).",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "span": {
+          "description": "Prose this claim implements. Omitted for claims with no prose\n(`inferred`).",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "rule"
+      ],
+      "type": "object"
+    },
+    "Comparator": {
+      "description": "How a measured value is compared (spec §3.4). No bare `==` on quantities.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": ">=",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Literal"
+            }
+          },
+          "required": [
+            "op",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "<=",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Literal"
+            }
+          },
+          "required": [
+            "op",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Inclusive range `[lo, hi]`.",
+          "properties": {
+            "hi": {
+              "$ref": "#/$defs/Literal"
+            },
+            "lo": {
+              "$ref": "#/$defs/Literal"
+            },
+            "op": {
+              "const": "in",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "lo",
+            "hi"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Within `tol` of `target`; `tol` must be greater than zero.",
+          "properties": {
+            "op": {
+              "const": "approx",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/Literal"
+            },
+            "tol": {
+              "$ref": "#/$defs/Literal"
+            }
+          },
+          "required": [
+            "op",
+            "target",
+            "tol"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "is_true",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "is_false",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Cover": {
+      "additionalProperties": false,
+      "description": "Maps a tagged model to a part of the assembly that checks it (spec §3.2):\n`@lid -> @enclosure/lid`.",
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelRef"
+        },
+        "part": {
+          "$ref": "#/$defs/PartRef"
+        }
+      },
+      "required": [
+        "model",
+        "part"
+      ],
+      "type": "object"
+    },
+    "EntityKind": {
+      "description": "Kind of a geometric entity.",
+      "enum": [
+        "face",
+        "edge",
+        "vertex"
+      ],
+      "type": "string"
+    },
+    "FeatureRef": {
+      "description": "A feature (face/edge, or a set of them) of a published part:\n`@cabinet/door#hinge_hole`. Resolution order on each build: explicit name,\nthen history name, then exact geometric reference. Each resolves exactly or\nfails; there is no closest match.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Published by the source: `show(..., features={\"hinge_hole\": ...})`.",
+          "properties": {
+            "kind": {
+              "const": "explicit",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "part": {
+              "$ref": "#/$defs/PartRef"
+            }
+          },
+          "required": [
+            "kind",
+            "part",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "History name: the operation that created the entity, e.g.\n`make_door/hole#1/wall`.",
+          "properties": {
+            "kind": {
+              "const": "history",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "part": {
+              "$ref": "#/$defs/PartRef"
+            }
+          },
+          "required": [
+            "kind",
+            "part",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Exact geometric reference for imported geometry: SHA-256 of the\nentity's geometry. Never matched approximately.",
+          "properties": {
+            "entity": {
+              "$ref": "#/$defs/EntityKind"
+            },
+            "hash": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "geometric",
+              "type": "string"
+            },
+            "part": {
+              "$ref": "#/$defs/PartRef"
+            }
+          },
+          "required": [
+            "kind",
+            "part",
+            "entity",
+            "hash"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "JointRef": {
+      "additionalProperties": false,
+      "description": "A mechanism joint, where the model defines one: `@cabinet:hinge`.",
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelRef"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "name"
+      ],
+      "type": "object"
+    },
+    "Literal": {
+      "additionalProperties": false,
+      "description": "A number with a unit and a provenance. Written in JSON as\n`{\"value\": 0.2, \"unit\": \"mm\"}`; `source` defaults to `text`.",
+      "properties": {
+        "note": {
+          "description": "Why this value, for `inferred` and `library` sources (shown in review).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "unit": {
+          "$ref": "#/$defs/Unit"
+        },
+        "value": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "value",
+        "unit"
+      ],
+      "type": "object"
+    },
+    "ModelRef": {
+      "additionalProperties": false,
+      "description": "A model in the project's source catalog: source file plus builder ID.\n`@cabinet`.",
+      "properties": {
+        "builder": {
+          "type": "string"
+        },
+        "entry": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry",
+        "builder"
+      ],
+      "type": "object"
+    },
+    "ParamRef": {
+      "additionalProperties": false,
+      "description": "A model parameter, `parameter(\"door_angle\", ...)`. `model` may be omitted\nwhen the claim's subject is unambiguous.",
+      "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ParamValues": {
+      "description": "Values a parameter takes.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "`param(p, v)`.",
+          "properties": {
+            "shape": {
+              "const": "value",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/Literal"
+            }
+          },
+          "required": [
+            "shape",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`param(p, a .. b, step s)`.",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/Literal"
+            },
+            "shape": {
+              "const": "range",
+              "type": "string"
+            },
+            "step": {
+              "$ref": "#/$defs/Literal"
+            },
+            "to": {
+              "$ref": "#/$defs/Literal"
+            }
+          },
+          "required": [
+            "shape",
+            "from",
+            "to",
+            "step"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`param(p, each of [v1, v2, ...])`.",
+          "properties": {
+            "shape": {
+              "const": "list",
+              "type": "string"
+            },
+            "values": {
+              "items": {
+                "$ref": "#/$defs/Literal"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "shape",
+            "values"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PartName": {
+      "description": "Which published part(s) of a model.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Exact published name, `show(..., name=\"door\")`; imported STEP sub-parts\nby their STEP names (`pcb/J1`).",
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Glob over published names (`tower_*`); matching nothing is an error.",
+          "properties": {
+            "glob": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "glob"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PartRef": {
+      "additionalProperties": false,
+      "description": "A published part, or a glob of parts, of a model: `@cabinet/door`,\n`@cabinet/shelf_*`.",
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelRef"
+        },
+        "part": {
+          "$ref": "#/$defs/PartName"
+        }
+      },
+      "required": [
+        "model",
+        "part"
+      ],
+      "type": "object"
+    },
+    "Quantifier": {
+      "description": "Quantifier over a state space. Clash and clearance rules default to\n`for_all` (result reports the worst state); `exists` reports a witness.",
+      "enum": [
+        "for_all",
+        "exists"
+      ],
+      "type": "string"
+    },
+    "SetDef": {
+      "additionalProperties": false,
+      "description": "`let name = set(...)`.",
+      "properties": {
+        "members": {
+          "description": "Parts or globs; flat (no nested sets).",
+          "items": {
+            "$ref": "#/$defs/PartRef"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "span": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "members"
+      ],
+      "type": "object"
+    },
+    "SetRef": {
+      "description": "A named set from the requirement's `sets` table (`let turntable = ...`).",
+      "type": "string"
+    },
+    "Source": {
+      "description": "Where a value, claim, allowance or set membership comes from (spec §3.6).\nChecked mechanically; anything not from the text, model or library must be\n`inferred`, which is marked in the review and confirmed by approving it.",
+      "oneOf": [
+        {
+          "const": "text",
+          "description": "Appears in the claim's `span` of the user's prose (numbers after unit\nnormalisation).",
+          "type": "string"
+        },
+        {
+          "const": "model",
+          "description": "Read from the model: a parameter's bounds or default, a constant.",
+          "type": "string"
+        },
+        {
+          "const": "library",
+          "description": "A versioned library rule default, standards table row or preset.",
+          "type": "string"
+        },
+        {
+          "const": "inferred",
+          "description": "The LLM judged it implied, or a number with no other source.",
+          "type": "string"
+        }
+      ]
+    },
+    "StateSpace": {
+      "description": "Where the model is when we measure; a claim holds at every state of its\nspace (spec §3.3). Sampling is always explicit.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "As built with default parameters.",
+          "properties": {
+            "kind": {
+              "const": "rest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Rebuild per value.",
+          "properties": {
+            "kind": {
+              "const": "param",
+              "type": "string"
+            },
+            "param": {
+              "$ref": "#/$defs/ParamRef"
+            },
+            "values": {
+              "$ref": "#/$defs/ParamValues"
+            }
+          },
+          "required": [
+            "kind",
+            "param",
+            "values"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Rigid rotation of a set about an axis, no rebuild.",
+          "properties": {
+            "axis": {
+              "$ref": "#/$defs/AxisRef"
+            },
+            "kind": {
+              "const": "rotate",
+              "type": "string"
+            },
+            "moving": {
+              "$ref": "#/$defs/Target"
+            },
+            "range": {
+              "$ref": "#/$defs/Sweep"
+            }
+          },
+          "required": [
+            "kind",
+            "moving",
+            "axis",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Rigid translation of a set along a direction, no rebuild.",
+          "properties": {
+            "direction": {
+              "$ref": "#/$defs/AxisRef"
+            },
+            "kind": {
+              "const": "translate",
+              "type": "string"
+            },
+            "moving": {
+              "$ref": "#/$defs/Target"
+            },
+            "range": {
+              "$ref": "#/$defs/Sweep"
+            }
+          },
+          "required": [
+            "kind",
+            "moving",
+            "direction",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Mechanism joint coordinate.",
+          "properties": {
+            "joint": {
+              "$ref": "#/$defs/JointRef"
+            },
+            "kind": {
+              "const": "joint",
+              "type": "string"
+            },
+            "range": {
+              "$ref": "#/$defs/Sweep"
+            }
+          },
+          "required": [
+            "kind",
+            "joint",
+            "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Every combination of the factors.",
+          "properties": {
+            "factors": {
+              "items": {
+                "$ref": "#/$defs/StateSpace"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "product",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "factors"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Sweep": {
+      "additionalProperties": false,
+      "description": "`from .. to` sampled every `step`; `to` is always included.",
+      "properties": {
+        "from": {
+          "$ref": "#/$defs/Literal"
+        },
+        "step": {
+          "$ref": "#/$defs/Literal"
+        },
+        "to": {
+          "$ref": "#/$defs/Literal"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "step"
+      ],
+      "type": "object"
+    },
+    "Target": {
+      "description": "Some parts: one part or glob, a named set, or an inline list.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "part": {
+              "$ref": "#/$defs/PartRef"
+            }
+          },
+          "required": [
+            "part"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "set": {
+              "$ref": "#/$defs/SetRef"
+            }
+          },
+          "required": [
+            "set"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "parts": {
+              "items": {
+                "$ref": "#/$defs/PartRef"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "parts"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Token": {
+      "additionalProperties": false,
+      "description": "A word-valued argument with a source, checked like a number: a `text`\ntoken must appear in the claim's span (see `parse::token_in_span`).",
+      "properties": {
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/Source"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "Unit": {
+      "description": "Supported units. Internal units are mm, rad, mm2, mm3, kg, s, N and N s.",
+      "oneOf": [
+        {
+          "enum": [
+            "mm",
+            "cm",
+            "m",
+            "in",
+            "deg",
+            "rad",
+            "mm2",
+            "cm2",
+            "mm3",
+            "cm3",
+            "g",
+            "kg",
+            "s",
+            "N"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "one",
+          "description": "Dimensionless number (counts, unit-less parameters).",
+          "type": "string"
+        },
+        {
+          "const": "um",
+          "description": "Micrometre, µm.",
+          "type": "string"
+        },
+        {
+          "const": "N_s",
+          "description": "Newton second.",
+          "type": "string"
+        }
+      ]
+    },
+    "Unsupported": {
+      "additionalProperties": false,
+      "description": "Prose the IR can't express. The requirement can then be at most\n`met_partial`.",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "span": {
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "span",
+        "reason"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A compiled requirement: what the prose says, as claims over named parts.",
+  "properties": {
+    "allow": {
+      "items": {
+        "$ref": "#/$defs/Allowance"
+      },
+      "type": "array"
+    },
+    "answers": {
+      "description": "The user's recorded answers to questions about vague words, so the\ncompiler does not ask again (`E_VAGUE`).",
+      "items": {
+        "$ref": "#/$defs/Answer"
+      },
+      "type": "array"
+    },
+    "claims": {
+      "items": {
+        "$ref": "#/$defs/Claim"
+      },
+      "type": "array"
+    },
+    "covers": {
+      "items": {
+        "$ref": "#/$defs/Cover"
+      },
+      "type": "array"
+    },
+    "id": {
+      "type": "string"
+    },
+    "ir_version": {
+      "description": "Shape version of this IR; currently 1.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "name": {
+      "type": "string"
+    },
+    "sets": {
+      "additionalProperties": {
+        "$ref": "#/$defs/SetDef"
+      },
+      "type": "object"
+    },
+    "text": {
+      "description": "The user's prose, with `@[Label](entry#builder)` chip tokens. Spans\nindex this text.",
+      "type": "string"
+    },
+    "unsupported": {
+      "items": {
+        "$ref": "#/$defs/Unsupported"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ir_version",
+    "id",
+    "name",
+    "text",
+    "claims"
+  ],
+  "title": "Requirement",
+  "type": "object"
+}

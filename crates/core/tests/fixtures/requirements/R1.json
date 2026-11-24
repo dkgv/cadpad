@@ -1,0 +1,101 @@
+{
+  "ir_version": 1,
+  "id": "r1",
+  "name": "Turntable rotates freely",
+  "text": "ensure turntable can rotate freely without clashing with base",
+  "sets": {
+    "turntable": {
+      "members": [
+        {
+          "model": {
+            "entry": "machine.py",
+            "builder": "machine"
+          },
+          "part": {
+            "name": "rotor"
+          }
+        },
+        {
+          "model": {
+            "entry": "machine.py",
+            "builder": "machine"
+          },
+          "part": {
+            "glob": "tower_*"
+          }
+        },
+        {
+          "model": {
+            "entry": "machine.py",
+            "builder": "machine"
+          },
+          "part": {
+            "glob": "clamp_*"
+          }
+        }
+      ],
+      "source": "inferred"
+    }
+  },
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "moves_freely",
+      "span": [
+        0,
+        61
+      ],
+      "args": {
+        "moving": {
+          "set": "turntable"
+        },
+        "against": {
+          "part": {
+            "model": {
+              "entry": "machine.py",
+              "builder": "machine"
+            },
+            "part": {
+              "name": "base"
+            }
+          }
+        },
+        "over": {
+          "states": {
+            "kind": "rotate",
+            "moving": {
+              "set": "turntable"
+            },
+            "axis": "z",
+            "range": {
+              "from": {
+                "value": 0.0,
+                "unit": "deg",
+                "source": "inferred",
+                "note": "full turn, answered by user"
+              },
+              "to": {
+                "value": 360.0,
+                "unit": "deg",
+                "source": "inferred",
+                "note": "full turn, answered by user"
+              },
+              "step": {
+                "value": 5.0,
+                "unit": "deg",
+                "source": "inferred",
+                "note": "default sampling"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "answers": [
+    {
+      "phrase": "freely",
+      "answer": "no overlap anywhere in the motion"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "models": [
+    {
+      "model": {
+        "entry": "cabinet.py",
+        "builder": "cabinet"
+      },
+      "built": {
+        "fingerprint": "fp-door-frame",
+        "parts": [
+          {
+            "name": "door",
+            "geometry_hash": "h-door"
+          },
+          {
+            "name": "frame",
+            "geometry_hash": "h-frame"
+          },
+          {
+            "name": "handle",
+            "geometry_hash": "h-handle"
+          }
+        ],
+        "params": [
+          {
+            "name": "door_angle",
+            "value": {
+              "value": 0.0,
+              "unit": "deg"
+            },
+            "min": {
+              "value": 0.0,
+              "unit": "deg"
+            },
+            "max": {
+              "value": 130.0,
+              "unit": "deg"
+            }
+          }
+        ],
+        "joints": [],
+        "constants": []
+      }
+    }
+  ]
+}

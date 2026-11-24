@@ -1,0 +1,91 @@
+{
+  "models": [
+    {
+      "model": {
+        "entry": "machine.py",
+        "builder": "machine"
+      },
+      "built": {
+        "fingerprint": "fp-base-rotor",
+        "parts": [
+          {
+            "name": "base",
+            "geometry_hash": "h-base"
+          },
+          {
+            "name": "rotor",
+            "geometry_hash": "h-rotor"
+          },
+          {
+            "name": "tower_1",
+            "geometry_hash": "h-tower_1"
+          },
+          {
+            "name": "clamp_1",
+            "geometry_hash": "h-clamp_1"
+          },
+          {
+            "name": "clamp_2",
+            "geometry_hash": "h-clamp_2"
+          },
+          {
+            "name": "clamp_3",
+            "geometry_hash": "h-clamp_3"
+          }
+        ],
+        "params": [
+          {
+            "name": "clamp_theta",
+            "value": {
+              "value": 90.0,
+              "unit": "deg"
+            },
+            "min": {
+              "value": 48.0,
+              "unit": "deg"
+            },
+            "max": {
+              "value": 132.0,
+              "unit": "deg"
+            }
+          },
+          {
+            "name": "comb_travel",
+            "value": {
+              "value": 0.0,
+              "unit": "mm"
+            },
+            "min": {
+              "value": 0.0,
+              "unit": "mm"
+            },
+            "max": {
+              "value": 8.0,
+              "unit": "mm"
+            }
+          }
+        ],
+        "joints": [],
+        "constants": [
+          {
+            "name": "TOWER_COMB_TRAVEL",
+            "values": [
+              {
+                "value": 0.0,
+                "unit": "mm"
+              },
+              {
+                "value": 4.0,
+                "unit": "mm"
+              },
+              {
+                "value": 8.0,
+                "unit": "mm"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
