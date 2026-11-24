@@ -30,7 +30,7 @@
 use super::bind::model_key;
 use super::compile::{Compiled, compile};
 use super::diagnostics::Diagnostic;
-use super::dispatch::{LiveSnapshot, ModelView, execute_plan_chunks_cancellable, pool_cap};
+use super::dispatch::{LiveSnapshot, ModelView, execute_compiled_chunk, pool_cap};
 use super::evaluate::{EvalResult, ResultBody, evaluate};
 use super::ir::{ModelRef, Requirement};
 use super::lifecycle::{StatusInputs, compute_status};
@@ -40,7 +40,7 @@ use super::relink::{BuildIndex, Effect, Relink, RelinkReport, relink};
 use super::settings::ProjectSettings;
 use super::snapshot::WorkspaceSnapshot;
 use super::status::RequirementStatus;
-use super::storage::{Approved, RequirementEntry, StoredHashes, project_settings};
+use super::storage::{Approved, RequirementEntry, project_settings};
 use super::worker_plan::{
     ChunkOptions, ChunkRequest, EvalError, PlanExecutor, RawChunk, build_requests,
     parse_chunk_response, run_plan,
@@ -153,7 +153,7 @@ impl From<Status> for RunInfo {
 // --------------------------------------------------------------- the executor
 
 /// Runs plan chunks on the live workers: maps each chunk to the built view of
-/// its subject model and sends it through [`execute_plan_chunks_cancellable`]
+/// its subject model and sends it through [`execute_compiled_chunk`]
 /// (which adds the build revision and bounds the limits). Blocking: use it from
 /// `spawn_blocking`.
 pub struct LiveExecutor {
@@ -196,17 +196,14 @@ impl PlanExecutor for LiveExecutor {
         if !self.use_cache {
             params["cache"] = json!({"results": false, "rebuild": false});
         }
-        let replies = self.handle.block_on(execute_plan_chunks_cancellable(
+        let reply = self.handle.block_on(execute_compiled_chunk(
             &self.core,
-            &view.workspace,
-            vec![params],
+            view,
+            params,
             self.cancel.clone(),
         ));
-        match replies {
-            Ok(mut replies) => {
-                let reply = replies.pop().unwrap_or(Value::Null);
-                parse_chunk_response(req, &reply)
-            }
+        match reply {
+            Ok(reply) => parse_chunk_response(req, &reply),
             Err(error) => {
                 let message = error.to_string();
                 self.failure = Some(error);
@@ -236,6 +233,11 @@ pub struct Prepared {
     /// Subject model key to the fingerprint of the build seen now.
     pub subjects: BTreeMap<String, String>,
     pub snapshot: WorkspaceSnapshot,
+}
+
+pub(crate) struct ResultGuard<'a> {
+    pub views: &'a BTreeMap<String, ModelView>,
+    pub cancel: &'a watch::Receiver<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -782,25 +784,24 @@ impl Core {
         Ok((owner, prepared, entry.last_result))
     }
 
-    /// Replace the stored `last_result` of `id` with `make(previous)`, under
-    /// the catalog's compare-and-swap. Refuses when the requirement was
-    /// re-approved meanwhile: that result would belong to another plan.
+    /// Replace the stored result under the catalog's compare-and-swap.
+    /// Approval and evaluated revisions must remain current at publication.
     async fn store_requirement_result(
         &self,
         actor: &str,
         workspace: &str,
-        id: &str,
-        approved: &StoredHashes,
+        prepared: &Prepared,
+        cancel: &watch::Receiver<bool>,
         make: impl Fn(Option<&Value>) -> Value,
     ) -> Result<Value> {
         let mut last = None;
         for _ in 0..4 {
             let (owner, mut catalog) = self.requirement_catalog(actor, workspace).await?;
             let expected = fingerprint(&catalog)?;
-            let Some(Saved::Requirement(entry)) = catalog.get_mut(id) else {
+            let Some(Saved::Requirement(entry)) = catalog.get_mut(&prepared.id) else {
                 return Err(invalid("The requirement was deleted during the run"));
             };
-            if entry.approved.as_ref().map(|a| &a.hashes) != Some(approved) {
+            if entry.approved.as_ref().map(|a| &a.hashes) != Some(&prepared.approved.hashes) {
                 return Err(Error::domain(
                     "STALE_ENTITY",
                     "The requirement was approved again during the run; run it again",
@@ -810,7 +811,17 @@ impl Core {
             entry.last_result = Some(result.clone());
             entry.rerun_required = false;
             match self
-                .commit_requirement_catalog(actor, &owner, workspace, &expected, &catalog)
+                .commit_requirement_catalog(
+                    actor,
+                    &owner,
+                    workspace,
+                    &expected,
+                    &catalog,
+                    Some(ResultGuard {
+                        views: &prepared.views,
+                        cancel,
+                    }),
+                )
                 .await
             {
                 Ok(()) => return Ok(result),
@@ -932,10 +943,9 @@ impl Core {
             prepared.bind_failed = true;
             prepared.notes.push(error.to_string());
         }
-        let hashes = prepared.approved.hashes.clone();
         let make = |previous: Option<&Value>| assemble(&prepared, eval.as_ref(), previous, &marks);
         let result = if opts.store {
-            self.store_requirement_result(actor, workspace, &prepared.id, &hashes, make)
+            self.store_requirement_result(actor, workspace, &prepared, &cancel, make)
                 .await?
         } else {
             let (_, entry) = self.approved_entry(actor, workspace, &prepared.id).await?;
@@ -1173,12 +1183,11 @@ impl Core {
                     continue;
                 }
             };
-            let hashes = prepared.approved.hashes.clone();
             let pool = pool_size(self, None);
             let Some(estimate) = estimate_cost_s(&prepared, previous.as_ref(), pool) else {
                 // Cannot evaluate: store needs_review / error without a run.
                 let stored = self
-                    .store_requirement_result(actor, workspace_id, &id, &hashes, |p| {
+                    .store_requirement_result(actor, workspace_id, &prepared, &idle_cancel, |p| {
                         assemble(&prepared, None, p, &Marks::default())
                     })
                     .await;
@@ -1195,7 +1204,7 @@ impl Core {
                     ..Default::default()
                 };
                 let stored = self
-                    .store_requirement_result(actor, workspace_id, &id, &hashes, |p| {
+                    .store_requirement_result(actor, workspace_id, &prepared, &idle_cancel, |p| {
                         assemble(&prepared, None, p, &marks)
                     })
                     .await;

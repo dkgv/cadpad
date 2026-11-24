@@ -837,10 +837,24 @@ impl Core {
         workspace_id: &str,
         expected: &str,
         next: &Catalog,
+        run: Option<crate::requirements::run::ResultGuard<'_>>,
     ) -> Result<()> {
         encode(next)?;
         let mut workspaces = self.workspace(owner).await?;
         self.ensure_actor_active(actor)?;
+        if let Some(run) = run {
+            if *run.cancel.borrow() {
+                return Err(Error::domain("CANCELLED", "Requirement run cancelled"));
+            }
+            if run.views.values().any(|view| {
+                workspaces.get(&view.workspace).is_none_or(|ws| ws.stored.current != view.revision)
+            }) {
+                return Err(Error::domain(
+                    "STALE_ENTITY",
+                    "The model changed before the result could be saved",
+                ));
+            }
+        }
         let ws = workspaces
             .get_mut(owner)
             .ok_or_else(|| invalid("Unknown workspace"))?;

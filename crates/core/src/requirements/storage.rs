@@ -390,7 +390,7 @@ impl Core {
                 );
             }
         }
-        self.commit_requirement_catalog(actor, &owner, workspace_id, &current, &catalog)
+        self.commit_requirement_catalog(actor, &owner, workspace_id, &current, &catalog, None)
             .await?;
         reply(owner, &catalog)
     }
@@ -468,8 +468,15 @@ impl Core {
         entry.set_draft(&compiled);
         // Keep the earlier verdict visible as history until this plan runs.
         entry.rerun_required = entry.last_result.is_some();
-        self.commit_requirement_catalog(USER, &owner, &request.workspace_id, &current, &catalog)
-            .await?;
+        self.commit_requirement_catalog(
+            USER,
+            &owner,
+            &request.workspace_id,
+            &current,
+            &catalog,
+            None,
+        )
+        .await?;
         reply(owner, &catalog)
     }
 
@@ -492,8 +499,15 @@ impl Core {
             return Err(invalid("Unknown requirement"));
         }
         catalog.remove(&request.id);
-        self.commit_requirement_catalog(USER, &owner, &request.workspace_id, &current, &catalog)
-            .await?;
+        self.commit_requirement_catalog(
+            USER,
+            &owner,
+            &request.workspace_id,
+            &current,
+            &catalog,
+            None,
+        )
+        .await?;
         reply(owner, &catalog)
     }
 }

@@ -297,26 +297,44 @@ pub async fn execute_plan_chunks_cancellable(
     requests: Vec<Value>,
     cancel: watch::Receiver<bool>,
 ) -> Result<Vec<Value>> {
-    let operation_timeout_ms = core.config.limits.operation_timeout_ms;
-    let cap = pool_cap(&core.config);
     let mut replies = Vec::with_capacity(requests.len());
-    for mut request in requests {
-        bound_chunk_request(&mut request, operation_timeout_ms, cap)?;
-        replies.push(plan_chunk(core, view, request, cancel.clone()).await?);
+    for request in requests {
+        replies.push(plan_chunk(core, view, None, request, cancel.clone()).await?);
     }
     Ok(replies)
+}
+
+pub(super) async fn execute_compiled_chunk(
+    core: &Core,
+    view: &ModelView,
+    args: Value,
+    cancel: watch::Receiver<bool>,
+) -> Result<Value> {
+    plan_chunk(core, &view.workspace, Some(&view.revision), args, cancel).await
 }
 
 async fn plan_chunk(
     core: &Core,
     view: &str,
-    args: Value,
+    expected_revision: Option<&str>,
+    mut args: Value,
     cancel: watch::Receiver<bool>,
 ) -> Result<Value> {
+    bound_chunk_request(
+        &mut args,
+        core.config.limits.operation_timeout_ms,
+        pool_cap(&core.config),
+    )?;
     let _memory = core.pin_workspace(view).await?;
     let revision = {
         let all = core.workspace(view).await?;
         let current = all[view].stored.current_revision();
+        if expected_revision.is_some_and(|expected| current.id != expected) {
+            return Err(Error::domain(
+                "STALE_ENTITY",
+                "The model changed after preparing the requirement",
+            ));
+        }
         if crate::stl_model::is_mesh(&current.model) {
             return Err(Error::domain(
                 "UNSUPPORTED_OPERATION",
@@ -373,6 +391,27 @@ async fn plan_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn compiled_chunk_rejects_another_revision_before_native_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = Core::open(
+            temp.path().to_path_buf(),
+            WorkerConfig::bundled("unused".into()),
+        )
+        .await
+        .unwrap();
+        let view = ModelView {
+            workspace: core.create_workspace("user").await.unwrap(),
+            revision: "superseded".into(),
+            lease: None,
+        };
+        let (_send, cancel) = watch::channel(false);
+        let error = execute_compiled_chunk(&core, &view, json!({}), cancel)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "STALE_ENTITY");
+    }
 
     #[test]
     fn chunk_limit_stays_below_the_worker_operation_timeout() {
