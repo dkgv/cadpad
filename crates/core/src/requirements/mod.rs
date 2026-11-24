@@ -11,9 +11,13 @@ pub mod bind;
 pub mod compile;
 pub mod coverage;
 pub mod diagnostics;
+pub mod dispatch;
+pub mod evaluate;
 pub mod expand;
+pub mod findings;
 pub mod ir;
 pub mod library;
+pub mod lifecycle;
 pub mod manifest;
 pub mod parse;
 pub mod plan;
@@ -21,21 +25,32 @@ pub mod print;
 pub mod provenance;
 pub mod quantity;
 pub mod refs;
+pub mod relink;
 pub mod settings;
 pub mod snapshot;
 pub mod states;
 pub mod status;
+pub mod storage;
+pub mod tool;
 pub mod typecheck;
+pub mod worker_plan;
 
 pub use compile::{Compiled, Hashes, compile};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Fix, IrEdit, Severity};
+pub use evaluate::{CheckStatus, EvalResult, ResultBody, RunTimings, evaluate};
 pub use expand::{Origin, Pairing, PrimitiveClaim, expand_claim, expand_requirement};
+pub use findings::{AllowanceDraft, Finding, FindingLabel, draft_allowances, label_findings};
 pub use ir::*;
 pub use library::{Library, library, library_version};
+pub use lifecycle::{StatusInputs, StatusReport, compute_status};
 pub use quantity::{Dimension, Quantity, Unit};
+pub use relink::{BuildIndex, Effect, RelinkReport, relink};
 pub use settings::ProjectSettings;
 pub use snapshot::WorkspaceSnapshot;
 pub use status::RequirementStatus;
+pub use worker_plan::{
+    ChunkOptions, EvalError, FakeExecutor, PlanExecutor, RawResults, build_requests, run_plan,
+};
 
 /// Version of the IR shape. Bumped on any breaking schema change.
 pub const IR_VERSION: u32 = 1;

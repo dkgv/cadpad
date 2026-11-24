@@ -401,6 +401,8 @@ fn spec<T: JsonSchema>(name: &str, description: &str) -> ToolSpec {
         mcp_output_schema: None,
     }
 }
+/// Tool description of `control_requirements` (spec §8).
+const REQUIREMENTS_DESCRIPTION: &str = "Compiled, checkable design requirements for a project: statements like \"the lid never touches the base through its whole travel\" that are compiled into an exact plan of geometric checks, reviewed and approved by the user, and re-run as the design changes. Requirements belong to the project; any of its workspaces addresses the same catalog. Commands: list (catalog with status, print, diagnostics and results; returns the catalog CAS), compile {ir} (full compile, saves nothing), save {ir} (compile and store as a DRAFT; needs expected_catalog from list), library (rules, primitives, defaults, print templates, vague-word table), run / start_run {id} / cancel_run {run_id} (evaluate an approved requirement). There is no approve command: only the user approves, in the app. Loop: turn the user's prose into IR against the schema, keeping @[Label](entry#builder) chips as written, with `source` on every number (text, model, library or inferred); compile; fix every diagnostic whose fix is edit_ir by applying its edits; for ask_user and E_VAGUE ask the user one plain-language question at a time with the suggested answers and record the answer in the IR; for edit_source propose the source change; when compile is ok, save, then tell the user to review the print and approve it. Never invent numbers: a clearance, tolerance or size comes from the user's text, the model or the library, otherwise propose it marked inferred and say so. Explain a requirement only from its print and results, never from the IR or your own reading. When a requirement fails or needs review during design work, report it plainly and propose fixes; do not change geometry just to make a requirement pass unless the user asks, and never edit, approve or weaken an approved requirement: saving over an approved requirement only creates a draft that stays needs_review until the user approves it, and the approved version keeps running. Results: run and start_run are not available until evaluation is enabled and fail with REQUIREMENT_EVALUATION_UNAVAILABLE; a requirement that is still a draft cannot be run. Inconclusive means nothing is claimed for a check that hit its time limit. Up to 64 requirements, 1 MiB each, within the 8 MiB catalog shared with motion tests; requirements travel with Save/Open and imported results must be re-run. Geometry only; this is not a certification.";
 fn build_definitions() -> Vec<ToolSpec> {
     let mut tools = vec![
         spec::<GetProject>(
@@ -511,6 +513,10 @@ fn build_definitions() -> Vec<ToolSpec> {
             "control_motion_tests",
             "Create/list/edit/delete/run/replay saved CAD simulation tests (requirements) from natural-language intent. A project keeps one requirement catalog shared by all of its model workspaces; each requirement records definition.model (source entry + builder) and is listed, run and replayed through that model's workspace. Address the model's workspace: upsert without definition.model assigns that model; run/replay of a requirement assigned to another model is rejected. Addressing the project workspace edits the catalog only. List first for catalog CAS. Ground body/joint IDs in get_project/get_motion; inspect the full mechanism before defining actions. Upsert saves a named intent, explicit initial coordinates for every moving joint (m/rad), body masses/friction/gravity, timed motor/load actions and measurable checks. Ask the user to resolve missing targets/tolerances rather than inventing a requirement. Every list/run/upsert reply includes tests[].review: the original requirement, plain-language acceptance statements, Met/Not met per check, and measured values — use that review when explaining the test; do not rephrase thresholds. Run uses a fresh private 1/120 s simulation and never changes live poses or geometry. Run waits for completion; start_run returns a queued run ID immediately. List reports the latest queued/running/cancelling/completed/cancelled/failed operation. After start_run, poll list for that same run ID to become terminal before interpreting results. Existing outcomes belong to the previous run while an operation is active. Completed means execution finished; outcome.passed determines assertion success. cancel_run takes that exact workspace-scoped run_id, requires its actor or the local user, and needs no catalog/revision freshness. Stop preserves the previous result and stays cancelling until entered CPU work ends. Actor revocation cancels owned runs. There is one active run per workspace, two per actor and eight per application; queued and cancelling runs count. A 60-second wall deadline signals cancellation at safe tick boundaries; it is not a hard thread kill. Push requires direct signed normal contact, final receiver displacement and additional displacement versus an identical run without the selected driver motor. Contact threshold is peak sampled last-solver-substep impulse in N s, not force or total impulse. Approximate verified collision proxies/inertia only. Reports pass/fail measurements with thresholds; results become stale when the model's inputs or the engine change; design_compared is false when no workspace of that model was available to compare. Replay selects an accepted frame into canonical playback for visual and exact pose inspection; use control_playback leave to restore live pose. Up to 16 tests, 10 seconds/run, 32768 body-frames and 8 MiB catalog. Definitions travel with Save/Open; imported runs must be rerun. CAD simulation only.",
         ),
+        spec::<crate::requirements::tool::Control>(
+            "control_requirements",
+            REQUIREMENTS_DESCRIPTION,
+        ),
         spec::<crate::motion::CheckInterference>(
             "check_interference",
             "Check 1..64 named instance pairs at an explicit revision and settled pose version. Exact BRep distances/intersection volumes are enabled by default. Optional conservative proxy results identify their clearance expansion and explicitly ignored pairs. Motion during the query invalidates the result; proxy contact is not proof of CAD interference.",
@@ -542,6 +548,7 @@ fn build_definitions() -> Vec<ToolSpec> {
             "set_joint_coordinate" => Some(result_schema::<crate::motion::CoordinateResult>()),
             "control_playback" => Some(result_schema::<crate::playback::Reply>()),
             "control_motion_tests" => Some(result_schema::<crate::motion_tests::Reply>()),
+            "control_requirements" => Some(result_schema::<crate::requirements::tool::Reply>()),
             "read_source" => Some(result_schema::<SourceReply>()),
             "find_symbol" => Some(result_schema::<SymbolReply>()),
             "search_source" => Some(result_schema::<SourceMatches>()),
@@ -1142,6 +1149,14 @@ impl Core {
                 let args: crate::motion_tests::Control = parse(arguments)?;
                 Ok(json!(
                     self.control_motion_tests(&context.actor, args).await?
+                ))
+            }
+            "control_requirements" => {
+                // No approve command exists here: approval is user-only
+                // (`Core::approve_requirement`, a desktop command).
+                let args: crate::requirements::tool::Control = parse(arguments)?;
+                Ok(json!(
+                    self.control_requirements(&context.actor, args).await?
                 ))
             }
             "check_interference" => {

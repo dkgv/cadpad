@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const MAX_BYTES: usize = 8 * 1024 * 1024;
-type Catalog = BTreeMap<String, Saved>;
+pub(crate) type Catalog = BTreeMap<String, Saved>;
 fn invalid(message: impl Into<String>) -> Error {
     Error::domain("INVALID_MOTION_TEST", message)
 }
@@ -95,9 +95,40 @@ pub struct Run {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Saved {
+pub struct SavedTest {
     pub definition: Definition,
     pub last_run: Option<Run>,
+}
+/// One entry of the project catalog. Motion tests and compiled requirements
+/// share the catalog (one CAS fingerprint, one archive, one Save/Open path).
+/// Test entries serialize exactly as before; requirement entries carry
+/// `kind: "requirement"`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+#[allow(clippy::large_enum_variant)] // Test entries are the long-standing shape; keep their layout.
+pub enum Saved {
+    Test(SavedTest),
+    Requirement(Box<crate::requirements::storage::RequirementEntry>),
+}
+impl Saved {
+    pub fn test(&self) -> Option<&SavedTest> {
+        match self {
+            Saved::Test(test) => Some(test),
+            Saved::Requirement(_) => None,
+        }
+    }
+    pub fn test_mut(&mut self) -> Option<&mut SavedTest> {
+        match self {
+            Saved::Test(test) => Some(test),
+            Saved::Requirement(_) => None,
+        }
+    }
+    pub fn requirement(&self) -> Option<&crate::requirements::storage::RequirementEntry> {
+        match self {
+            Saved::Requirement(entry) => Some(entry),
+            Saved::Test(_) => None,
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CheckReview {
@@ -208,7 +239,7 @@ pub fn engine() -> String {
         })
         .clone()
 }
-fn fingerprint<T: Serialize>(value: &T) -> Result<String> {
+pub(crate) fn fingerprint<T: Serialize>(value: &T) -> Result<String> {
     Ok(portable::bytes_hash(&serde_json::to_vec(value)?))
 }
 fn direction(value: [f64; 3]) -> Result<DVec3> {
@@ -545,19 +576,25 @@ pub(crate) fn catalog_fingerprint(catalog: &Catalog) -> Result<Option<String>> {
     }
 }
 pub(crate) fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
-    if catalog.len() > 16 {
+    if catalog.values().filter(|saved| saved.test().is_some()).count() > 16 {
         return Err(invalid("At most 16 saved motion tests"));
     }
+    crate::requirements::storage::check_count(catalog)?;
     for (id, saved) in catalog {
-        if id.is_empty() || id.len() > 120 || id.chars().any(char::is_control) {
-            return Err(invalid("Invalid test ID"));
+        match saved {
+            Saved::Test(test) => {
+                if id.is_empty() || id.len() > 120 || id.chars().any(char::is_control) {
+                    return Err(invalid("Invalid test ID"));
+                }
+                test.definition.validate()?;
+            }
+            Saved::Requirement(entry) => entry.validate(id)?,
         }
-        saved.definition.validate()?;
     }
     let bytes = serde_json::to_vec(catalog)?;
     if bytes.len() > MAX_BYTES {
         return Err(invalid(
-            "Motion tests exceed 8 MiB; delete a test or shorten traces",
+            "Motion tests and requirements exceed 8 MiB; delete one or shorten traces",
         ));
     }
     Ok(bytes)
@@ -580,7 +617,10 @@ pub(crate) fn load(root: &std::path::Path, digest: Option<&str>) -> Result<Catal
     // Imported outcomes remain historical. A fresh CAD build/run is necessary
     // before replay; do not trust imported poses or an asserted pass status.
     for saved in catalog.values_mut() {
-        saved.last_run = None;
+        match saved {
+            Saved::Test(test) => test.last_run = None,
+            Saved::Requirement(entry) => entry.mark_imported(),
+        }
     }
     encode(&catalog)?;
     Ok(catalog)
@@ -657,8 +697,10 @@ impl Core {
                     continue;
                 }
                 let mut saved = saved.clone();
-                if saved.definition.model.is_none() {
-                    saved.definition.model = view.model.clone();
+                if let Some(test) = saved.test_mut()
+                    && test.definition.model.is_none()
+                {
+                    test.definition.model = view.model.clone();
                 }
                 next.insert(id.clone(), saved);
             }
@@ -775,6 +817,58 @@ impl Core {
             .clone())
     }
 
+    /// Owner workspace and current catalog, for requirement operations that
+    /// share this catalog (compiled requirements, `requirements::storage`).
+    pub(crate) async fn requirement_catalog(
+        &self,
+        actor: &str,
+        workspace_id: &str,
+    ) -> Result<(String, Catalog)> {
+        let addressed = self.requirement_view(workspace_id).await?;
+        self.adopt_view_requirements(&addressed, actor).await?;
+        let catalog = self.catalog(&addressed.owner).await?;
+        Ok((addressed.owner, catalog))
+    }
+    /// Replace the owner's catalog if it still has the `expected` fingerprint.
+    pub(crate) async fn commit_requirement_catalog(
+        &self,
+        actor: &str,
+        owner: &str,
+        workspace_id: &str,
+        expected: &str,
+        next: &Catalog,
+    ) -> Result<()> {
+        encode(next)?;
+        let mut workspaces = self.workspace(owner).await?;
+        self.ensure_actor_active(actor)?;
+        let ws = workspaces
+            .get_mut(owner)
+            .ok_or_else(|| invalid("Unknown workspace"))?;
+        if fingerprint(&ws.stored.motion_tests)? != expected {
+            return Err(Error::domain(
+                "REVISION_CONFLICT",
+                "Requirements changed; list and review before retrying",
+            ));
+        }
+        let mut stored = ws.stored.clone();
+        stored.motion_tests = next.clone();
+        self.persist(&stored).await?;
+        ws.stored = stored;
+        drop(workspaces);
+        for workspace_id in std::collections::BTreeSet::from([owner, workspace_id]) {
+            for kind in ["motion_tests_changed", "requirements_changed"] {
+                let _ = self.activity.send(crate::events::Activity {
+                    workspace_id: workspace_id.to_owned(),
+                    kind: kind.into(),
+                    job: None,
+                    actor: Some(actor.into()),
+                    tool: Some("control_requirements".into()),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub async fn control_motion_tests(&self, actor: &str, args: Control) -> Result<Reply> {
         let _memory = self.pin_workspace(&args.workspace_id).await?;
         use crate::motion_test_runs::{CancelOnDrop, Lease};
@@ -816,6 +910,7 @@ impl Core {
             }
             let saved = catalog
                 .get(&test_id)
+                .and_then(Saved::test)
                 .ok_or_else(|| invalid("Unknown test"))?;
             saved.definition.validate()?;
             check_target(&saved.definition, &addressed)?;
@@ -954,16 +1049,22 @@ impl Core {
                     definition.model = addressed.model.clone();
                 }
                 definition.validate()?;
+                if next.get(id).is_some_and(|saved| saved.test().is_none()) {
+                    return Err(invalid("ID belongs to a requirement, not a motion test"));
+                }
                 next.insert(
                     id.clone(),
-                    Saved {
+                    Saved::Test(SavedTest {
                         definition,
                         last_run: None,
-                    },
+                    }),
                 );
             }
             Command::Delete { id } => {
-                next.remove(id).ok_or_else(|| invalid("Unknown test"))?;
+                if next.get(id).and_then(Saved::test).is_none() {
+                    return Err(invalid("Unknown test"));
+                }
+                next.remove(id);
             }
             Command::Run { id } => {
                 let lease = lease
@@ -975,6 +1076,7 @@ impl Core {
                 }
                 let definition = next
                     .get(id)
+                    .and_then(Saved::test)
                     .ok_or_else(|| invalid("Unknown test"))?
                     .definition
                     .clone();
@@ -1006,7 +1108,10 @@ impl Core {
                 })
                 .await
                 .map_err(|_| invalid("Simulation test task failed"))??;
-                next.get_mut(id).unwrap().last_run = Some(run);
+                next.get_mut(id)
+                    .and_then(Saved::test_mut)
+                    .ok_or_else(|| invalid("Unknown test"))?
+                    .last_run = Some(run);
             }
             Command::StartRun { .. } | Command::CancelRun { .. } => {
                 return Err(invalid("Invalid internal simulation operation"));
@@ -1059,7 +1164,10 @@ impl Core {
             expected_pose_version,
         } = &args.command
         {
-            let saved = next.get(id).ok_or_else(|| invalid("Unknown test"))?;
+            let saved = next
+                .get(id)
+                .and_then(Saved::test)
+                .ok_or_else(|| invalid("Unknown test"))?;
             check_target(&saved.definition, &addressed)?;
             let run = saved
                 .last_run
@@ -1281,6 +1389,7 @@ fn reply(
 ) -> Result<Reply> {
     let tests = catalog
         .iter()
+        .filter_map(|(id, saved)| Some((id, saved.test()?)))
         .map(|(id, saved)| {
             let outcome = saved.last_run.as_ref().map(|run| run.outcome.clone());
             let review = test_review(&saved.definition, outcome.as_ref());

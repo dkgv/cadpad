@@ -134,11 +134,9 @@ impl WorkspaceSnapshot {
 
 // -------------------------------------------------------------------- adapters
 //
-// These read the JSON core already produces. Wiring them to a live workspace
-// (calling `project_source_catalog`, then `open_project_model` per catalog
-// model and passing each `get_project` reply here) is the remaining TODO: it
-// needs one worker build per model, which belongs with the run lifecycle
-// (P1.40 link from a fresh build).
+// These read the JSON core already produces. `Core::snapshot_for_workspace`
+// (in `dispatch.rs`) wires them to a live workspace: the project source
+// catalog plus one built model view per model.
 
 /// Models in the project source catalog JSON
 /// (`Core::project_source_catalog`: `files[].builders[]`). Only available
@@ -176,8 +174,9 @@ fn quantity_from(value: f64, unit: Option<&str>) -> Quantity {
 
 /// A built model from a `get_project` reply (`model.parts`, `model.parameters`,
 /// `mechanism.joints`). Parts without a verified geometry fingerprint get an
-/// empty hash. Function names and constants are not in that reply yet: they
-/// stay `None` and empty.
+/// empty hash. Builder function names, feature kinds and constants come from
+/// the worker's `builder_function`, `feature_kinds` and `constants` fields and
+/// are `None`/placeholder/empty for revisions built before those existed.
 pub fn built_from_project(project: &Value) -> Result<BuiltModel, String> {
     let model = &project["model"];
     if !model["parts"].is_array() {
@@ -204,19 +203,46 @@ pub fn built_from_project(project: &Value) -> Result<BuiltModel, String> {
             source: p["source"]["file"].as_str().map(|file| SourceInfo {
                 file: file.to_string(),
                 line: p["source"]["line"].as_u64().unwrap_or(0),
-                function: None,
+                function: p["builder_function"].as_str().map(str::to_string),
             }),
         });
         for (feature, ids) in p["features"].as_object().into_iter().flatten() {
+            let kind = &p["feature_kinds"][feature.as_str()];
+            let listed = ids.as_array().map_or(0, |a| a.len() as u64);
             built.features.push(FeatureInfo {
                 part: name.to_string(),
                 name: feature.clone(),
-                // The published feature record doesn't say face or edge yet.
-                entity: EntityKind::Face,
-                count: ids.as_array().map_or(0, |a| a.len() as u64),
-                hash: String::new(),
+                // Older builds don't say face or edge; a mixed selection is
+                // reported as faces (the count still covers every entity).
+                entity: match kind["entity"].as_str() {
+                    Some("edge") => EntityKind::Edge,
+                    _ => EntityKind::Face,
+                },
+                count: kind["count"].as_u64().unwrap_or(listed),
+                hash: kind["hash"].as_str().unwrap_or_default().to_string(),
             });
         }
+    }
+    // Constants are raw numbers from the entry file. Their unit is the
+    // author's, normally millimetres, but counts and ratios are common too, so
+    // each value is offered as both.
+    for c in model["constants"].as_array().into_iter().flatten() {
+        let Some(name) = c["name"].as_str() else {
+            continue;
+        };
+        let numbers: Vec<f64> = c["values"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_f64)
+            .collect();
+        built.constants.push(ConstantInfo {
+            name: name.to_string(),
+            values: numbers
+                .iter()
+                .flat_map(|v| [Quantity::new(*v, Unit::Mm), Quantity::new(*v, Unit::One)])
+                .collect(),
+        });
     }
     let params: BTreeMap<_, _> = model["parameters"]
         .as_object()
@@ -312,10 +338,13 @@ mod tests {
             "model": {
                 "parts": [
                     {"name": "door", "geometry_fingerprint": {"format": "x", "sha256": "abc"},
-                     "source": {"file": "cabinet.py", "line": 12}, "features": {"hinge": ["f1", "f2"]}},
+                     "source": {"file": "cabinet.py", "line": 12}, "builder_function": "make_door",
+                     "features": {"hinge": ["f1", "f2"], "rim": ["edge:0", "edge:1", "edge:2"]},
+                     "feature_kinds": {"hinge": {"entity": "face", "count": 2, "hash": "fh"},
+                                       "rim": {"entity": "edge", "count": 3, "hash": "eh"}}},
                     {"name": "frame"}],
                 "parameters": {"door_angle": {"value": 0.0, "unit": "deg", "minimum": 0.0, "maximum": 130.0},
-                               "count": 3.0}},
+                               "count": 3.0}, "constants": [{"name": "WIDTH", "values": [30.0]}]},
             "mechanism": {"joints": [{"id": "hinge", "limits": [0.0, 2.0]}]}});
         let b = built_from_project(&project).unwrap();
         assert_eq!(b.fingerprint, "r1");
@@ -331,7 +360,23 @@ mod tests {
             Quantity::new(3.0, Unit::One)
         );
         assert_eq!(b.joint("hinge").unwrap().limits, Some([0.0, 2.0]));
-        assert_eq!(b.features[0].count, 2);
+        assert_eq!(
+            b.part("door").unwrap().source.as_ref().unwrap().function,
+            Some("make_door".into())
+        );
+        let feature = |n: &str| b.features.iter().find(|f| f.name == n).unwrap();
+        assert_eq!(feature("hinge").count, 2);
+        assert_eq!(
+            (feature("hinge").entity, feature("hinge").hash.as_str()),
+            (EntityKind::Face, "fh")
+        );
+        assert_eq!(
+            (feature("rim").entity, feature("rim").count),
+            (EntityKind::Edge, 3)
+        );
+        let width = b.constants.iter().find(|c| c.name == "WIDTH").unwrap();
+        assert!(width.values.contains(&Quantity::new(30.0, Unit::Mm)));
+        assert!(width.values.contains(&Quantity::new(30.0, Unit::One)));
         assert!(built_from_project(&json!({})).is_err());
     }
 
