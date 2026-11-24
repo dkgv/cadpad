@@ -194,6 +194,43 @@ pub async fn motion_tests(
         .map_err(error)
 }
 
+/// The user's view of the requirement catalog: list, compile, save, library
+/// (the commands agents have, run as the local user).
+#[tauri::command]
+pub async fn requirements(
+    core: State<'_, Core>,
+    request: cadpad_core::requirements::tool::Control,
+) -> Result<Value, Value> {
+    core.control_requirements("local-user", request)
+        .await
+        .map(|reply| json!(reply))
+        .map_err(error)
+}
+
+/// User-only. Not an agent or MCP tool: nothing in `tools::dispatch` reaches it.
+#[tauri::command]
+pub async fn approve_requirement(
+    core: State<'_, Core>,
+    request: cadpad_core::requirements::storage::ApproveRequest,
+) -> Result<Value, Value> {
+    core.approve_requirement(request)
+        .await
+        .map(|reply| json!(reply))
+        .map_err(error)
+}
+
+/// User-only removal of a requirement and its approved version.
+#[tauri::command]
+pub async fn delete_requirement(
+    core: State<'_, Core>,
+    request: cadpad_core::requirements::storage::DeleteRequest,
+) -> Result<Value, Value> {
+    core.delete_requirement(request)
+        .await
+        .map(|reply| json!(reply))
+        .map_err(error)
+}
+
 #[tauri::command]
 pub async fn clean_cache(core: State<'_, Core>) -> Result<Value, Value> {
     core.collect_cache()
