@@ -79,6 +79,17 @@ pub struct SourceLocation {
     pub file: String,
     pub line: u64,
 }
+/// Explicit fastener properties published by the source model. Dimensions are
+/// metadata supplied by the author; size labels never imply standard values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FastenerMetadata {
+    pub kind: String,
+    pub size: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mates: Option<Vec<String>>,
+}
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct PartProperties {
     pub id: String,
@@ -105,6 +116,9 @@ pub struct PartProperties {
     /// Project function whose `show()` published this part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builder_function: Option<String>,
+    /// Explicit fastener metadata, when supplied to `show()`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fastener: Option<FastenerMetadata>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct FeatureKind {
@@ -220,4 +234,26 @@ pub struct InterferenceReply {
     pub pose_version: u64,
     pub proxy: Option<collision::Report>,
     pub exact: Option<ExactInterference>,
+}
+
+#[cfg(test)]
+mod fastener_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn part_properties_round_trip_explicit_fastener_metadata() {
+        let value = json!({
+            "id": "part-id", "instance_id": "bolt", "name": "bolt", "position": [0,0,0],
+            "volume": 10.0, "area": 20.0, "shape_kind": "Solid", "face_count": 6,
+            "edge_count": 12, "features": {}, "feature_kinds": {}, "accuracy": "exact",
+            "units": "mm", "geometry_fingerprint": {"format": "brep", "sha256": "hash"},
+            "dimensions": [], "fastener": {"kind": "bolt", "size": "M8", "length": 20.0, "mates": ["plate"]}
+        });
+        let part: PartProperties = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(part).unwrap()["fastener"],
+            value["fastener"]
+        );
+    }
 }

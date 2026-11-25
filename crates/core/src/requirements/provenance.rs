@@ -326,6 +326,7 @@ mod tests {
                         name: "door".into(),
                         geometry_hash: "h".into(),
                         source: None,
+                        fastener: None,
                     }],
                     params: vec![ParamInfo {
                         name: "door_angle".into(),

@@ -228,6 +228,7 @@ mod tests {
             name: n.into(),
             geometry_hash: "h".into(),
             source: None,
+            fastener: None,
         };
         let model = |entry: &str, b: &str| ModelSnapshot {
             model: ModelRef {

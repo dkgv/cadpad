@@ -103,6 +103,8 @@ pub struct Part {
     pub mass_kg: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<geometry::SourceLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fastener: Option<geometry::FastenerMetadata>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -235,4 +237,27 @@ pub struct Project {
 pub enum Reply {
     Listing(WorkspaceListing),
     Project(Box<Project>),
+}
+
+#[cfg(test)]
+mod fastener_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn project_part_round_trip_preserves_fastener_metadata() {
+        let value = json!({
+            "id": "part-id", "instance_id": "bolt", "name": "bolt", "position": [0,0,0],
+            "bounds": {"min": [0,0,0], "max": [1,1,1], "size": [1,1,1]},
+            "volume": 1.0, "area": 6.0, "shape_kind": "Solid", "face_count": 6,
+            "edge_count": 12, "features": {}, "accuracy": "exact", "units": "mm",
+            "geometry_fingerprint": {"format": "brep", "sha256": "hash"},
+            "dimensions": [], "fastener": {"kind": "bolt", "size": "M8", "length": 20.0, "mates": ["plate"]}
+        });
+        let part: Part = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(part).unwrap()["fastener"],
+            value["fastener"]
+        );
+    }
 }

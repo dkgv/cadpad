@@ -31,6 +31,9 @@ pub struct PartInfo {
     pub geometry_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceInfo>,
+    /// Explicit fastener properties published by the worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fastener: Option<crate::geometry::FastenerMetadata>,
 }
 
 /// A model parameter with its declared bounds.
@@ -205,6 +208,15 @@ pub fn built_from_project(project: &Value) -> Result<BuiltModel, String> {
                 line: p["source"]["line"].as_u64().unwrap_or(0),
                 function: p["builder_function"].as_str().map(str::to_string),
             }),
+            fastener: if p["fastener"].is_null() {
+                None
+            } else {
+                Some(
+                    serde_json::from_value(p["fastener"].clone()).map_err(|error| {
+                        format!("part {name} has invalid fastener metadata: {error}")
+                    })?,
+                )
+            },
         });
         for (feature, ids) in p["features"].as_object().into_iter().flatten() {
             let kind = &p["feature_kinds"][feature.as_str()];
@@ -338,6 +350,7 @@ mod tests {
             "model": {
                 "parts": [
                     {"name": "door", "geometry_fingerprint": {"format": "x", "sha256": "abc"},
+                     "fastener": {"kind": "bolt", "size": "M8", "length": 20.0, "mates": ["frame"]},
                      "source": {"file": "cabinet.py", "line": 12}, "builder_function": "make_door",
                      "features": {"hinge": ["f1", "f2"], "rim": ["edge:0", "edge:1", "edge:2"]},
                      "feature_kinds": {"hinge": {"entity": "face", "count": 2, "hash": "fh"},
@@ -350,6 +363,10 @@ mod tests {
         assert_eq!(b.fingerprint, "r1");
         assert_eq!(b.part("door").unwrap().geometry_hash, "abc");
         assert_eq!(b.part("door").unwrap().source.as_ref().unwrap().line, 12);
+        assert_eq!(
+            b.part("door").unwrap().fastener.as_ref().unwrap().kind,
+            "bolt"
+        );
         assert_eq!(b.part("frame").unwrap().geometry_hash, "");
         assert_eq!(
             b.param("door_angle").unwrap().max,

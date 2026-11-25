@@ -53,21 +53,21 @@ def import_named_step(path, root_name="imported"):
             XCAFDoc_ShapeTool.GetReferredShape_s(label, referred)
         sequence = TDF_LabelSequence()
         if XCAFDoc_ShapeTool.GetComponents_s(referred, sequence):
-            return [(sequence.Value(i), referred) for i in range(1, sequence.Length() + 1)]
+            return [sequence.Value(i) for i in range(1, sequence.Length() + 1)]
         return []
 
-    def build(label, display_name, used):
+    def build(label, display_name):
         refs = children(label)
         if refs:
             assembly = cq.Assembly(name=display_name)
             child_names = set()
-            for index, (component, _definition) in enumerate(refs, 1):
+            for index, component in enumerate(refs, 1):
                 definition = component
                 if XCAFDoc_ShapeTool.IsComponent_s(component):
                     definition = TDF_Label()
                     XCAFDoc_ShapeTool.GetReferredShape_s(component, definition)
                 child_name = _unique_name(_label_name(component, _label_name(definition, f"part_{index}")), child_names)
-                child = build(definition, child_name, child_names)
+                child = build(definition, child_name)
                 loc = cq.Location(XCAFDoc_ShapeTool.GetLocation_s(component)) if XCAFDoc_ShapeTool.IsComponent_s(component) else cq.Location()
                 assembly.add(child, name=child_name)
                 assembly.children[-1].loc = loc
@@ -83,11 +83,11 @@ def import_named_step(path, root_name="imported"):
 
     if roots.Length() == 1:
         label = roots.Value(1)
-        return build(label, _label_name(label, root_name or "part_1"), set())
+        return build(label, _label_name(label, root_name or "part_1"))
     result = cq.Assembly(name="__step_root__")
     used = set()
     for index in range(1, roots.Length() + 1):
         label = roots.Value(index)
         name = _unique_name(_label_name(label, root_name if index == 1 else f"part_{index}"), used)
-        result.add(build(label, name, set()), name=name)
+        result.add(build(label, name), name=name)
     return result

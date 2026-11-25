@@ -683,6 +683,7 @@ mod tests {
             name: n.into(),
             geometry_hash: format!("h-{n}"),
             source: None,
+            fastener: None,
         };
         WorkspaceSnapshot {
             models: vec![
