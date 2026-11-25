@@ -109,24 +109,28 @@ pub struct SavedTest {
 pub enum Saved {
     Test(SavedTest),
     Requirement(Box<crate::requirements::storage::RequirementEntry>),
+    ProjectSettings(crate::requirements::settings::ProjectSettingsRecord),
 }
 impl Saved {
     pub fn test(&self) -> Option<&SavedTest> {
         match self {
             Saved::Test(test) => Some(test),
             Saved::Requirement(_) => None,
+            Saved::ProjectSettings(_) => None,
         }
     }
     pub fn test_mut(&mut self) -> Option<&mut SavedTest> {
         match self {
             Saved::Test(test) => Some(test),
             Saved::Requirement(_) => None,
+            Saved::ProjectSettings(_) => None,
         }
     }
     pub fn requirement(&self) -> Option<&crate::requirements::storage::RequirementEntry> {
         match self {
             Saved::Requirement(entry) => Some(entry),
             Saved::Test(_) => None,
+            Saved::ProjectSettings(_) => None,
         }
     }
 }
@@ -580,6 +584,14 @@ pub(crate) fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
         return Err(invalid("At most 16 saved motion tests"));
     }
     crate::requirements::storage::check_count(catalog)?;
+    if catalog
+        .values()
+        .filter(|saved| matches!(saved, Saved::ProjectSettings(_)))
+        .count()
+        > 1
+    {
+        return Err(invalid("At most one project settings record"));
+    }
     for (id, saved) in catalog {
         match saved {
             Saved::Test(test) => {
@@ -589,6 +601,22 @@ pub(crate) fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
                 test.definition.validate()?;
             }
             Saved::Requirement(entry) => entry.validate(id)?,
+            Saved::ProjectSettings(settings) => {
+                if !id.starts_with(crate::requirements::settings::CATALOG_SETTINGS_PREFIX) {
+                    return Err(invalid("Invalid project settings catalog key"));
+                }
+                settings
+                    .project_settings
+                    .validate()
+                    .into_iter()
+                    .next()
+                    .map_or(Ok(()), |d| {
+                        Err(Error::domain(
+                            "INVALID_REQUIREMENT",
+                            format!("Invalid project settings: {}", d.message),
+                        ))
+                    })?
+            }
         }
     }
     let bytes = serde_json::to_vec(catalog)?;
@@ -620,6 +648,7 @@ pub(crate) fn load(root: &std::path::Path, digest: Option<&str>) -> Result<Catal
         match saved {
             Saved::Test(test) => test.last_run = None,
             Saved::Requirement(entry) => entry.mark_imported(),
+            Saved::ProjectSettings(_) => {}
         }
     }
     encode(&catalog)?;

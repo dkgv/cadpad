@@ -40,7 +40,7 @@ use super::relink::{BuildIndex, Effect, Relink, RelinkReport, relink};
 use super::settings::ProjectSettings;
 use super::snapshot::WorkspaceSnapshot;
 use super::status::RequirementStatus;
-use super::storage::{Approved, RequirementEntry, project_settings};
+use super::storage::{Approved, RequirementEntry};
 use super::worker_plan::{
     ChunkOptions, ChunkRequest, EvalError, PlanExecutor, RawChunk, build_requests,
     parse_chunk_response, run_plan,
@@ -233,6 +233,7 @@ pub struct Prepared {
     /// Subject model key to the fingerprint of the build seen now.
     pub subjects: BTreeMap<String, String>,
     pub snapshot: WorkspaceSnapshot,
+    pub settings: ProjectSettings,
 }
 
 pub(crate) struct ResultGuard<'a> {
@@ -398,6 +399,7 @@ pub fn prepare(
         views,
         subjects,
         snapshot: snap.clone(),
+        settings: settings.clone(),
     };
     if build_failed || report.decision == Effect::NeedsReview {
         return out;
@@ -743,8 +745,9 @@ impl Core {
         actor: &str,
         workspace: &str,
         id: &str,
-    ) -> Result<(String, RequirementEntry)> {
+    ) -> Result<(String, RequirementEntry, ProjectSettings)> {
         let (owner, catalog) = self.requirement_catalog(actor, workspace).await?;
+        let settings = super::storage::settings_in(&catalog);
         let entry = catalog
             .get(id)
             .and_then(Saved::requirement)
@@ -756,7 +759,7 @@ impl Core {
                 format!("Requirement '{id}' is a draft and has to be approved first"),
             ));
         }
-        Ok((owner, entry))
+        Ok((owner, entry, settings))
     }
 
     pub(super) async fn prepare_requirement(
@@ -766,7 +769,7 @@ impl Core {
         id: &str,
         cancel: &watch::Receiver<bool>,
     ) -> Result<(String, Prepared, Option<Value>)> {
-        let (owner, entry) = self.approved_entry(actor, workspace, id).await?;
+        let (owner, entry, settings) = self.approved_entry(actor, workspace, id).await?;
         let approved = entry.approved.clone().expect("checked approved");
         let edited = entry.approval() == super::storage::Approval::EditedSinceApproval;
         if *cancel.borrow() {
@@ -780,7 +783,7 @@ impl Core {
                 (!models.is_empty()).then_some(models.as_slice()),
             )
             .await?;
-        let prepared = prepare(id, &approved, edited, &live, &project_settings());
+        let prepared = prepare(id, &approved, edited, &live, &settings);
         Ok((owner, prepared, entry.last_result))
     }
 
@@ -798,6 +801,14 @@ impl Core {
         for _ in 0..4 {
             let (owner, mut catalog) = self.requirement_catalog(actor, workspace).await?;
             let expected = fingerprint(&catalog)?;
+            if super::storage::settings_in(&catalog).content_hash()
+                != prepared.settings.content_hash()
+            {
+                return Err(Error::domain(
+                    "STALE_ENTITY",
+                    "Project requirements settings changed during the run; run it again",
+                ));
+            }
             let Some(Saved::Requirement(entry)) = catalog.get_mut(&prepared.id) else {
                 return Err(invalid("The requirement was deleted during the run"));
             };
@@ -845,7 +856,7 @@ impl Core {
         let Some(run) = prepared.run.clone() else {
             return Ok(Ok(None));
         };
-        let settings = project_settings();
+        let settings = prepared.settings.clone();
         let mut chunk = ChunkOptions::from_settings(&settings);
         chunk.workers = opts.workers;
         let views = prepared.views.clone();
@@ -948,7 +959,7 @@ impl Core {
             self.store_requirement_result(actor, workspace, &prepared, &cancel, make)
                 .await?
         } else {
-            let (_, entry) = self.approved_entry(actor, workspace, &prepared.id).await?;
+            let (_, entry, _) = self.approved_entry(actor, workspace, &prepared.id).await?;
             make(entry.last_result.as_ref())
         };
         Ok(RunOutcome { result, eval })
@@ -1035,7 +1046,7 @@ impl Core {
         id: &str,
         background: bool,
     ) -> Result<Value> {
-        let (owner, _) = self.approved_entry(actor, workspace_id, id).await?;
+        let (owner, _, _) = self.approved_entry(actor, workspace_id, id).await?;
         let (lease, receive) = {
             let workspace = workspace_id.to_owned();
             let actor_name = actor.to_owned();
@@ -1149,13 +1160,12 @@ impl Core {
     ) -> Result<AutoRunReport> {
         self.ensure_actor_active(actor)?;
         let _memory = self.pin_workspace(workspace_id).await?;
-        let settings = project_settings();
-        let budget = f64::from(settings.auto_run_budget_secs);
+        let (owner, catalog) = self.requirement_catalog(actor, workspace_id).await?;
+        let settings = super::storage::settings_in(&catalog);
         let mut report = AutoRunReport {
             budget_s: settings.auto_run_budget_secs,
             ..Default::default()
         };
-        let (owner, catalog) = self.requirement_catalog(actor, workspace_id).await?;
         let model = self.requirement_view_model(workspace_id).await?;
         let ids: Vec<String> = catalog
             .iter()
@@ -1183,6 +1193,8 @@ impl Core {
                     continue;
                 }
             };
+            let budget = f64::from(prepared.settings.auto_run_budget_secs);
+            report.budget_s = prepared.settings.auto_run_budget_secs;
             let pool = pool_size(self, None);
             let Some(estimate) = estimate_cost_s(&prepared, previous.as_ref(), pool) else {
                 // Cannot evaluate: store needs_review / error without a run.

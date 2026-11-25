@@ -38,11 +38,32 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::domain("INVALID_REQUIREMENT", message)
 }
 
-/// Settings every requirement result depends on. Project-stored settings are
-/// not wired yet, so this is the default set.
-// TODO: read the project's stored settings once they have a home.
+/// Default settings used by projects without an explicit settings record.
 pub fn project_settings() -> ProjectSettings {
     ProjectSettings::default()
+}
+
+pub(crate) fn settings_in(catalog: &Catalog) -> ProjectSettings {
+    catalog
+        .values()
+        .find_map(|saved| match saved {
+            Saved::ProjectSettings(record) => Some(record.project_settings.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn settings_key(catalog: &Catalog) -> String {
+    (0u32..)
+        .map(|n| {
+            if n == 0 {
+                super::settings::CATALOG_SETTINGS_PREFIX.to_owned()
+            } else {
+                format!("{}_{n}", super::settings::CATALOG_SETTINGS_PREFIX)
+            }
+        })
+        .find(|key| !catalog.contains_key(key))
+        .expect("catalog has finite keys")
 }
 
 /// Discriminator that keeps requirement entries distinguishable from motion
@@ -84,6 +105,7 @@ pub struct Approved {
     /// Library version the plan was compiled with; a change marks the
     /// requirement `needs_review`.
     pub library_version: String,
+    #[serde(default)]
     pub settings_hash: String,
 }
 
@@ -167,11 +189,16 @@ impl RequirementEntry {
     /// Status (spec §6.2) as far as storage can tell. `None`: approved and
     /// current but not run yet; the run lifecycle supplies the rest.
     pub fn status(&self) -> Option<RequirementStatus> {
+        self.status_with_settings_hash(None)
+    }
+
+    fn status_with_settings_hash(&self, settings_hash: Option<&str>) -> Option<RequirementStatus> {
         let Some(approved) = &self.approved else {
             return Some(RequirementStatus::Draft);
         };
         if self.approval() == Approval::EditedSinceApproval
             || approved.library_version != super::library_version()
+            || settings_hash.is_some_and(|hash| approved.settings_hash != hash)
         {
             return Some(RequirementStatus::NeedsReview);
         }
@@ -305,9 +332,15 @@ impl RequirementInfo {
 }
 
 pub fn infos(catalog: &Catalog) -> Vec<RequirementInfo> {
+    let current_settings_hash = settings_in(catalog).content_hash();
     catalog
         .iter()
-        .filter_map(|(id, saved)| Some(RequirementInfo::from_entry(id, saved.requirement()?)))
+        .filter_map(|(id, saved)| {
+            let entry = saved.requirement()?;
+            let mut info = RequirementInfo::from_entry(id, entry);
+            info.status = entry.status_with_settings_hash(Some(&current_settings_hash));
+            Some(info)
+        })
         .collect()
 }
 
@@ -334,15 +367,67 @@ pub struct DeleteRequest {
     pub id: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsRequest {
+    pub workspace_id: String,
+    pub expected_catalog: Option<String>,
+    pub settings: ProjectSettings,
+}
+
 /// Reply of the user-only commands: the new catalog fingerprint and list.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct CatalogReply {
     pub catalog: String,
     pub project_workspace: String,
+    pub settings: ProjectSettings,
     pub requirements: Vec<RequirementInfo>,
 }
 
 impl Core {
+    /// User-only update to project-level computational settings. The CAS
+    /// fingerprint covers the settings record and prevents stale writes.
+    pub async fn set_requirement_settings(&self, request: SettingsRequest) -> Result<CatalogReply> {
+        let diagnostics = request.settings.validate();
+        if !diagnostics.is_empty() {
+            return Err(Error::domain(
+                "INVALID_REQUIREMENT_SETTINGS",
+                serde_json::to_string(&diagnostics)?,
+            ));
+        }
+        let _memory = self.pin_workspace(&request.workspace_id).await?;
+        let (owner, mut catalog, current) = self
+            .load_requirements(
+                USER,
+                &request.workspace_id,
+                request.expected_catalog.as_deref(),
+            )
+            .await?;
+        let _owner_memory = self.pin_workspace(&owner).await?;
+        let key = catalog
+            .iter()
+            .find_map(|(key, saved)| {
+                matches!(saved, Saved::ProjectSettings(_)).then(|| key.clone())
+            })
+            .unwrap_or_else(|| settings_key(&catalog));
+        catalog.insert(
+            key,
+            Saved::ProjectSettings(super::settings::ProjectSettingsRecord {
+                project_settings: request.settings,
+            }),
+        );
+        self.commit_requirement_catalog(
+            USER,
+            &owner,
+            &request.workspace_id,
+            &current,
+            &catalog,
+            None,
+        )
+        .await?;
+        reply(owner, &catalog)
+    }
+
     async fn load_requirements(
         &self,
         actor: &str,
@@ -383,6 +468,9 @@ impl Core {
             Some(Saved::Test(_)) => {
                 return Err(invalid("ID belongs to a motion test, not a requirement"));
             }
+            Some(Saved::ProjectSettings(_)) => {
+                return Err(invalid("ID is reserved for project settings"));
+            }
             None => {
                 catalog.insert(
                     id,
@@ -416,7 +504,7 @@ impl Core {
             .ok_or_else(|| invalid("Unknown requirement"))?
             .draft
             .clone();
-        let settings = project_settings();
+        let settings = settings_in(&catalog);
         let snapshot = snapshot_for(self, &request.workspace_id, USER).await?;
         let compiled = compile(&draft, &snapshot, &settings);
         if compiled.has_errors() {
@@ -516,6 +604,7 @@ pub(crate) fn reply(owner: String, catalog: &Catalog) -> Result<CatalogReply> {
     Ok(CatalogReply {
         catalog: fingerprint(catalog)?,
         project_workspace: owner,
+        settings: settings_in(catalog),
         requirements: infos(catalog),
     })
 }
@@ -595,6 +684,16 @@ mod tests {
               "checks":[{"type":"displacement","body":"block","direction":[1,0,0],"minimum_mm":0.1}]},
             "last_run": null})).unwrap();
         let mut catalog = BTreeMap::new();
+        let custom_settings = ProjectSettings {
+            max_states: 128,
+            ..ProjectSettings::default()
+        };
+        catalog.insert(
+            super::super::settings::CATALOG_SETTINGS_PREFIX.to_owned(),
+            Saved::ProjectSettings(super::super::settings::ProjectSettingsRecord {
+                project_settings: custom_settings.clone(),
+            }),
+        );
         catalog.insert("t".to_owned(), Saved::Test(test));
         catalog.insert(id.clone(), Saved::Requirement(Box::new(entry)));
         let bytes = encode(&catalog).unwrap();
@@ -608,6 +707,7 @@ mod tests {
         )
         .unwrap();
         let loaded = load(dir.path(), Some(&digest)).unwrap();
+        assert_eq!(settings_in(&loaded), custom_settings);
         assert!(loaded["t"].test().is_some());
         let entry = loaded[&id].requirement().unwrap();
         assert!(entry.rerun_required);
@@ -618,6 +718,56 @@ mod tests {
         let value = serde_json::to_value(&catalog).unwrap();
         assert!(value["t"].get("kind").is_none());
         assert_eq!(value[&id]["kind"], "requirement");
+    }
+
+    #[test]
+    fn settings_are_project_local_and_invalidate_approval_immediately() {
+        let c = compiled();
+        let mut entry = RequirementEntry::new_draft(&c);
+        approve(&mut entry, &c);
+        let approved_settings = ProjectSettings::default();
+        entry.approved.as_mut().unwrap().settings_hash = approved_settings.content_hash();
+        let mut first = Catalog::new();
+        first.insert(
+            c.requirement.id.clone(),
+            Saved::Requirement(Box::new(entry)),
+        );
+        assert_eq!(settings_in(&first), ProjectSettings::default());
+        assert_eq!(infos(&first)[0].status, None);
+
+        let second_settings = ProjectSettings {
+            max_states: 64,
+            ..ProjectSettings::default()
+        };
+        let mut second = Catalog::new();
+        second.insert(
+            super::super::settings::CATALOG_SETTINGS_PREFIX.to_owned(),
+            Saved::ProjectSettings(super::super::settings::ProjectSettingsRecord {
+                project_settings: second_settings.clone(),
+            }),
+        );
+        assert_eq!(settings_in(&second), second_settings);
+        assert_ne!(settings_in(&first), settings_in(&second));
+
+        first.insert(
+            super::super::settings::CATALOG_SETTINGS_PREFIX.to_owned(),
+            Saved::ProjectSettings(super::super::settings::ProjectSettingsRecord {
+                project_settings: second_settings,
+            }),
+        );
+        assert_eq!(
+            infos(&first)[0].status,
+            Some(RequirementStatus::NeedsReview)
+        );
+        let first_hash = fingerprint(&first).unwrap();
+        first.insert(
+            super::super::settings::CATALOG_SETTINGS_PREFIX.to_owned(),
+            Saved::ProjectSettings(super::super::settings::ProjectSettingsRecord {
+                project_settings: approved_settings,
+            }),
+        );
+        assert_ne!(fingerprint(&first).unwrap(), first_hash);
+        assert_eq!(infos(&first)[0].status, None);
     }
 
     #[test]

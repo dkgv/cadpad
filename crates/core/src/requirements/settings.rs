@@ -12,6 +12,16 @@ use crate::portable;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Reserved catalog record makes settings project-local, portable, and part of
+/// the same compare-and-swap as requirements and motion tests.
+pub const CATALOG_SETTINGS_PREFIX: &str = "__cadpad_project_settings_v1__";
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSettingsRecord {
+    pub project_settings: ProjectSettings,
+}
+
 /// Named defaults. Change values here only.
 pub mod defaults {
     /// Overlap tolerance ε in mm³: interference at or below this is "no
@@ -63,11 +73,21 @@ impl ProjectSettings {
             )),
             Ok(_) => {}
         }
-        if self.max_states == 0 {
+        if self.max_states == 0 || self.max_states > defaults::MAX_STATES {
             out.push(Diagnostic::new(
                 DiagnosticCode::ETypeRange,
                 "max_states",
-                "max_states must be at least 1",
+                "max_states must be between 1 and 512",
+            ));
+        }
+        if self.auto_run_budget_secs > 120
+            || self.pair_time_limit_secs == 0
+            || self.pair_time_limit_secs > 120
+        {
+            out.push(Diagnostic::new(
+                DiagnosticCode::ETypeRange,
+                "time_budget",
+                "auto-run budget must be 0–120 seconds and pair time limit must be 1–120 seconds",
             ));
         }
         out

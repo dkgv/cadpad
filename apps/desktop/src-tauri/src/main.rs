@@ -19,7 +19,7 @@ use agents::{
     connect_view, delete_requirement, disconnect_external, interference, joint_coordinate,
     mcp_settings, motion, motion_tests, playback, rebuild, repair_display, requirement_replay,
     close_requirement_replay,
-    requirements, set_selection, simulation,
+    requirements, set_requirement_settings, set_selection, simulation,
 };
 use cadpad_core::{Core, error_value, worker::WorkerConfig};
 use files::{
@@ -339,6 +339,7 @@ fn main() {
             motion_tests,
             requirements,
             approve_requirement,
+            set_requirement_settings,
             delete_requirement,
             requirement_replay,
             close_requirement_replay,

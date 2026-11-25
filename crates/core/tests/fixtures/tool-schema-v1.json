@@ -19582,6 +19582,47 @@
             ],
             "type": "object"
           },
+          "ProjectSettings": {
+            "additionalProperties": false,
+            "properties": {
+              "auto_run_budget_secs": {
+                "default": 10,
+                "description": "Auto-run time budget in seconds.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "max_states": {
+                "default": 512,
+                "description": "Most states per claim (`E_TYPE_STATES` above this).",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "overlap_tolerance": {
+                "$ref": "#/$defs/Quantity",
+                "default": {
+                  "unit": "mm3",
+                  "value": 0.001
+                },
+                "description": "Overlap tolerance ε; a volume."
+              },
+              "pair_time_limit_secs": {
+                "default": 20,
+                "description": "Per-pair time limit in seconds.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "overlap_tolerance",
+              "max_states",
+              "auto_run_budget_secs",
+              "pair_time_limit_secs"
+            ],
+            "type": "object"
+          },
           "Quantifier": {
             "description": "Quantifier over a state space. Clash and clearance rules default to\n`for_all` (result reports the worst state); `exists` reports a witness.",
             "enum": [
@@ -19589,6 +19630,24 @@
               "exists"
             ],
             "type": "string"
+          },
+          "Quantity": {
+            "additionalProperties": false,
+            "description": "A number with a unit. The unit is the one the author wrote; use\n[`Quantity::normalized`] for comparisons and evaluation.",
+            "properties": {
+              "unit": {
+                "$ref": "#/$defs/Unit"
+              },
+              "value": {
+                "format": "double",
+                "type": "number"
+              }
+            },
+            "required": [
+              "value",
+              "unit"
+            ],
+            "type": "object"
           },
           "Reply": {
             "properties": {
@@ -19622,10 +19681,14 @@
               },
               "run": {
                 "description": "Present for run and start_run."
+              },
+              "settings": {
+                "$ref": "#/$defs/ProjectSettings"
               }
             },
             "required": [
               "catalog",
+              "settings",
               "project_workspace",
               "requirements",
               "compiled",

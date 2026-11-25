@@ -219,6 +219,19 @@ pub async fn approve_requirement(
         .map_err(error)
 }
 
+/// User-only project computational settings. This route is not registered as
+/// an agent/MCP tool.
+#[tauri::command]
+pub async fn set_requirement_settings(
+    core: State<'_, Core>,
+    request: cadpad_core::requirements::storage::SettingsRequest,
+) -> Result<Value, Value> {
+    core.set_requirement_settings(request)
+        .await
+        .map(|reply| json!(reply))
+        .map_err(error)
+}
+
 /// User-only removal of a requirement and its approved version.
 #[tauri::command]
 pub async fn delete_requirement(

@@ -9,6 +9,7 @@ use super::library::{library, library_version, vague_table};
 use super::print::Print;
 use super::provenance::Downgrade;
 use super::run::RunInfo;
+use super::settings::ProjectSettings;
 use super::snapshot::{WorkspaceSnapshot, snapshot_from_values};
 use super::storage::{RequirementInfo, StoredHashes, project_settings, reply as catalog};
 use crate::motion_tests::Saved;
@@ -97,6 +98,7 @@ impl CompileReport {
 pub struct Reply {
     /// Catalog fingerprint; pass back as expected_catalog.
     pub catalog: String,
+    pub settings: ProjectSettings,
     /// Workspace that stores the project's catalog.
     pub project_workspace: String,
     pub requirements: Vec<RequirementInfo>,
@@ -178,12 +180,13 @@ pub(crate) async fn snapshot_for(
     Ok(snapshot_from_values(&catalog, &builds))
 }
 
-fn library_value() -> Value {
+fn library_value(settings: &ProjectSettings) -> Value {
     json!({
         "library_version": library_version(),
         "rules": library().rules,
         "primitives": library().primitives,
         "settings_defaults": project_settings(),
+        "settings": settings,
         "vague_words": vague_table(),
     })
 }
@@ -210,6 +213,7 @@ impl Core {
         let base = catalog(owner.to_owned(), catalog_now)?;
         Ok(Reply {
             catalog: base.catalog,
+            settings: super::storage::settings_in(catalog_now),
             project_workspace: base.project_workspace,
             requirements: with_runs(base.requirements, self.requirement_run_status(owner)),
             compiled,
@@ -260,12 +264,16 @@ impl Core {
                     .map(|r| json!(r));
                 self.requirement_reply(&owner, &current, None, None, run)
             }
-            Command::Library => {
-                self.requirement_reply(&owner, &current, None, Some(library_value()), None)
-            }
+            Command::Library => self.requirement_reply(
+                &owner,
+                &current,
+                None,
+                Some(library_value(&super::storage::settings_in(&current))),
+                None,
+            ),
             Command::Compile { ir } => {
                 let snapshot = snapshot_for(self, workspace_id, actor).await?;
-                let compiled = compile(&ir, &snapshot, &project_settings());
+                let compiled = compile(&ir, &snapshot, &super::storage::settings_in(&current));
                 let report = CompileReport::new(compiled);
                 self.requirement_reply(&owner, &current, Some(report), None, None)
             }
@@ -277,7 +285,7 @@ impl Core {
                     ));
                 }
                 let snapshot = snapshot_for(self, workspace_id, actor).await?;
-                let compiled = compile(&ir, &snapshot, &project_settings());
+                let compiled = compile(&ir, &snapshot, &super::storage::settings_in(&current));
                 let stored = self
                     .store_requirement_draft(
                         actor,
@@ -288,6 +296,7 @@ impl Core {
                     .await?;
                 Ok(Reply {
                     catalog: stored.catalog,
+                    settings: super::storage::settings_in(&current),
                     project_workspace: stored.project_workspace,
                     requirements: with_runs(
                         stored.requirements,
