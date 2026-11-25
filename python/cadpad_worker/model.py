@@ -159,6 +159,8 @@ class Model:
         self._display_policy = None
         self._mesh_reuse = {}
         self._geometry_cache = None
+        self._history_names = None
+        self._history_namer = None
         # Scalar results only; bounded across poses in this immutable revision.
         self._interference_results = OrderedDict()
 
@@ -340,9 +342,22 @@ class Model:
             cached_shape=self._geometry_cache.shape,
         )
         context = SimpleNamespace(parameters=values, **helpers)
+        history_names = args.get("history_names", False)
+        if not isinstance(history_names, bool):
+            raise DomainError("INVALID_REQUEST", "history_names must be a boolean opt-in")
+        if history_names:
+            from .history_names import Namer
+            self._history_namer = Namer(source_root)
         from .edge_trace import OperationTrace
         self._operation_trace = OperationTrace(source_root)
+        profile = self._operation_trace.profile
+        if self._history_namer is not None:
+            def profile(frame, event, result):
+                self._operation_trace.profile(frame, event, result)
+                self._history_namer.profile(frame, event, result)
         old_profile = sys.getprofile()
+        if history_names and old_profile is not None:
+            raise DomainError("HISTORY_TRACE_UNAVAILABLE", "History naming requires an exclusive worker trace hook")
         old_path, old_cwd = sys.path[:], Path.cwd()
         try:
             sys.path.insert(0, str(source_root))
@@ -350,17 +365,31 @@ class Model:
                 sys.path.insert(0, str(entry_path.parent))
             os.chdir(source_root)
             if old_profile is None:
-                sys.setprofile(self._operation_trace.profile)
+                sys.setprofile(profile)
             namespace = runpy.run_path(str(entry_path), init_globals=dict(helpers), run_name="__main__")
             if callable(namespace.get("build")):
                 namespace["build"](context)
             if not self.parts and isinstance(namespace.get("result"), (cq.Workplane, cq.Shape, cq.Assembly)):
                 show(namespace["result"], name="result")
         finally:
-            if old_profile is None and sys.getprofile() == self._operation_trace.profile:
+            if old_profile is None and sys.getprofile() is profile:
                 sys.setprofile(None)
             os.chdir(old_cwd)
             sys.path[:] = old_path
+        if history_names:
+            self._history_names = {}
+            for part in self.parts.values():
+                table = self._history_namer.snapshot(part.shape)
+                index = {"face": {}, "edge": {}}
+                collections = {"face": part.shape.Faces(), "edge": part.shape.Edges()}
+                entity_ids = {kind: {entity: entity_index for entity_index, entity in enumerate(items)}
+                              for kind, items in collections.items()}
+                for name, (kind, entities) in table.items():
+                    for entity in entities:
+                        entity_index = entity_ids[kind].get(entity)
+                        if entity_index is not None:
+                            index[kind].setdefault(entity_index, set()).add(name)
+                self._history_names[part.name] = index
         starter_entry = entry_path.read_text().strip() in ("# Describe a part to get started.", "# Cadpad project browser. Select a part in Explorer.")
         if not self.parts and not (args.get("allow_empty", False) or starter_entry):
             raise DomainError("INVALID_GEOMETRY", "Model did not publish geometry. Use show_object(result), show(result, name=...), or assign the model to result.")
@@ -723,6 +752,21 @@ class Model:
                 item["semantic_labels"] = [name for name, selected in part.features.items()
                                            if any(shape.isSame(entity) for entity in
                                                   (selected.vals() if isinstance(selected, cq.Workplane) else [selected]))]
+                if self._history_names is not None and kind in ("face", "edge"):
+                    from .history_names import positional_name
+                    names = sorted(self._history_names.get(part.name, {}).get(kind, {}).get(
+                        int(ref["entity_id"].split(":", 1)[1]), set()))
+                    exact_hash = geometry_fingerprint(shape)
+                    item["history_references"] = [dict(
+                        name=name, entity_kind=kind, exact_hash=exact_hash,
+                        positional=(positional_name(name) or name in self._history_namer.positional_names),
+                        basis=("positional_fallback" if positional_name(name)
+                               or name in self._history_namer.positional_names else
+                               "occt_history" if name in self._history_namer.history_names else "source_role"))
+                        for name in names]
+                    item["history_references_status"] = "available" if names else "unavailable"
+                    if not names:
+                        item["history_references_reason"] = "no_reliable_name"
                 if kind == "part":
                     item.update(self.describe(part))
                 elif kind == "face":
@@ -742,7 +786,11 @@ class Model:
                     if shape.geomType() == "CIRCLE":
                         item["radius"] = shape.radius()
                 result["entities"].append(item)
-        return finite(dict(**result, revision=self.revision, pose_version=args.get("pose_version", 0), accuracy="exact", units="mm"))
+        result = dict(**result, revision=self.revision, pose_version=args.get("pose_version", 0), accuracy="exact", units="mm")
+        if args.get("query") not in ("distance", "interference"):
+            result["history_names"] = {"status": "traced" if self._history_names is not None else "unavailable",
+                                        **({"reason": "not_traced"} if self._history_names is None else {})}
+        return finite(result)
 
     @staticmethod
     def location(pose):

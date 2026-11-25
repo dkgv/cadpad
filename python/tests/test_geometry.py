@@ -549,6 +549,81 @@ show(notched, name="part")
     assert {("box", 2), ("cut", 4)} <= operations
 
 
+def test_history_references_are_opt_in_and_hash_guarded(tmp_path):
+    from cadpad_worker.history_names import positional_name
+
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "model.py").write_text(
+        'import cadquery as cq\nshow(cq.Workplane().box(10, 10, 10), name="part")\n')
+    model = Model(tmp_path / "cache")
+    result = model.build(dict(source_root=str(source_root), parameters={}), "r1")
+    refs = [dict(revision="r1", instance_id="part", entity_id=f"face:{i}")
+            for i in range(result["parts"][0]["face_count"])]
+    normal = model.inspect(dict(entities=refs))
+    assert normal["history_names"] == {"status": "unavailable", "reason": "not_traced"}
+    assert all("history_references" not in item for item in normal["entities"])
+
+    traced = Model(tmp_path / "traced-cache")
+    result = traced.build(dict(source_root=str(source_root), parameters={}, history_names=True), "r2")
+    refs = [dict(revision="r2", instance_id="part", entity_id=f"face:{i}")
+            for i in range(result["parts"][0]["face_count"])]
+    response = traced.inspect(dict(entities=refs))
+    assert response["history_names"] == {"status": "traced"}
+    named = [ref for item in response["entities"] for ref in item["history_references"]]
+    assert named
+    assert all(item["history_references_status"] ==
+               ("available" if item["history_references"] else "unavailable")
+               for item in response["entities"])
+    assert all(ref["entity_kind"] == "face" and len(ref["exact_hash"]) == 64
+               and ref["basis"] in ("source_role", "occt_history", "positional_fallback")
+               for ref in named)
+    assert positional_name("model.py:<module>/box#1/top")
+
+
+def test_history_references_follow_boolean_derivation(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "model.py").write_text('''import cadquery as cq
+base = cq.Workplane().box(10, 10, 10)
+tool = cq.Workplane().center(5, 5).box(3, 3, 20)
+show(base.cut(tool), name="part")
+''')
+    model = Model(tmp_path / "cache")
+    result = model.build(dict(source_root=str(source_root), parameters={},
+                              generate_mesh=False, history_names=True), "r1")
+    refs = [dict(revision="r1", instance_id="part", entity_id=f"face:{i}")
+            for i in range(result["parts"][0]["face_count"])]
+    names = {reference["name"] for item in model.inspect(dict(entities=refs))["entities"]
+             for reference in item["history_references"]}
+    assert any("/box#0/" in name for name in names)
+    assert any("/box#1/" in name for name in names)
+    assert any(reference["basis"] == "occt_history"
+               for item in model.inspect(dict(entities=refs))["entities"]
+               for reference in item["history_references"])
+
+
+@pytest.mark.parametrize(("operation", "expression"), [
+    ("fillet", 'cq.Workplane().box(10,10,10).edges("|Z").fillet(1)'),
+    ("chamfer", 'cq.Workplane().box(10,10,10).edges("|Z").chamfer(1)'),
+    ("shell", 'cq.Workplane().box(10,10,10).faces(">Z").shell(-1)'),
+])
+def test_history_references_follow_reliable_topology_operations(tmp_path, operation, expression):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "model.py").write_text(
+        f'import cadquery as cq\nshow({expression}, name="part")\n')
+    model = Model(tmp_path / "cache")
+    result = model.build(dict(source_root=str(source_root), parameters={},
+                              generate_mesh=False, history_names=True), "r1")
+    refs = [dict(revision="r1", instance_id="part", entity_id=f"face:{i}")
+            for i in range(result["parts"][0]["face_count"])]
+    names = {reference["name"] for item in model.inspect(dict(entities=refs))["entities"]
+             for reference in item["history_references"]}
+    assert any(f"/{operation}#0/" in name for name in names)
+    assert not model._history_namer.unreliable
+
+
 def test_mesh_match_reports_ambiguity_and_unmatched_segments(tmp_path):
     from cadpad_worker.edge_trace import match_mesh_segments
 
