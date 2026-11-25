@@ -1,7 +1,7 @@
 use crate::{
     cli::{self, Backend, Bridge, StreamEvent},
     credentials::{Credentials, Secret},
-    provider::{Anthropic, Provider},
+    provider::{Anthropic, Block, Message, Provider, ProviderRequest, Role, StopReason},
     references::{self, Attachments, ChatReference},
     runner::{self, ChatMessage, EmitProgress, Limits, Progress, Step, ToolState},
 };
@@ -129,6 +129,79 @@ struct State {
 }
 pub trait ProviderFactory: Send + Sync {
     fn create(&self, settings: &Settings, key: Secret) -> Result<Arc<dyn Provider>>;
+}
+/// A read-only comparison of the user's prose with the exact canonical print.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProsePrintAdvisory {
+    pub warnings: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProsePrintResponse {
+    warnings: Vec<String>,
+}
+
+async fn prose_print_cross_check(
+    provider: Arc<dyn Provider>,
+    prose: &str,
+    canonical_print: &str,
+    draft_hash: &str,
+    compiled_hashes: &str,
+) -> Result<ProsePrintAdvisory> {
+    let system = "You are an independent read-only reviewer. Compare only the user's prose with Cadpad's canonical print for the same saved draft. Return JSON exactly as {\"warnings\":[\"...\"]}. Each warning must point to a concrete material meaning that appears missing, reversed, or changed between prose and print. If there is no such issue, return an empty list. Do not propose corrected requirements or IR, do not assess CAD geometry, do not approve or reject the requirement, and do not use tools.";
+    let user = format!(
+        "Saved draft identity: draft hash {draft_hash}; compiled hashes {compiled_hashes}.\n\nUSER PROSE:\n{prose}\n\nCANONICAL PRINT:\n{canonical_print}"
+    );
+    let request = ProviderRequest {
+        system: system.into(),
+        messages: vec![Message::text(Role::User, user)],
+        tools: vec![],
+        max_tokens: 700,
+    };
+    let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let emit: crate::provider::EmitText = Arc::new(|_| {});
+    let reply = tokio::time::timeout(
+        Duration::from_secs(30),
+        provider.respond(request, cancel_rx, emit),
+    )
+    .await
+    .map_err(|_| {
+        Error::domain(
+            "AGENT_LIMIT",
+            "The advisory cross-check reached its time limit",
+        )
+    })??;
+    if !matches!(reply.stop, StopReason::EndTurn) {
+        return Err(Error::domain(
+            "LLM_PROTOCOL_ERROR",
+            "The advisory provider returned an incomplete response",
+        ));
+    }
+    let text = reply
+        .content
+        .into_iter()
+        .filter_map(|block| match block {
+            Block::Text { text } => Some(text),
+            _ => None,
+        })
+        .collect::<String>();
+    let response: ProsePrintResponse = serde_json::from_str(text.trim()).map_err(|_| {
+        Error::domain(
+            "LLM_PROTOCOL_ERROR",
+            "The advisory provider returned invalid warning data",
+        )
+    })?;
+    let warnings = response
+        .warnings
+        .into_iter()
+        .filter_map(|warning| {
+            let warning = warning.trim();
+            (!warning.is_empty() && warning.len() <= 600).then(|| warning.to_string())
+        })
+        .take(5)
+        .collect();
+    Ok(ProsePrintAdvisory { warnings })
 }
 pub struct DefaultProviderFactory;
 impl ProviderFactory for DefaultProviderFactory {
@@ -276,6 +349,50 @@ impl AgentService {
     }
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
         self.inner.events.subscribe()
+    }
+    /// Run an explicitly requested, no-tools review using the configured direct
+    /// API provider. CLI backends are intentionally unsupported here: their
+    /// normal integration is an MCP tool loop, which is not appropriate for a
+    /// read-only advisory pass.
+    pub async fn prose_print_advisory(
+        &self,
+        prose: &str,
+        canonical_print: &str,
+        draft_hash: &str,
+        compiled_hashes: &str,
+    ) -> Result<Option<ProsePrintAdvisory>> {
+        if prose.len() > 32 * 1024 || canonical_print.len() > 32 * 1024 {
+            return Err(Error::domain(
+                "INVALID_REQUEST",
+                "The saved draft is too large for an advisory cross-check",
+            ));
+        }
+        let settings = self.inner.settings.lock().await.clone();
+        if settings.backend != Backend::AnthropicApi || settings.model.trim().is_empty() {
+            return Ok(None);
+        }
+        let credentials = self.inner.credentials.clone();
+        let key = tokio::task::spawn_blocking(move || credentials.get())
+            .await
+            .map_err(|_| {
+                Error::domain(
+                    "CREDENTIAL_UNAVAILABLE",
+                    "Could not access the system keychain",
+                )
+            })??;
+        let Some(key) = key else {
+            return Ok(None);
+        };
+        let provider = self.inner.factory.create(&settings, key)?;
+        prose_print_cross_check(
+            provider,
+            prose,
+            canonical_print,
+            draft_hash,
+            compiled_hashes,
+        )
+        .await
+        .map(Some)
     }
     pub async fn settings(&self) -> Result<Value> {
         let settings = self.inner.settings.lock().await.clone();
@@ -1383,4 +1500,84 @@ fn chat_title(messages: &[ChatMessage]) -> String {
         })
         .filter(|title: &String| !title.is_empty())
         .unwrap_or_else(|| "New chat".into())
+}
+#[cfg(test)]
+mod prose_print_advisory_tests {
+    use super::*;
+    use crate::provider::{ProviderReply, StopReason};
+
+    struct MockProvider {
+        request: std::sync::Mutex<Option<ProviderRequest>>,
+        response: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for MockProvider {
+        async fn respond(
+            &self,
+            request: ProviderRequest,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            _emit: crate::provider::EmitText,
+        ) -> Result<ProviderReply> {
+            *self.request.lock().unwrap() = Some(request);
+            Ok(ProviderReply {
+                content: vec![Block::Text {
+                    text: self.response.clone(),
+                }],
+                stop: StopReason::EndTurn,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_provider_gets_only_exact_prose_and_print_without_tools() {
+        let provider = Arc::new(MockProvider {
+            request: std::sync::Mutex::new(None),
+            response: r#"{"warnings":["The print reverses the requested direction."]}"#.into(),
+        });
+        let report = prose_print_cross_check(
+            provider.clone(),
+            "The latch opens outwards.",
+            "The latch opens inwards.",
+            "draft-hash",
+            "requirement=one manifest=two plan=three",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.warnings,
+            ["The print reverses the requested direction."]
+        );
+        let request = provider.request.lock().unwrap().clone().unwrap();
+        assert!(request.tools.is_empty());
+        assert!(request.system.contains("do not approve or reject"));
+        let user = request
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|block| match block {
+                Block::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(user.contains("The latch opens outwards."));
+        assert!(user.contains("The latch opens inwards."));
+        assert!(user.contains("draft-hash"));
+        assert!(user.contains("requirement=one manifest=two plan=three"));
+    }
+
+    #[tokio::test]
+    async fn advisory_rejects_malformed_provider_output() {
+        let provider = Arc::new(MockProvider {
+            request: std::sync::Mutex::new(None),
+            response: "not json".into(),
+        });
+        assert_eq!(
+            prose_print_cross_check(provider, "prose", "print", "h", "hashes")
+                .await
+                .unwrap_err()
+                .code(),
+            "LLM_PROTOCOL_ERROR"
+        );
+    }
 }

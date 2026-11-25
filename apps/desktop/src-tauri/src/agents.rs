@@ -207,6 +207,72 @@ pub async fn requirements(
         .map_err(error)
 }
 
+/// Advisory pass over the currently saved draft and canonical print. It is
+/// separate from the requirement evaluation lifecycle.
+#[tauri::command]
+pub async fn cross_check_requirement(
+    core: State<'_, Core>,
+    agent: State<'_, cadpad_agent::service::AgentService>,
+    workspace: String,
+    id: String,
+    draft_hash: String,
+    draft_hashes: cadpad_core::requirements::storage::StoredHashes,
+) -> Result<Value, Value> {
+    let reply = core
+        .control_requirements(
+            "local-user",
+            cadpad_core::requirements::tool::Control {
+                workspace_id: workspace,
+                expected_catalog: None,
+                command: cadpad_core::requirements::tool::Command::List,
+            },
+        )
+        .await
+        .map_err(error)?;
+    if let Some(run) = reply.run.as_ref()
+        && matches!(
+            run["state"].as_str(),
+            Some("queued" | "running" | "cancelling")
+        )
+    {
+        return Ok(
+            json!({"available":false,"reason":"evaluation_active","draft_hash":draft_hash,"draft_hashes":draft_hashes}),
+        );
+    }
+    let Some(info) = reply.requirements.iter().find(|item| item.id == id) else {
+        return Err(
+            json!({"code":"STALE_ENTITY","message":"This saved requirement is no longer available. Refresh the review."}),
+        );
+    };
+    if info.draft_hash != draft_hash || info.draft_hashes.as_ref() != Some(&draft_hashes) {
+        return Err(
+            json!({"code":"STALE_ENTITY","message":"The saved requirement changed. Refresh the review before asking for an advisory."}),
+        );
+    }
+    let Some(canonical_print) = info.rendered.as_deref() else {
+        return Ok(
+            json!({"available":false,"reason":"no_canonical_print","draft_hash":draft_hash,"draft_hashes":draft_hashes}),
+        );
+    };
+    match agent
+        .prose_print_advisory(
+            &info.text,
+            canonical_print,
+            &info.draft_hash,
+            &serde_json::to_string(&draft_hashes).unwrap_or_default(),
+        )
+        .await
+        .map_err(error)?
+    {
+        Some(report) => Ok(
+            json!({"available":true,"draft_hash":draft_hash,"draft_hashes":draft_hashes,"warnings":report.warnings}),
+        ),
+        None => Ok(
+            json!({"available":false,"reason":"provider_unavailable","draft_hash":draft_hash,"draft_hashes":draft_hashes}),
+        ),
+    }
+}
+
 /// User-only. Not an agent or MCP tool: nothing in `tools::dispatch` reaches it.
 #[tauri::command]
 pub async fn approve_requirement(

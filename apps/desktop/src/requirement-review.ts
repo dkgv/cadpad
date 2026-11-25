@@ -22,6 +22,7 @@ export type RequirementInfo={
   approved?:{hashes:Hashes;rendered:string;print:Print}|null;
   last_result?:unknown;rerun_required?:boolean;run?:RequirementRun|null;
 };
+export type ProsePrintAdvisory={available:boolean;reason?:string;draft_hash:string;draft_hashes:Hashes;warnings:string[]};
 export type RequirementRun={id:string;state:string;requirement_id?:string;error?:{code?:string;message?:string}|null};
 export type RequirementsReply={catalog:string;project_workspace?:string;requirements:RequirementInfo[];run?:RequirementRun|null};
 

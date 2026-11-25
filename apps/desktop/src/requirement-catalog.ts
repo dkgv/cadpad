@@ -1,9 +1,36 @@
 import {useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import {reviewHashes,type RequirementInfo,type RequirementRun,type RequirementsReply} from './requirement-review';
+import {reviewHashes,type ProsePrintAdvisory,type RequirementInfo,type RequirementRun,type RequirementsReply} from './requirement-review';
 
 const errorText=(value:unknown)=>value instanceof Error?value.message:typeof value==='object'&&value&&'message' in value?String((value as {message:unknown}).message):String(value);
 const activeState=(run?:RequirementRun|null)=>!!run&&['queued','running','cancelling'].includes(run.state);
+type AdvisoryTask={attempts:number;promise?:Promise<ProsePrintAdvisory>;result?:ProsePrintAdvisory};
+const advisoryTasks=new Map<string,AdvisoryTask>();
+const sameHashes=(left:RequirementInfo['draft_hashes'],right:RequirementInfo['draft_hashes'])=>!!left&&!!right&&left.requirement===right.requirement&&left.manifest===right.manifest&&left.plan===right.plan;
+
+async function requestAdvisory(workspace:string,info:RequirementInfo):Promise<ProsePrintAdvisory>{
+  if(!info.draft_hashes)throw new Error('A successful saved compile is required before cross-checking.');
+  const hashes=info.draft_hashes;
+  const key=JSON.stringify([workspace,info.id,info.draft_hash,hashes,info.rendered]);
+  let task=advisoryTasks.get(key);
+  if(!task){task={attempts:0};advisoryTasks.set(key,task);}
+  if(task.result)return task.result;
+  if(task.promise)return task.promise;
+  if(task.attempts>=3)throw new Error('The advisory cross-check failed three times for this exact draft. Edit or resave the draft before trying again.');
+  task.attempts++;
+  const promise=invoke<ProsePrintAdvisory>('cross_check_requirement',{
+    workspace,id:info.id,draftHash:info.draft_hash,draftHashes:hashes,
+  }).then(result=>{
+    if(result.draft_hash!==info.draft_hash||!sameHashes(result.draft_hashes,hashes))throw new Error('The saved draft changed while the cross-check was running. Refresh the review.');
+    // Successes are stable for this exact saved print. Unavailable responses
+    // remain retryable, subject to the same bounded attempt counter as errors.
+    if(result.available)task!.result=result;
+    return result;
+  }).finally(()=>{task!.promise=undefined;});
+  task.promise=promise;
+  if(advisoryTasks.size>128){const oldest=advisoryTasks.keys().next().value;if(oldest&&oldest!==key)advisoryTasks.delete(oldest);}
+  return promise;
+}
 
 /**
  * The project's requirement catalog: polls `requirements` list (quickly while something is queued or running,
@@ -54,5 +81,6 @@ export function useRequirementCatalog(project:string){
     running.current=true;return next;
   });
   const cancelRun=(runId:string)=>perform(runId,()=>call('requirements',{expected_catalog:null,command:{action:'cancel_run',run_id:runId}}));
-  return {requirements:reply?.requirements??[],run:reply?.run??null,loaded:!!reply,error,busy,approve,remove,startRun,cancelRun,clearError:()=>setError('')};
+  const crossCheck=(info:RequirementInfo,workspace=project)=>requestAdvisory(workspace,info);
+  return {requirements:reply?.requirements??[],run:reply?.run??null,loaded:!!reply,error,busy,approve,remove,startRun,cancelRun,crossCheck,clearError:()=>setError('')};
 }

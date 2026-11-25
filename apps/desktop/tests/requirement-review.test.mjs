@@ -211,6 +211,64 @@ test('review card: highlight, inferred marker, disabled Approve with reason, app
  }finally{try{await act(async()=>root.unmount());}catch{}console.error=error;window.window.close();await cleanup();}
 });
 
+test('prose advisory starts only when the visible review intersects, deduplicates, and never blocks approval',async()=>{
+ const {module:m,cleanup}=await load();
+ const window=dom(),calls=[];
+ let resolveAdvisory;
+ globalThis.__invoke=async(command,args)=>{
+  calls.push([command,args]);
+  if(command==='requirements')return {catalog:'cat-1',requirements:[current],run:null};
+  if(command==='cross_check_requirement')return new Promise(resolve=>{resolveAdvisory=resolve;});
+  throw new Error('unexpected '+command);
+ };
+ let current=info();
+ const observations=[];
+ globalThis.IntersectionObserver=class{
+  constructor(callback){this.callback=callback;observations.push(this);}
+  observe(element){this.element=element;}
+  disconnect(){}
+  intersect(ratio=1){this.callback([{isIntersecting:ratio>0,intersectionRatio:ratio,target:this.element}]);}
+ };
+ const oldRect=window.window.HTMLElement.prototype.getBoundingClientRect;
+ window.window.HTMLElement.prototype.getBoundingClientRect=function(){return this.classList?.contains('rq-advisory')?{width:300,height:1,top:0,left:0,right:300,bottom:1,x:0,y:0,toJSON(){}}:oldRect.call(this);};
+ const {createRoot}=await import('react-dom/client');
+ const root=createRoot(document.getElementById('root'));
+ const Harness=()=>{
+  const catalog=m.useRequirementCatalog('proj');
+  const actions={busy:catalog.busy,agentBusy:false,run:catalog.run,approve:()=>{},remove:()=>{},start:()=>{},cancel:()=>{},crossCheck:i=>catalog.crossCheck(i,'proj'),ask:()=>{},editWording:()=>{},replay:async()=>{}};
+  return React.createElement(m.RequirementCard,{info:current,actions});
+ };
+ const render=async()=>act(async()=>root.render(React.createElement(Harness)));
+ try{
+  await render();
+  await act(async()=>{await new Promise(r=>setTimeout(r,20));});
+  assert.equal(calls.filter(([command])=>command==='cross_check_requirement').length,0,'mounting alone does not trigger the pass');
+  assert.equal(observations.length,1);
+  await act(async()=>{observations[0].intersect(0);await Promise.resolve();});
+  assert.equal(calls.filter(([command])=>command==='cross_check_requirement').length,0,'zero-area intersections are ignored');
+  await act(async()=>{observations[0].intersect(1);observations[0].intersect(1);await Promise.resolve();});
+  assert.equal(calls.filter(([command])=>command==='cross_check_requirement').length,1,'repeated observer events share one request');
+  assert.deepEqual(calls.find(([command])=>command==='cross_check_requirement')[1],{workspace:'proj',id:'req-1',draftHash:'r1',draftHashes:hashes});
+  const approve=()=>[...document.querySelectorAll('button')].find(button=>button.textContent==='Approve');
+  assert.equal(approve().disabled,false,'approval remains enabled while the advisory runs');
+  await act(async()=>resolveAdvisory({available:true,draft_hash:'r1',draft_hashes:{plan:'p1',manifest:'m1',requirement:'r1'},warnings:['Print omits the requested opening direction.']}));
+  assert.match(document.querySelector('.rq-advisory .rq-callout.warn').textContent,/opening direction/);
+
+  current={...current,draft_hash:'r2',draft_hashes:{requirement:'r2',manifest:'m2',plan:'p2'},rendered:'Door opens without hitting frame\n  Updated print\n'};
+  await render();
+  assert.doesNotMatch(document.querySelector('.rq-card').textContent,/opening direction/,'the previous draft result is not shown for the new identity');
+  assert.equal(approve().disabled,false);
+  assert.equal(observations.length,2);
+  await act(async()=>{observations[1].intersect(1);await Promise.resolve();});
+  assert.equal(calls.filter(([command])=>command==='cross_check_requirement').length,2);
+  assert.deepEqual(calls.filter(([command])=>command==='cross_check_requirement')[1][1],{workspace:'proj',id:'req-1',draftHash:'r2',draftHashes:{requirement:'r2',manifest:'m2',plan:'p2'}});
+ }finally{
+  await act(async()=>root.unmount());await cleanup();
+  window.window.HTMLElement.prototype.getBoundingClientRect=oldRect;
+  delete globalThis.IntersectionObserver;delete globalThis.__invoke;window.window.close();
+ }
+});
+
 test('cards: needs-review diff + Re-approve, results, inconclusive, findings accept as allowance, questions',async()=>{
  const {module:m,cleanup}=await load();
  const window=dom();

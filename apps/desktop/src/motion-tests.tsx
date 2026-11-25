@@ -233,6 +233,7 @@ export function Requirements({project,projectRevision,projectRunnable,models,foc
     remove:info=>void catalog.remove(info),
     start:info=>void catalog.startRun(info.id,requirementWorkspace(info)),
     cancel:runId=>void catalog.cancelRun(runId),
+    crossCheck:info=>catalog.crossCheck(info,requirementWorkspace(info)),
     ask:async(prompt,info)=>{if(!onAsk)throw new Error('The assistant is not available here.');await onAsk(prompt,mentionedRefs(info.text));},
     editWording:info=>composeRequirement(info),
     replay:async(info,primitiveId,worst)=>{

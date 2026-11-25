@@ -16,7 +16,8 @@ mod project_watch;
 mod subscriptions;
 use agents::{
     approve_requirement, clean_cache, complete_view, connect_activity, connect_motion,
-    connect_view, delete_requirement, disconnect_external, interference, joint_coordinate,
+    connect_view, cross_check_requirement, delete_requirement, disconnect_external, interference,
+    joint_coordinate,
     mcp_settings, motion, motion_tests, playback, rebuild, repair_display, requirement_replay,
     close_requirement_replay,
     requirements, set_requirement_settings, set_selection, simulation,
@@ -338,6 +339,7 @@ fn main() {
             playback,
             motion_tests,
             requirements,
+            cross_check_requirement,
             approve_requirement,
             set_requirement_settings,
             delete_requirement,

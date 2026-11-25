@@ -1,14 +1,15 @@
-import React,{useEffect,useMemo,useState} from 'react';
+import React,{useCallback,useEffect,useMemo,useRef,useState} from 'react';
 import {parseTokens} from './requirement-tokens';
 import {
   STATUS_TEXT,FINDING_TEXT,allowancePrompt,answersPrompt,approveBlock,canAccept,errorsOf,findingStates,formatQuantity,headlinePrimitive,highlightSegments,needsApproval,notRun,
   pairText,partNames,printDiff,pruneSelection,questionsOf,readResult,removeRulePrompt,resultIsPrevious,sliceScalars,stateStrip,statusOf,statusTone,toggleSelection,
-  type Finding,type PrimitiveResult,type Question,type RequirementInfo,type RequirementRun,type ResultView,type Worst,
+  type Finding,type PrimitiveResult,type ProsePrintAdvisory,type Question,type RequirementInfo,type RequirementRun,type ResultView,type Worst,
 } from './requirement-review';
 
 export type CardActions={
   busy:string|null;agentBusy:boolean;run:RequirementRun|null;
   approve:(info:RequirementInfo)=>void;remove:(info:RequirementInfo)=>void;start:(info:RequirementInfo)=>void;cancel:(runId:string)=>void;
+  crossCheck:(info:RequirementInfo)=>Promise<ProsePrintAdvisory>;
   /** Send a prompt to the assistant (the only way an edit to a requirement happens). */
   ask:(prompt:string,info:RequirementInfo)=>Promise<void>|void;
   editWording:(info:RequirementInfo)=>void;
@@ -121,8 +122,10 @@ function PreviousLine({result,info}:{result:ResultView;info:RequirementInfo}){
 /** Review of a draft (never approved, or edited since) and the single Approve (P1.76, P1.79). */
 function ReviewCard({info,actions,previous}:{info:RequirementInfo;actions:CardActions;previous:ResultView|null}){
   const block=approveBlock(info),edited=info.approval==='edited_since_approval';
+  const advisoryKey=JSON.stringify([info.id,info.draft_hash,info.draft_hashes,info.rendered]);
   return <>
     <ReviewBody info={info} actions={actions} previous={previous}/>
+    <ProsePrintReview key={advisoryKey} info={info} actions={actions}/>
     <div className="rq-actions">
       <button type="button" className="primary-button" disabled={!!block||actions.busy===info.id} aria-describedby={block?`block-${info.id}`:undefined} onClick={()=>actions.approve(info)}>{actions.busy===info.id?'Approving…':edited?'Re-approve':'Approve'}</button>
       <button type="button" disabled={actions.agentBusy} onClick={()=>actions.editWording(info)}>Edit wording</button>
@@ -130,6 +133,54 @@ function ReviewCard({info,actions,previous}:{info:RequirementInfo;actions:CardAc
     {block&&<p className="rq-hint" id={`block-${info.id}`}>{block}</p>}
     {!block&&(info.print?.lines??[]).some(line=>line.inferred)&&<p className="rq-hint">Approving also confirms the inferred {(info.print?.lines??[]).filter(line=>line.inferred).length===1?'rule':'rules'} above.</p>}
   </>;
+}
+
+function ProsePrintReview({info,actions}:{info:RequirementInfo;actions:CardActions}){
+  const [advisory,setAdvisory]=useState<ProsePrintAdvisory|null>(null);
+  const [pending,setPending]=useState(false),[error,setError]=useState('');
+  const root=useRef<HTMLElement|null>(null),started=useRef<string|null>(null);
+  const active=(run?:RequirementRun|null)=>!!run&&['queued','running','cancelling'].includes(run.state);
+  const blocked=active(actions.run)||active(info.run);
+  const enabled=!!info.print&&!!info.rendered&&!!info.draft_hashes&&!blocked;
+  const advisoryKey=JSON.stringify([info.id,info.draft_hash,info.draft_hashes,info.rendered]);
+  const sameHashes=(left:typeof info.draft_hashes,right:typeof info.draft_hashes)=>!!left&&!!right&&left.requirement===right.requirement&&left.manifest===right.manifest&&left.plan===right.plan;
+  const check=useCallback(async()=>{
+    if(!enabled||pending)return;
+    setPending(true);setError('');
+    try{
+      const reply=await actions.crossCheck(info);
+      if(reply.draft_hash!==info.draft_hash||!sameHashes(reply.draft_hashes,info.draft_hashes))return;
+      setAdvisory(reply);
+    }catch(value){setError(value instanceof Error?value.message:String(value));}
+    finally{setPending(false);}
+  },[enabled,pending,actions,info]);
+  const checkRef=useRef(check);
+  checkRef.current=check;
+  useEffect(()=>{
+    const element=root.current;
+    if(!enabled||!element||started.current===advisoryKey)return;
+    const rect=element.getBoundingClientRect();
+    if(rect.width<=0||rect.height<=0)return;
+    const start=()=>{if(started.current===advisoryKey)return;started.current=advisoryKey;void checkRef.current();};
+    if(typeof IntersectionObserver==='undefined'){
+      if(element.getClientRects().length)start();
+      return;
+    }
+    const observer=new IntersectionObserver(entries=>{if(entries.some(entry=>entry.isIntersecting&&entry.intersectionRatio>0))start();},{threshold:0.01});
+    observer.observe(element);
+    return()=>observer.disconnect();
+  },[enabled,advisoryKey]);
+  return <section ref={element=>{root.current=element;}} className="rq-advisory" aria-label="Independent prose cross-check" style={{minHeight:1}}>
+    {pending&&<p className="rq-hint" role="status">Independent cross-check in progress…</p>}
+    {(error||(advisory&&!advisory.available))&&<div className="rq-actions">
+      {error&&<p className="rq-hint" role="status">Advisory unavailable: {error}</p>}
+      {advisory&&!advisory.available&&<p className="rq-hint" role="status">Independent cross-check unavailable.</p>}
+      <button type="button" className="rq-mini" disabled={!enabled||pending} onClick={()=>void check()}>Retry cross-check</button>
+    </div>}
+    {advisory?.available&&<div className="rq-callout warn" role="note"><b>Independent cross-check (advisory only)</b>
+      {advisory.warnings.length? <ul>{advisory.warnings.map((warning,index)=><li key={index}>{warning}</li>)}</ul>:<p>No material mismatch was found in this cross-check.</p>}
+    </div>}
+  </section>;
 }
 
 /** Approved, but the model or the library changed what it means (P1.79). Nothing re-ran. */
