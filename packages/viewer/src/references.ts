@@ -2,7 +2,8 @@ import type {Anchor,DimensionDefinition,Entity,GeometryRef} from './index';
 export interface Inspection {
   revision:string;
   pose_version:number;
-  entities?:{reference:Entity;anchor?:Extract<Anchor,{kind:'geometry_center'|'local_point'}>;circular_definition?:Extract<DimensionDefinition,{kind:'geometry_circle'}>}[];
+  history_names?:{status:'traced'|'unavailable';reason?:string};
+  entities?:{reference:Entity;anchor?:Extract<Anchor,{kind:'geometry_center'|'local_point'}>;circular_definition?:Extract<DimensionDefinition,{kind:'geometry_circle'}>;history_references?:{name:string;entity_kind:'face'|'edge';exact_hash:string;count:number;set_hash:string;positional:boolean;basis:string}[];history_references_status?:'available'|'unavailable';history_references_reason?:string}[];
 }
 interface PartFeatures {instance_id:string;features?:Record<string,string[]>}
 function inspected(selection:Entity,inspection:Inspection|null){

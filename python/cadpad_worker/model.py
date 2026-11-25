@@ -9,6 +9,7 @@ import math
 import os
 import runpy
 import sys
+import tempfile
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -192,6 +193,7 @@ class Model:
         self._geometry_cache = None
         self._history_names = None
         self._history_namer = None
+        self._history_features = None
         # Scalar results only; bounded across poses in this immutable revision.
         self._interference_results = OrderedDict()
 
@@ -698,6 +700,8 @@ class Model:
             raise DomainError("STALE_ENTITY", "Unknown geometry entity") from None
 
     def inspect(self, args):
+        if args.get("history_names") is True and self._history_names is None:
+            self._trace_history_names()
         entities = args.get("entities", [])
         poses = args.get("poses", {})
         def world(ref):
@@ -808,13 +812,19 @@ class Model:
                     names = sorted(self._history_names.get(part.name, {}).get(kind, {}).get(
                         int(ref["entity_id"].split(":", 1)[1]), set()))
                     exact_hash = geometry_fingerprint(shape)
-                    item["history_references"] = [dict(
-                        name=name, entity_kind=kind, exact_hash=exact_hash,
-                        positional=(positional_name(name) or name in self._history_namer.positional_names),
-                        basis=("positional_fallback" if positional_name(name)
-                               or name in self._history_namer.positional_names else
-                               "occt_history" if name in self._history_namer.history_names else "source_role"))
-                        for name in names]
+                    features = self._history_feature_index().get(part.name, {})
+                    item["history_references"] = []
+                    for name in names:
+                        feature = features[name]
+                        positional = (positional_name(name)
+                                      or name in self._history_namer.positional_names)
+                        item["history_references"].append(dict(
+                            name=name, entity_kind=kind, exact_hash=exact_hash,
+                            count=feature["count"], set_hash=feature["set_hash"],
+                            positional=positional,
+                            basis=("positional_fallback" if positional else
+                                   "occt_history" if name in self._history_namer.history_names
+                                   else "source_role")))
                     item["history_references_status"] = "available" if names else "unavailable"
                     if not names:
                         item["history_references_reason"] = "no_reliable_name"
@@ -842,6 +852,82 @@ class Model:
             result["history_names"] = {"status": "traced" if self._history_names is not None else "unavailable",
                                         **({"reason": "not_traced"} if self._history_names is None else {})}
         return finite(result)
+
+    def _trace_history_names(self):
+        """Replay this build with tracing and accept names only for identical BReps."""
+        if self._build_args is None or self._publication_result is None:
+            raise DomainError("HISTORY_TRACE_UNAVAILABLE", "Build inputs are not available for history tracing")
+        published = {
+            part["instance_id"]: tuple(part.get("position", ()))
+            for part in self._publication_result.get("parts", [])
+        }
+        expected = {}
+        for part in self.parts.values():
+            live_hash = geometry_fingerprint(part.shape)
+            position = tuple(part.position)
+            if (part.fingerprint is None or live_hash != part.fingerprint
+                    or published.get(part.name) != position):
+                raise DomainError(
+                    "HISTORY_TRACE_MISMATCH",
+                    f"Part {part.name} geometry or placement changed after build; no history names were attached",
+                )
+            expected[part.name] = (live_hash, position)
+        trace_args = copy.deepcopy(self._build_args)
+        trace_args.update(history_names=True, generate_mesh=False, geometry_cache=None, input_digest=None)
+        try:
+            with tempfile.TemporaryDirectory(prefix="history-trace-", dir=self.cache) as temporary:
+                candidate = Model(Path(temporary) / "cache")
+                result = candidate.build(trace_args, self.revision)
+                actual = {
+                    part["instance_id"]: (
+                        part.get("geometry_fingerprint", {}).get("sha256"),
+                        tuple(part.get("position", ())),
+                    )
+                    for part in result.get("parts", [])
+                }
+                if not expected or actual != expected:
+                    raise DomainError(
+                        "HISTORY_TRACE_MISMATCH",
+                        "History tracing replay did not reproduce the exact committed geometry; no names were attached",
+                    )
+                self._history_names = candidate._history_names
+                self._history_namer = candidate._history_namer
+                self._history_features = None
+        except DomainError:
+            raise
+        except Exception as error:
+            raise DomainError("HISTORY_TRACE_UNAVAILABLE", f"Could not trace this exact build: {error}") from None
+
+    def _history_feature_index(self):
+        if self._history_features is None:
+            from .history_names import positional_name
+            index = {}
+            for part in self.parts.values():
+                groups = {}
+                collections = {"face": part.shape.Faces(), "edge": part.shape.Edges()}
+                for kind, items in collections.items():
+                    by_index = self._history_names.get(part.name, {}).get(kind, {})
+                    for entity_index, names in by_index.items():
+                        shape = items[entity_index]
+                        entity_hash = geometry_fingerprint(shape)
+                        for name in names:
+                            group = groups.setdefault(name, {"kind": kind, "hashes": [], "positional": False})
+                            if group["kind"] != kind:
+                                raise DomainError("HISTORY_TRACE_UNAVAILABLE", "One history name maps to mixed entity kinds")
+                            group["hashes"].append(entity_hash)
+                            group["positional"] |= (positional_name(name)
+                                or name in self._history_namer.positional_names)
+                index[part.name] = {}
+                for name, group in groups.items():
+                    hashes = sorted(group["hashes"])
+                    canonical = json.dumps([group["kind"], hashes], separators=(",", ":")).encode()
+                    index[part.name][name] = {
+                        "count": len(hashes),
+                        "set_hash": hashlib.sha256(canonical).hexdigest(),
+                        "positional": group["positional"],
+                    }
+            self._history_features = index
+        return self._history_features
 
     @staticmethod
     def location(pose):

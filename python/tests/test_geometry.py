@@ -579,6 +579,44 @@ def test_history_references_are_opt_in_and_hash_guarded(tmp_path):
                and ref["basis"] in ("source_role", "occt_history", "positional_fallback")
                for ref in named)
     assert positional_name("model.py:<module>/box#1/top")
+    assert positional_name("sub/part/model.py:build/box#1/top")
+    assert not positional_name("sub/part/model.py:build/box#0/top")
+
+
+def test_inspect_can_opt_into_history_without_changing_the_live_build(tmp_path):
+    model, result = build(tmp_path, 'import cadquery as cq\nshow(cq.Workplane().box(10,10,10), name="part")')
+    part_hash = result["parts"][0]["geometry_fingerprint"]["sha256"]
+    refs = [dict(revision="r1", instance_id="part", entity_id="face:0")]
+    response = model.inspect(dict(entities=refs, history_names=True))
+    assert response["history_names"]["status"] == "traced"
+    assert response["entities"][0]["history_references"]
+    assert model._publication_result["parts"][0]["geometry_fingerprint"]["sha256"] == part_hash
+
+
+def test_inspect_history_opt_in_fails_if_live_brep_changed(tmp_path):
+    model, _ = build(tmp_path, 'import cadquery as cq\nshow(cq.Workplane().box(10,10,10), name="part")')
+    model.parts["part"].shape = cq.Workplane().box(11, 10, 10).val()
+    with pytest.raises(DomainError, match="changed after build"):
+        model.inspect(dict(entities=[dict(revision="r1", instance_id="part", entity_id="face:0")],
+                           history_names=True))
+
+
+def test_history_inspection_replays_only_matching_live_geometry(tmp_path):
+    model, result = build(tmp_path, 'import cadquery as cq\nshow(cq.Workplane().box(10,10,10), name="part")')
+    refs = [dict(revision="r1", instance_id="part", entity_id=f"face:{i}")
+            for i in range(result["parts"][0]["face_count"])]
+    before = model.parts["part"].fingerprint
+    traced = model.inspect(dict(entities=refs, history_names=True))
+    assert traced["history_names"]["status"] == "traced"
+    assert model.parts["part"].fingerprint == before
+    assert any(item["history_references"] for item in traced["entities"])
+
+    changed = Model(tmp_path / "changed-cache")
+    result = changed.build(dict(source_root=str(tmp_path / "source"), parameters={}), "r1")
+    refs = [dict(revision="r1", instance_id="part", entity_id="face:0")]
+    changed.parts["part"].shape = cq.Workplane().box(11, 10, 10).val()
+    with pytest.raises(DomainError, match="changed after build"):
+        changed.inspect(dict(entities=refs, history_names=True))
 
 
 def test_history_references_follow_boolean_derivation(tmp_path):

@@ -44,11 +44,42 @@ pub struct SelectionReply {
     pub workspace_id: String,
     pub revision: String,
     pub entities: Vec<tools::Entity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_names: Option<HistorySelection>,
     pub parts: Vec<SelectedPart>,
     pub expired: bool,
     pub pose_version: u64,
     pub joint_states: Vec<kinematics::JointState>,
     pub units: Units,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct HistoryReference {
+    pub name: String,
+    pub entity_kind: String,
+    pub exact_hash: String,
+    pub count: u64,
+    pub set_hash: String,
+    pub positional: bool,
+    pub basis: String,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct SelectedHistory {
+    pub reference: tools::Entity,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_reference: Option<annotations::GeometryRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub references: Vec<HistoryReference>,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct HistorySelection {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub entities: Vec<SelectedHistory>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -191,6 +222,12 @@ pub struct InspectedEntity {
     pub world_bounds: Bounds,
     pub world_center: [f64; 3],
     pub semantic_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_references: Option<Vec<HistoryReference>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_references_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_references_reason: Option<String>,
     #[serde(flatten)]
     pub properties: EntityProperties,
 }
@@ -226,6 +263,14 @@ pub struct InspectionReply {
     pub context: ExactContext,
     #[serde(flatten)]
     pub data: InspectionData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_names: Option<HistoryTraceStatus>,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct HistoryTraceStatus {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct InterferenceReply {

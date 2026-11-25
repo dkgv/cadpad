@@ -47,7 +47,9 @@ SIDE_WORD = dict(extrude="side", twistExtrude="side", revolve="face", loft="side
 
 def positional_name(name):
     """Flag identities that depend on source/call order or topology order."""
-    operation = name.split("/", 2)[1] if "/" in name else ""
+    separator = name.rfind(":")
+    suffix = name[separator + 1:] if separator >= 0 else ""
+    operation = suffix.split("/", 1)[1] if "/" in suffix else ""
     ordinal = re.search(r"#(\d+)(?:\.(\d+))?", operation)
     role = name.rsplit("/", 1)[-1]
     return bool((ordinal and (ordinal.group(1) != "0" or ordinal.group(2) is not None))

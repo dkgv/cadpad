@@ -432,6 +432,7 @@ impl Core {
             workspace_id: workspace.into(),
             revision: project["revision"].as_str().unwrap().into(),
             entities,
+            history_names: None,
             parts,
             expired: stale,
             pose_version: project["motion"]["pose_version"].as_u64().unwrap(),

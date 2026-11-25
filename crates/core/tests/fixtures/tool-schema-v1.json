@@ -4247,11 +4247,18 @@
       }
     },
     {
-      "description": "Get the current revision-scoped selection, semantic labels, units and bounded exact part context. Entities are in the user's selection order; with several, the viewport badges them A, B, C…. Parts include the component source file and show() line when known. Expired references are reported instead of relocated silently.",
+      "description": "Get the current revision-scoped selection, semantic labels, units and bounded exact part context. Entities are in the user's selection order; with several, the viewport badges them A, B, C…. Parts include the component source file and show() line when known. Set history_names=true to request on-demand history tracing; names are returned only when a replay reproduces the exact committed geometry. Expired references are reported instead of relocated silently.",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
         "properties": {
+          "history_names": {
+            "description": "Request on-demand tracing; the worker rejects any replay that changes\nthe exact committed geometry.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "workspace_id": {
             "type": "string"
           }
@@ -4319,6 +4326,95 @@
               "revision",
               "instance_id",
               "entity_id"
+            ],
+            "type": "object"
+          },
+          "GeometryKind": {
+            "enum": [
+              "face",
+              "edge"
+            ],
+            "type": "string"
+          },
+          "GeometryRef": {
+            "additionalProperties": false,
+            "properties": {
+              "entity_kind": {
+                "$ref": "#/$defs/GeometryKind"
+              },
+              "format": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "entity_kind",
+              "format",
+              "sha256"
+            ],
+            "type": "object"
+          },
+          "HistoryReference": {
+            "properties": {
+              "basis": {
+                "type": "string"
+              },
+              "count": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "entity_kind": {
+                "type": "string"
+              },
+              "exact_hash": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "positional": {
+                "type": "boolean"
+              },
+              "set_hash": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "entity_kind",
+              "exact_hash",
+              "count",
+              "set_hash",
+              "positional",
+              "basis"
+            ],
+            "type": "object"
+          },
+          "HistorySelection": {
+            "properties": {
+              "entities": {
+                "default": [],
+                "items": {
+                  "$ref": "#/$defs/SelectedHistory"
+                },
+                "type": "array"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "entities"
             ],
             "type": "object"
           },
@@ -4426,6 +4522,45 @@
             ],
             "type": "object"
           },
+          "SelectedHistory": {
+            "properties": {
+              "geometry_reference": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/GeometryRef"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reference": {
+                "$ref": "#/$defs/Entity"
+              },
+              "references": {
+                "default": [],
+                "items": {
+                  "$ref": "#/$defs/HistoryReference"
+                },
+                "type": "array"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reference",
+              "status",
+              "references"
+            ],
+            "type": "object"
+          },
           "SelectedPart": {
             "properties": {
               "bounds": {
@@ -4483,6 +4618,16 @@
               },
               "expired": {
                 "type": "boolean"
+              },
+              "history_names": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HistorySelection"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "joint_states": {
                 "items": {
@@ -8731,6 +8876,12 @@
             },
             "type": "array"
           },
+          "history_names": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "pose_version": {
             "format": "uint64",
             "minimum": 0,
@@ -9163,6 +9314,60 @@
             ],
             "type": "object"
           },
+          "HistoryReference": {
+            "properties": {
+              "basis": {
+                "type": "string"
+              },
+              "count": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "entity_kind": {
+                "type": "string"
+              },
+              "exact_hash": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "positional": {
+                "type": "boolean"
+              },
+              "set_hash": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "entity_kind",
+              "exact_hash",
+              "count",
+              "set_hash",
+              "positional",
+              "basis"
+            ],
+            "type": "object"
+          },
+          "HistoryTraceStatus": {
+            "properties": {
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
           "InspectedEntity": {
             "oneOf": [
               {
@@ -9220,6 +9425,27 @@
               },
               "coordinate_space": {
                 "$ref": "#/$defs/CoordinateSpace"
+              },
+              "history_references": {
+                "items": {
+                  "$ref": "#/$defs/HistoryReference"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "history_references_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "history_references_status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "reference": {
                 "$ref": "#/$defs/Entity"
@@ -9289,6 +9515,16 @@
             "properties": {
               "accuracy": {
                 "$ref": "#/$defs/Accuracy"
+              },
+              "history_names": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/HistoryTraceStatus"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "pose_version": {
                 "format": "uint64",

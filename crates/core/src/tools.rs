@@ -188,6 +188,8 @@ pub struct Inspect {
     pub entities: Vec<Entity>,
     pub query: Option<String>,
     pub pose_version: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_names: Option<bool>,
 }
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -338,6 +340,10 @@ pub struct CheckPrintability {
 #[serde(deny_unknown_fields)]
 pub struct GetSelection {
     pub workspace_id: String,
+    /// Request on-demand tracing; the worker rejects any replay that changes
+    /// the exact committed geometry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_names: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, JsonSchema)]
@@ -411,7 +417,7 @@ fn build_definitions() -> Vec<ToolSpec> {
         ),
         spec::<GetSelection>(
             "get_selection",
-            "Get the current revision-scoped selection, semantic labels, units and bounded exact part context. Entities are in the user's selection order; with several, the viewport badges them A, B, C…. Parts include the component source file and show() line when known. Expired references are reported instead of relocated silently.",
+            "Get the current revision-scoped selection, semantic labels, units and bounded exact part context. Entities are in the user's selection order; with several, the viewport badges them A, B, C…. Parts include the component source file and show() line when known. Set history_names=true to request on-demand history tracing; names are returned only when a replay reproduces the exact committed geometry. Expired references are reported instead of relocated silently.",
         ),
         spec::<crate::views::CaptureViews>(
             "capture_views",
@@ -748,7 +754,45 @@ impl Core {
             }
             "get_selection" => {
                 let args: GetSelection = parse(arguments)?;
-                self.get_selection(&args.workspace_id).await
+                let mut reply = self.get_selection(&args.workspace_id).await?;
+                if args.history_names == Some(true) {
+                    let refs = reply["entities"].clone();
+                    if refs.as_array().is_none_or(Vec::is_empty) {
+                        reply["history_names"] = json!({
+                            "status": "unavailable", "reason": "no_selection", "entities": []
+                        });
+                        return Ok(reply);
+                    }
+                    let inspection = self
+                        .query_as_actor(
+                            &context.actor,
+                            &args.workspace_id,
+                            reply["revision"].as_str().unwrap_or_default(),
+                            "inspect",
+                            json!({"entities": refs, "history_names": true}),
+                        )
+                        .await?;
+                    let entities = inspection["entities"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|item| {
+                            json!({
+                                "reference": item["reference"],
+                                "status": item["history_references_status"].as_str().unwrap_or("unavailable"),
+                                "geometry_reference": item["anchor"]["entity"],
+                                "reason": item["history_references_reason"],
+                                "references": item["history_references"].as_array().cloned().unwrap_or_default(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    reply["history_names"] = json!({
+                        "status": inspection["history_names"]["status"],
+                        "reason": inspection["history_names"]["reason"],
+                        "entities": entities,
+                    });
+                }
+                Ok(reply)
             }
             "capture_view" => {
                 let args: crate::views::Capture = parse(arguments)?;
