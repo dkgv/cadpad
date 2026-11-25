@@ -3943,6 +3943,41 @@
                       "minimum": 0,
                       "type": "integer"
                     },
+                    "fastener": {
+                      "description": "Explicit fastener properties published by the source model. Dimensions are\nmetadata supplied by the author; size labels never imply standard values.",
+                      "properties": {
+                        "kind": {
+                          "type": "string"
+                        },
+                        "length": {
+                          "format": "double",
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "mates": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": [
+                            "array",
+                            "null"
+                          ]
+                        },
+                        "size": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "size"
+                      ],
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
                     "features": {
                       "additionalProperties": {
                         "items": {
@@ -8941,6 +8976,38 @@
             ],
             "type": "object"
           },
+          "FastenerMetadata": {
+            "description": "Explicit fastener properties published by the source model. Dimensions are\nmetadata supplied by the author; size labels never imply standard values.",
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "length": {
+                "format": "double",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "mates": {
+                "items": {
+                  "type": "string"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "size": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "size"
+            ],
+            "type": "object"
+          },
           "FeatureKind": {
             "properties": {
               "count": {
@@ -9327,6 +9394,17 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "fastener": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/FastenerMetadata"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Explicit fastener metadata, when supplied to `show()`."
               },
               "feature_kinds": {
                 "additionalProperties": {
