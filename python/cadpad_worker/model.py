@@ -32,6 +32,36 @@ def finite(value):
     return value
 
 
+def validate_fastener(value):
+    """Validate explicit fastener metadata without inferring standard dimensions."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise DomainError("INVALID_PARAMETER", "fastener must be a mapping")
+    unknown = set(value) - {"kind", "size", "length", "mates"}
+    if unknown:
+        raise DomainError("INVALID_PARAMETER", f"Unknown fastener fields: {sorted(unknown)}")
+    for key in ("kind", "size"):
+        item = value.get(key)
+        if not isinstance(item, str) or not item.strip():
+            raise DomainError("INVALID_PARAMETER", f"fastener.{key} must be a non-empty string")
+    result = {"kind": value["kind"].strip(), "size": value["size"].strip()}
+    if "length" in value:
+        length = value["length"]
+        if isinstance(length, bool) or not isinstance(length, (int, float)) or not math.isfinite(length) or length <= 0:
+            raise DomainError("INVALID_PARAMETER", "fastener.length must be a positive finite number in mm")
+        result["length"] = float(length)
+    if "mates" in value:
+        mates = value["mates"]
+        if not isinstance(mates, (list, tuple)) or any(not isinstance(m, str) or not m.strip() for m in mates):
+            raise DomainError("INVALID_PARAMETER", "fastener.mates must be a list of non-empty published part names")
+        mates = [m.strip() for m in mates]
+        if len(set(mates)) != len(mates):
+            raise DomainError("INVALID_PARAMETER", "fastener.mates must not contain duplicate part names")
+        result["mates"] = mates
+    return result
+
+
 def vector(v):
     return [v.x, v.y, v.z]
 
@@ -139,6 +169,7 @@ class Part:
     source: dict | None = None
     # Enclosing project function of the publishing show() call; None at module level.
     function: str | None = None
+    fastener: dict | None = None
 
 
 class Model:
@@ -250,11 +281,14 @@ class Model:
                 frame = frame.f_back
             return None
 
-        def show(obj, *, name, position=(0, 0, 0), features=None, density=None, kind=None, _source=None):
+        def show(obj, *, name, position=(0, 0, 0), features=None, density=None, kind=None,
+                 fastener=None, _source=None):
             source = _source or call_site()
             if not isinstance(name, str) or not name or name in self.parts:
                 raise DomainError("INVALID_GEOMETRY", f"Published name must be unique: {name!r}")
             if isinstance(obj, cq.Assembly):
+                if fastener is not None:
+                    raise DomainError("INVALID_PARAMETER", "Fastener metadata must describe a published shape, not an assembly")
                 def publish_assembly(assembly, prefix, parent_location):
                     location = parent_location * assembly.loc
                     if assembly.obj is not None:
@@ -281,9 +315,11 @@ class Model:
             finite(position)
             if density is not None and (not math.isfinite(density) or density <= 0):
                 raise DomainError("INVALID_PARAMETER", "Density must be positive kg/m³")
+            fastener = validate_fastener(fastener)
             function = source.get("function") if source else None
             source = dict(file=source["file"], line=source["line"]) if source else None
-            self.parts[name] = Part(name, shape, tuple(position), features or {}, density, source=source, function=function)
+            self.parts[name] = Part(name, shape, tuple(position), features or {}, density,
+                                    source=source, function=function, fastener=fastener)
 
         def dimension(name, part, start, end, *, label=None, parameter=None):
             if not isinstance(name, str) or not name or name.startswith(("saved:", "overall:")):
@@ -308,6 +344,13 @@ class Model:
             if not path.is_relative_to(source_root / "assets"):
                 raise DomainError("BUILD_FAILED", "Imported assets must stay inside assets/")
             return cq.importers.importStep(str(path))
+
+        def import_step_named(asset, name="imported"):
+            path = (source_root / "assets" / asset).resolve(strict=True)
+            if not path.is_relative_to(source_root / "assets"):
+                raise DomainError("BUILD_FAILED", "Imported assets must stay inside assets/")
+            from .step_import import import_named_step
+            return import_named_step(path, name)
 
         def import_stl(asset):
             path = (source_root / "assets" / asset).resolve(strict=True)
@@ -338,7 +381,8 @@ class Model:
 
         helpers = dict(
             show=show, show_object=show_object, parameter=parameter, dimension=dimension, angle=angle,
-            import_step=import_step, import_stl=import_stl, fit_part=fit_part,
+            import_step=import_step, import_step_named=import_step_named,
+            import_stl=import_stl, fit_part=fit_part,
             cached_shape=self._geometry_cache.shape,
         )
         context = SimpleNamespace(parameters=values, **helpers)
@@ -413,6 +457,11 @@ class Model:
         from .fit import evaluate_all, enforce
         fit_results = evaluate_all(fit_specs, self.parts, source_root)
         enforce(fit_results)
+        for part in self.parts.values():
+            if part.fastener is not None:
+                missing = sorted(set(part.fastener.get("mates", ())) - self.parts.keys())
+                if missing:
+                    raise DomainError("INVALID_PARAMETER", f"Fastener {part.name} references unpublished mates: {missing}")
         generate_mesh = args.get("generate_mesh", True)
         if not isinstance(generate_mesh, bool):
             raise DomainError("INVALID_REQUEST", "generate_mesh must be boolean")
@@ -492,6 +541,8 @@ class Model:
             result["source"] = dict(part.source)
         if part.function is not None:
             result["builder_function"] = part.function
+        if part.fastener is not None:
+            result["fastener"] = copy.deepcopy(part.fastener)
         if part.density is not None and result["volume"] is not None:
             result["mass_kg"] = result["volume"] * 1e-9 * part.density
         result["dimensions"] = [dict(id=f"{part.name}:{axis}", kind="overall", axis=axis, value=value, unit="mm")

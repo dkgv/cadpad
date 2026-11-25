@@ -599,7 +599,9 @@ async fn build_import(
     let base = source["source"].as_str().unwrap();
     let source = match kind {
         ImportKind::Step => {
-            format!("{base}\nshow(import_step({quoted}), name=\"imported_{unique}\")\n")
+            format!(
+                "{base}\nshow(import_step_named({quoted}, name=\"imported_{unique}\"), name=\"imported_{unique}\")\n"
+            )
         }
         ImportKind::Stl => {
             let part = format!("part_{unique}");

@@ -26,8 +26,13 @@ fn model_file_adapter(entry: &str, asset: &str, format: &str) -> Result<String> 
     } else {
         ""
     };
+    let show = if format == "step" {
+        format!("show(import_step_named({name}, name=\"model\"), name=\"model\")")
+    } else {
+        format!("show(import_stl({name}), name=\"model\"{kind})")
+    };
     Ok(format!(
-        "# Generated Cadpad entry point.\n{MODEL_FILE_COMMENT}{path}\nshow(import_{format}({name}), name=\"model\"{kind})\n"
+        "# Generated Cadpad entry point.\n{MODEL_FILE_COMMENT}{path}\n{show}\n"
     ))
 }
 
@@ -1093,6 +1098,18 @@ pub fn configure_entry(
 #[cfg(test)]
 mod missing_entry_tests {
     use super::*;
+
+    #[test]
+    fn generated_step_entry_uses_named_import_while_stl_stays_surface_reference() {
+        let step = model_file_adapter("assets/device.step", "device.step", "step").unwrap();
+        assert!(
+            step.contains(
+                "show(import_step_named(\"device.step\", name=\"model\"), name=\"model\")"
+            )
+        );
+        let stl = model_file_adapter("assets/device.stl", "device.stl", "stl").unwrap();
+        assert!(stl.contains("show(import_stl(\"device.stl\"), name=\"model\", kind=\"surface\")"));
+    }
 
     #[test]
     fn deleted_generated_target_returns_to_browser_without_restoring_deleted_files() {
