@@ -1,6 +1,9 @@
-//! Saved, bounded simulation experiments. Runs are isolated from live motion;
-//! a pass describes the declared proxy model, never physical certification.
-use crate::{Core, Error, Result, dynamics, kinematics, motion, playback, portable};
+//! The project requirement catalog and the legacy motion-test entries still
+//! stored in it. `control_motion_tests` is retired: model-bound tests migrate
+//! to requirements on read ([`crate::motion_migration`]) and model-less ones
+//! are dropped. What remains here is the shared catalog type, its bounds and
+//! the simulation-state runner requirements evaluate through.
+use crate::{Core, Error, Result, dynamics, kinematics, playback, portable};
 use glam::DVec3;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -11,13 +14,131 @@ pub(crate) type Catalog = BTreeMap<String, Saved>;
 fn invalid(message: impl Into<String>) -> Error {
     Error::domain("INVALID_MOTION_TEST", message)
 }
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Action {
     /// 1/120 s ticks. Motor targets persist between actions; loads replace.
     pub ticks: u32,
     pub motors: Vec<dynamics::Motor>,
     pub loads: BTreeMap<String, dynamics::Load>,
+}
+
+/// Reusable input portion of a motion test, embedded by requirement simulation
+/// states. Keeps the legacy action and dynamics payloads byte-compatible.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SimulationState {
+    pub initial_coordinates: BTreeMap<String, f64>,
+    pub simulation: dynamics::Definition,
+    pub actions: Vec<Action>,
+}
+
+/// One captured sample for requirements proxy evaluation. Pose positions use
+/// the existing kinematics convention (mm); contact impulses are N s.
+#[derive(Clone, Debug)]
+pub(crate) struct RequirementSimulationSample {
+    pub evaluation: kinematics::Evaluation,
+    pub contact_impulses: BTreeMap<(String, String), [f64; 3]>,
+    pub baseline_poses: BTreeMap<String, BTreeMap<String, kinematics::Pose>>,
+}
+
+/// Run a requirement simulation with the same Rust dynamics engine and action
+/// semantics as saved motion tests, capturing every fixed tick. Push baselines
+/// omit only their selected driver motor while retaining all loads and other
+/// motors, exactly as the retired motion-test checker did.
+pub(crate) fn simulate_requirement_state(
+    revision: &crate::Revision,
+    state: &SimulationState,
+    contact_pairs: &[(String, String)],
+    driver_joints: &[String],
+    cancel: &tokio::sync::watch::Receiver<bool>,
+) -> Result<Vec<RequirementSimulationSample>> {
+    let mut definition = kinematics::decode(&revision.inputs.mechanism)?;
+    let moving: std::collections::BTreeSet<_> = definition
+        .joints
+        .iter()
+        .filter(|joint| !matches!(joint.kind, kinematics::JointKind::Fixed))
+        .map(|joint| joint.id.clone())
+        .collect();
+    if state
+        .initial_coordinates
+        .keys()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        != moving
+    {
+        return Err(invalid(
+            "Specify every moving joint's initial coordinate exactly once",
+        ));
+    }
+    for joint in &mut definition.joints {
+        if let Some(value) = state.initial_coordinates.get(&joint.id) {
+            joint.initial = *value;
+        }
+    }
+    let mechanism = kinematics::Mechanism::new(definition, &revision.model["parts"])?;
+    mechanism.evaluate()?;
+    let mut simulation =
+        dynamics::Simulation::new(state.simulation.clone(), &mechanism, &revision.model)?;
+    // Validate every action before the bounded simulation spends any ticks.
+    for action in &state.actions {
+        let mut candidate = simulation.clone();
+        candidate.set_loads(action.loads.clone())?;
+        for motor in &action.motors {
+            if candidate.motor(motor)? != motor.target {
+                return Err(invalid(
+                    "Test motor targets must lie inside declared joint limits",
+                ));
+            }
+        }
+    }
+    let mut baselines: BTreeMap<String, dynamics::Simulation> = driver_joints
+        .iter()
+        .cloned()
+        .map(|joint| (joint, simulation.clone()))
+        .collect();
+    let capture = |simulation: &dynamics::Simulation,
+                   baselines: &BTreeMap<String, dynamics::Simulation>,
+                   mechanism: &kinematics::Mechanism|
+     -> Result<RequirementSimulationSample> {
+        let evaluation = simulation.evaluation(mechanism)?;
+        let mut contact_impulses = BTreeMap::new();
+        for (a, b) in contact_pairs {
+            contact_impulses.insert((a.clone(), b.clone()), simulation.contact_impulse(a, b)?);
+        }
+        let mut baseline_poses = BTreeMap::new();
+        for (driver, baseline) in baselines {
+            baseline_poses.insert(driver.clone(), baseline.evaluation(mechanism)?.poses);
+        }
+        Ok(RequirementSimulationSample {
+            evaluation,
+            contact_impulses,
+            baseline_poses,
+        })
+    };
+    let mut samples = vec![capture(&simulation, &baselines, &mechanism)?];
+    for action in &state.actions {
+        simulation.set_loads(action.loads.clone())?;
+        for motor in &action.motors {
+            simulation.motor(motor)?;
+        }
+        for (driver, baseline) in &mut baselines {
+            baseline.set_loads(action.loads.clone())?;
+            for motor in &action.motors {
+                if motor.joint_id != *driver {
+                    baseline.motor(motor)?;
+                }
+            }
+        }
+        for _ in 0..action.ticks {
+            simulation.step(1, Some(cancel))?;
+            for baseline in baselines.values_mut() {
+                baseline.step(1, Some(cancel))?;
+            }
+            samples.push(capture(&simulation, &baselines, &mechanism)?);
+        }
+    }
+    Ok(samples)
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -133,92 +254,6 @@ impl Saved {
             Saved::ProjectSettings(_) => None,
         }
     }
-}
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct CheckReview {
-    /// Plain-language acceptance criterion, matching the Motion tests panel.
-    pub statement: String,
-    /// Set when this check has measured results from the latest run.
-    pub met: Option<bool>,
-    pub measurements: Vec<Measurement>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct TestReview {
-    /// Original free-text requirement / intent.
-    pub requirement: String,
-    pub checks: Vec<CheckReview>,
-    /// Short status for conversation: "Not run" or "N of M requirements met".
-    pub summary: String,
-}
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct TestInfo {
-    pub id: String,
-    pub definition: Definition,
-    pub outcome: Option<Outcome>,
-    /// Deterministic plain-language requirements and results for agents/MCP/UI.
-    pub review: TestReview,
-    /// No result, or the result belongs to another design of this model or engine.
-    pub stale: bool,
-    /// False when no workspace of the requirement's model was available to
-    /// compare: stale then reflects only engine changes, not design edits.
-    pub design_compared: bool,
-    pub frame_count: usize,
-    pub duration_s: f64,
-}
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Command {
-    List,
-    Upsert {
-        id: String,
-        definition: Definition,
-    },
-    Delete {
-        id: String,
-    },
-    Run {
-        id: String,
-    },
-    StartRun {
-        id: String,
-    },
-    CancelRun {
-        run_id: String,
-    },
-    Replay {
-        id: String,
-        frame_index: usize,
-        expected_pose_version: u64,
-    },
-}
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Control {
-    /// A model's workspace (to run, replay or inspect against that model) or
-    /// the project workspace (catalog edits only). Model workspaces of one
-    /// project share a single requirement catalog stored on the project.
-    pub workspace_id: String,
-    /// Current revision of workspace_id. Required for run/replay; empty skips
-    /// the design check for list/upsert/delete.
-    #[serde(default)]
-    pub revision: String,
-    /// Returned by list. Required for edits/runs to prevent lost updates.
-    pub expected_catalog: Option<String>,
-    pub command: Command,
-    /// Other model workspaces of the same project. Each requirement's stale
-    /// flag is compared against the listed workspace of its model.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub model_views: Vec<String>,
-}
-#[derive(Serialize, Deserialize, JsonSchema)]
-pub struct Reply {
-    pub catalog: String,
-    /// Workspace that stores this catalog (the project for model workspaces).
-    pub project_workspace: String,
-    pub tests: Vec<TestInfo>,
-    pub accuracy: String,
-    pub snapshot: Option<motion::Snapshot>,
-    pub run: Option<crate::motion_test_runs::Status>,
 }
 pub fn engine() -> String {
     static ENGINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -353,224 +388,6 @@ impl Definition {
         Ok(())
     }
 }
-pub fn execute(
-    definition: &Definition,
-    revision: &crate::Revision,
-    cancel: &tokio::sync::watch::Receiver<bool>,
-) -> Result<Run> {
-    definition.validate()?;
-    let mut mechanism_definition = kinematics::decode(&revision.inputs.mechanism)?;
-    let moving = mechanism_definition
-        .joints
-        .iter()
-        .filter(|j| !matches!(j.kind, kinematics::JointKind::Fixed))
-        .map(|j| j.id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    if definition
-        .initial_coordinates
-        .keys()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>()
-        != moving
-    {
-        return Err(invalid(
-            "Specify every moving joint's initial coordinate exactly once",
-        ));
-    }
-    for joint in &mut mechanism_definition.joints {
-        if let Some(value) = definition.initial_coordinates.get(&joint.id) {
-            joint.initial = *value;
-        }
-    }
-    let mechanism = kinematics::Mechanism::new(mechanism_definition, &revision.model["parts"])?;
-    let initial = mechanism.evaluate()?;
-    let mut simulation =
-        dynamics::Simulation::new(definition.simulation.clone(), &mechanism, &revision.model)?;
-    // Validate all actions and references before spending the tick budget.
-    for action in &definition.actions {
-        let mut candidate = simulation.clone();
-        candidate.set_loads(action.loads.clone())?;
-        for motor in &action.motors {
-            if candidate.motor(motor)? != motor.target {
-                return Err(invalid(
-                    "Test motor targets must lie inside declared joint limits",
-                ));
-            }
-        }
-    }
-    for check in &definition.checks {
-        match check {
-            Check::Displacement { body, .. } if !initial.poses.contains_key(body) => {
-                return Err(invalid("Missing displacement body"));
-            }
-            Check::Coordinate { joint_id, unit, .. }
-                if !initial
-                    .joints
-                    .iter()
-                    .any(|j| j.id == *joint_id && j.unit == *unit) =>
-            {
-                return Err(invalid("Missing joint or incorrect coordinate units"));
-            }
-            Check::Push {
-                pusher, receiver, ..
-            } if !initial.poses.contains_key(pusher) || !initial.poses.contains_key(receiver) => {
-                return Err(invalid("Missing push body"));
-            }
-            _ => (),
-        }
-    }
-    let mut baselines = BTreeMap::new();
-    for check in &definition.checks {
-        if let Check::Push { driver_joint, .. } = check {
-            baselines
-                .entry(driver_joint.clone())
-                .or_insert_with(|| simulation.clone());
-        }
-    }
-    let mut peaks = vec![0_f64; definition.checks.len()];
-    let mut samples = vec![playback::Sample::capture(0., 0, initial.clone())];
-    for action in &definition.actions {
-        simulation.set_loads(action.loads.clone())?;
-        for motor in &action.motors {
-            simulation.motor(motor)?;
-        }
-        for (driver, baseline) in &mut baselines {
-            baseline.set_loads(action.loads.clone())?;
-            for motor in &action.motors {
-                if motor.joint_id != *driver {
-                    baseline.motor(motor)?;
-                }
-            }
-        }
-        for _ in 0..action.ticks {
-            let frame = simulation.step(1, Some(cancel))?.current;
-            for baseline in baselines.values_mut() {
-                baseline.step(1, Some(cancel))?;
-            }
-            for (index, check) in definition.checks.iter().enumerate() {
-                if let Check::Push {
-                    pusher,
-                    receiver,
-                    direction: axis,
-                    ..
-                } = check
-                {
-                    peaks[index] = peaks[index].max(
-                        DVec3::from_array(simulation.contact_impulse(pusher, receiver)?)
-                            .dot(direction(*axis)?),
-                    );
-                }
-            }
-            samples.push(playback::Sample::capture(
-                frame.time_s,
-                frame.tick,
-                simulation.evaluation(&mechanism)?,
-            ));
-        }
-    }
-    let final_state = simulation.evaluation(&mechanism)?;
-    let displacement = |body: &str, axis: [f64; 3], evaluation: &kinematics::Evaluation| {
-        (DVec3::from_array(evaluation.poses[body].position)
-            - DVec3::from_array(initial.poses[body].position))
-        .dot(DVec3::from_array(axis))
-    };
-    let mut measurements = Vec::new();
-    let mut minimum = |label: String, actual: f64, expected: f64, unit: &str| {
-        measurements.push(Measurement {
-            label,
-            actual,
-            expected,
-            unit: unit.into(),
-            passed: actual >= expected,
-        });
-    };
-    for (index, check) in definition.checks.iter().enumerate() {
-        match check {
-            Check::Displacement {
-                body,
-                direction,
-                minimum_mm,
-            } => minimum(
-                format!("{body}: final displacement"),
-                displacement(body, *direction, &final_state),
-                *minimum_mm,
-                "mm",
-            ),
-            Check::Coordinate {
-                joint_id,
-                target,
-                unit,
-                tolerance,
-            } => {
-                let actual = final_state
-                    .joints
-                    .iter()
-                    .find(|j| j.id == *joint_id)
-                    .unwrap()
-                    .coordinate;
-                minimum(
-                    format!("{joint_id}: remaining tolerance (target {target} {unit})"),
-                    tolerance - (actual - target).abs(),
-                    0.,
-                    unit,
-                );
-            }
-            Check::Push {
-                pusher,
-                receiver,
-                driver_joint,
-                direction,
-                minimum_mm,
-                minimum_additional_mm,
-                minimum_sampled_impulse_ns,
-            } => {
-                let actual = displacement(receiver, *direction, &final_state);
-                let baseline = displacement(
-                    receiver,
-                    *direction,
-                    &baselines[driver_joint].evaluation(&mechanism)?,
-                );
-                minimum(
-                    format!("{receiver}: final displacement"),
-                    actual,
-                    *minimum_mm,
-                    "mm",
-                );
-                minimum(
-                    format!(
-                        "{receiver}: additional displacement versus disabled {driver_joint} (baseline {baseline:.6} mm)"
-                    ),
-                    actual - baseline,
-                    *minimum_additional_mm,
-                    "mm",
-                );
-                minimum(
-                    format!(
-                        "{pusher} → {receiver}: peak sampled normal impulse (last solver substep)"
-                    ),
-                    peaks[index],
-                    *minimum_sampled_impulse_ns,
-                    "N s",
-                );
-            }
-        }
-    }
-    let run = Run {
-        revision: revision.id.clone(),
-        engine: engine(),
-        input_fingerprint: portable::fingerprint(&revision.inputs)?,
-        definition_fingerprint: fingerprint(definition)?,
-        outcome: Outcome {
-            passed: measurements.iter().all(|m| m.passed),
-            measurements,
-        },
-        samples,
-    };
-    if serde_json::to_vec(&run)?.len() > MAX_BYTES / 2 {
-        return Err(invalid("Test trace exceeds 4 MiB"));
-    }
-    Ok(run)
-}
 
 pub(crate) fn catalog_fingerprint(catalog: &Catalog) -> Result<Option<String>> {
     if catalog.is_empty() {
@@ -580,7 +397,12 @@ pub(crate) fn catalog_fingerprint(catalog: &Catalog) -> Result<Option<String>> {
     }
 }
 pub(crate) fn encode(catalog: &Catalog) -> Result<Vec<u8>> {
-    if catalog.values().filter(|saved| saved.test().is_some()).count() > 16 {
+    if catalog
+        .values()
+        .filter(|saved| saved.test().is_some())
+        .count()
+        > 16
+    {
         return Err(invalid("At most 16 saved motion tests"));
     }
     crate::requirements::storage::check_count(catalog)?;
@@ -659,22 +481,29 @@ pub(crate) fn load(root: &std::path::Path, digest: Option<&str>) -> Result<Catal
 /// project share the project's catalog; standalone workspaces own their own.
 #[derive(Clone)]
 pub(crate) struct View {
-    id: String,
-    revision: String,
+    pub(crate) id: String,
     /// Workspace that stores the requirement catalog.
-    owner: String,
+    pub(crate) owner: String,
     /// The project model this view displays; None for the project/standalone design.
-    model: Option<ModelRef>,
-    inputs: String,
-    rebuild_required: bool,
+    pub(crate) model: Option<ModelRef>,
+    pub(crate) inputs: String,
     /// Copy of the catalog left in a model view by earlier versions.
     legacy: Catalog,
 }
-fn stale_error(message: &str) -> Error {
-    Error::domain("STALE_ENTITY", message)
-}
-
 impl Core {
+    pub(crate) async fn requirement_revision(
+        &self,
+        workspace_id: &str,
+        revision_id: &str,
+    ) -> Result<crate::Revision> {
+        let _memory = self.pin_workspace(workspace_id).await?;
+        let all = self.workspace(workspace_id).await?;
+        let ws = all
+            .get(workspace_id)
+            .ok_or_else(|| invalid("Unknown workspace"))?;
+        Ok((*ws.stored.revisions.load(revision_id).await?).clone())
+    }
+
     /// Requirements are stored once per project, on the workspace that model
     /// views branch from. Standalone workspaces store their own.
     pub(crate) async fn requirement_owner(&self, workspace_id: &str) -> Result<String> {
@@ -687,7 +516,7 @@ impl Core {
             _ => workspace_id.to_owned(),
         })
     }
-    async fn requirement_view(&self, workspace_id: &str) -> Result<View> {
+    pub(crate) async fn requirement_view(&self, workspace_id: &str) -> Result<View> {
         let owner = self.requirement_owner(workspace_id).await?;
         let all = self.workspace(workspace_id).await?;
         let ws = all
@@ -700,11 +529,9 @@ impl Core {
             .map(|(entry, builder)| ModelRef { entry, builder });
         Ok(View {
             id: workspace_id.to_owned(),
-            revision: ws.stored.current.clone(),
             owner,
             model,
             inputs: portable::fingerprint(&revision.inputs)?,
-            rebuild_required: revision.model["rebuild_required"] == true,
             legacy: ws.stored.motion_tests.clone(),
         })
     }
@@ -747,7 +574,7 @@ impl Core {
                     kind: "motion_tests_changed".into(),
                     job: None,
                     actor: Some(actor.into()),
-                    tool: Some("control_motion_tests".into()),
+                    tool: Some("control_requirements".into()),
                 });
             }
         }
@@ -762,24 +589,6 @@ impl Core {
         }
         Ok(())
     }
-    /// The addressed workspace plus any listed model views of the same project,
-    /// used to tell whether each requirement's last result matches its model.
-    async fn requirement_views(&self, addressed: &View, listed: &[String]) -> Vec<View> {
-        let mut views = vec![addressed.clone()];
-        for id in listed.iter().take(64) {
-            if views.iter().any(|view| view.id == *id) {
-                continue;
-            }
-            if let Ok(view) = self.requirement_view(id).await
-                && view.owner == addressed.owner
-                && view.owner != view.id
-            {
-                views.push(view);
-            }
-        }
-        views
-    }
-    /// For a model view: the project's requirements and save binding, which
     /// saving and unsaved-change tracking use instead of the view's own.
     pub(crate) async fn project_requirements(
         &self,
@@ -802,7 +611,10 @@ impl Core {
         let ws = all
             .get(&owner)
             .ok_or_else(|| invalid("Unknown project workspace"))?;
-        Ok(Some((ws.stored.motion_tests.clone(), ws.stored.project.clone())))
+        Ok(Some((
+            ws.stored.motion_tests.clone(),
+            ws.stored.project.clone(),
+        )))
     }
     /// After a model view saved into the project folder, record the written
     /// requirement archive on the project's binding too.
@@ -856,6 +668,7 @@ impl Core {
         let addressed = self.requirement_view(workspace_id).await?;
         self.adopt_view_requirements(&addressed, actor).await?;
         let catalog = self.catalog(&addressed.owner).await?;
+        let catalog = crate::motion_migration::migrate(self, actor, &addressed, catalog).await?;
         Ok((addressed.owner, catalog))
     }
     /// Replace the owner's catalog if it still has the `expected` fingerprint.
@@ -876,7 +689,9 @@ impl Core {
                 return Err(Error::domain("CANCELLED", "Requirement run cancelled"));
             }
             if run.views.values().any(|view| {
-                workspaces.get(&view.workspace).is_none_or(|ws| ws.stored.current != view.revision)
+                workspaces
+                    .get(&view.workspace)
+                    .is_none_or(|ws| ws.stored.current != view.revision)
             }) {
                 return Err(Error::domain(
                     "STALE_ENTITY",
@@ -910,348 +725,6 @@ impl Core {
             }
         }
         Ok(())
-    }
-
-    pub async fn control_motion_tests(&self, actor: &str, args: Control) -> Result<Reply> {
-        let _memory = self.pin_workspace(&args.workspace_id).await?;
-        use crate::motion_test_runs::{CancelOnDrop, Lease};
-        self.ensure_actor_active(actor)?;
-        let addressed = self.requirement_view(&args.workspace_id).await?;
-        let _owner_memory = self.pin_workspace(&addressed.owner).await?;
-        self.adopt_view_requirements(&addressed, actor).await?;
-        let owner = addressed.owner.clone();
-        if let Command::CancelRun { run_id } = &args.command {
-            // Serialize Stop with the result's final commit, but allow it after
-            // a design revision/catalog change: the operation ID is explicit.
-            self.motion_test_runs.stop(&owner, run_id, actor)?;
-            let views = self.requirement_views(&addressed, &args.model_views).await;
-            return reply(
-                &self.catalog(&owner).await?,
-                &addressed,
-                &views,
-                None,
-                self.motion_test_runs.status(&owner),
-            );
-        }
-        let test_id = match &args.command {
-            Command::Run { id } | Command::StartRun { id } => Some(id.clone()),
-            _ => None,
-        };
-        let Some(test_id) = test_id else {
-            return self.control_motion_tests_inner(actor, args, None).await;
-        };
-        let (lease, accepted) = {
-            if addressed.revision != args.revision {
-                return Err(stale_error("Design revision changed"));
-            }
-            let catalog = self.catalog(&owner).await?;
-            if args.expected_catalog.as_deref() != Some(&fingerprint(&catalog)?) {
-                return Err(Error::domain(
-                    "REVISION_CONFLICT",
-                    "Motion tests changed; list before running",
-                ));
-            }
-            let saved = catalog
-                .get(&test_id)
-                .and_then(Saved::test)
-                .ok_or_else(|| invalid("Unknown test"))?;
-            saved.definition.validate()?;
-            check_target(&saved.definition, &addressed)?;
-            if addressed.rebuild_required {
-                return Err(invalid("Build the design before running tests"));
-            }
-            let lease: Lease =
-                self.motion_test_runs
-                    .start(&owner, &args.revision, &test_id, actor)?;
-            let views = self.requirement_views(&addressed, &args.model_views).await;
-            let accepted = reply(&catalog, &addressed, &views, None, Some(lease.status()))?;
-            (lease, accepted)
-        };
-        let background = matches!(args.command, Command::StartRun { .. });
-        let args = Control {
-            command: Command::Run { id: test_id },
-            ..args
-        };
-        let core = self.clone();
-        let actor = actor.to_owned();
-        let task_lease = lease.clone();
-        let (send, receive) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let _watchers = task_lease.watch(core.actor_signal(&actor));
-            let view = args.workspace_id.clone();
-            let mut result = core
-                .control_motion_tests_inner(&actor, args, Some(task_lease.clone()))
-                .await;
-            let status = task_lease.finish(&mut result);
-            if let Ok(reply) = &mut result {
-                reply.run = status;
-            }
-            for workspace_id in std::collections::BTreeSet::from([owner, view]) {
-                let _ = core.activity.send(crate::events::Activity {
-                    workspace_id,
-                    kind: "motion_test_run_changed".into(),
-                    job: None,
-                    actor: Some(actor.clone()),
-                    tool: Some("control_motion_tests".into()),
-                });
-            }
-            let _ = send.send(result);
-        });
-        if background {
-            return Ok(accepted);
-        }
-        // Dropping an inline request cancels the owned operation. It never
-        // abandons an entered CPU task or an atomic result-persistence boundary.
-        let _cancel = CancelOnDrop(lease);
-        receive
-            .await
-            .map_err(|_| invalid("Simulation test task ended unexpectedly"))?
-    }
-
-    async fn control_motion_tests_inner(
-        &self,
-        actor: &str,
-        args: Control,
-        lease: Option<crate::motion_test_runs::Lease>,
-    ) -> Result<Reply> {
-        let _memory = self.pin_workspace(&args.workspace_id).await?;
-        self.ensure_actor_active(actor)?;
-        let addressed = self.requirement_view(&args.workspace_id).await?;
-        let owner = addressed.owner.clone();
-        let _owner_memory = self.pin_workspace(&owner).await?;
-        // Catalog edits are guarded by the catalog fingerprint. Runs and replays
-        // also need the addressed design to be the one the caller saw.
-        let design_bound = matches!(args.command, Command::Run { .. } | Command::Replay { .. });
-        if (design_bound || !args.revision.is_empty()) && addressed.revision != args.revision {
-            return Err(stale_error("Design revision changed"));
-        }
-        let views = self.requirement_views(&addressed, &args.model_views).await;
-        let run_revision = if matches!(args.command, Command::Run { .. }) {
-            let all = self.workspace(&addressed.id).await?;
-            let ws = all
-                .get(&addressed.id)
-                .ok_or_else(|| invalid("Unknown workspace"))?;
-            if ws.stored.current != args.revision {
-                return Err(stale_error("Design revision changed"));
-            }
-            Some(ws.stored.current_revision().clone())
-        } else {
-            None
-        };
-        let catalog = self.catalog(&owner).await?;
-        if matches!(args.command, Command::List) {
-            return reply(
-                &catalog,
-                &addressed,
-                &views,
-                None,
-                self.motion_test_runs.status(&owner),
-            );
-        }
-        let current = fingerprint(&catalog)?;
-        if args.expected_catalog.as_deref() != Some(&current) {
-            return Err(Error::domain(
-                "REVISION_CONFLICT",
-                "Motion tests changed; list and review before retrying",
-            ));
-        }
-        let mut next = catalog;
-        let changed = matches!(
-            args.command,
-            Command::Upsert { .. } | Command::Delete { .. } | Command::Run { .. }
-        );
-        match &args.command {
-            Command::List | Command::Replay { .. } => (),
-            Command::Upsert { id, definition } => {
-                let mut definition = definition.clone();
-                // A requirement saved from a model view checks that model.
-                if definition.model.is_none() {
-                    definition.model = addressed.model.clone();
-                }
-                definition.validate()?;
-                if next.get(id).is_some_and(|saved| saved.test().is_none()) {
-                    return Err(invalid("ID belongs to a requirement, not a motion test"));
-                }
-                next.insert(
-                    id.clone(),
-                    Saved::Test(SavedTest {
-                        definition,
-                        last_run: None,
-                    }),
-                );
-            }
-            Command::Delete { id } => {
-                if next.get(id).and_then(Saved::test).is_none() {
-                    return Err(invalid("Unknown test"));
-                }
-                next.remove(id);
-            }
-            Command::Run { id } => {
-                let lease = lease
-                    .as_ref()
-                    .ok_or_else(|| invalid("Missing simulation run lease"))?;
-                let revision = run_revision.ok_or_else(|| invalid("Missing test revision"))?;
-                if revision.model["rebuild_required"] == true {
-                    return Err(invalid("Build the design before running tests"));
-                }
-                let definition = next
-                    .get(id)
-                    .and_then(Saved::test)
-                    .ok_or_else(|| invalid("Unknown test"))?
-                    .definition
-                    .clone();
-                check_target(&definition, &addressed)?;
-                let cancel = lease.signal();
-                // Bounded construction admission also bounds CPU simulation runs.
-                let permit = self.construction_slot(cancel.clone()).await?;
-                lease.check()?;
-                // A queued run must not spend CPU on a catalog/design already
-                // superseded while it waited for construction admission.
-                self.ensure_actor_active(actor)?;
-                if self.requirement_view(&addressed.id).await?.revision != args.revision {
-                    return Err(stale_error("Design changed while the test was queued"));
-                }
-                if fingerprint(&self.catalog(&owner).await?)? != current {
-                    return Err(Error::domain(
-                        "REVISION_CONFLICT",
-                        "Motion tests changed while the run was queued",
-                    ));
-                }
-                lease.running();
-                let entered = lease.clone();
-                let process = self._process_lock.clone();
-                let run = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    let _entered = entered;
-                    let _owner = process;
-                    execute(&definition, &revision, &cancel)
-                })
-                .await
-                .map_err(|_| invalid("Simulation test task failed"))??;
-                next.get_mut(id)
-                    .and_then(Saved::test_mut)
-                    .ok_or_else(|| invalid("Unknown test"))?
-                    .last_run = Some(run);
-            }
-            Command::StartRun { .. } | Command::CancelRun { .. } => {
-                return Err(invalid("Invalid internal simulation operation"));
-            }
-        }
-        if changed {
-            if let Some(lease) = &lease {
-                lease.check()?;
-            }
-            encode(&next)?;
-            if design_bound && self.requirement_view(&addressed.id).await?.revision != args.revision
-            {
-                return Err(stale_error("Design changed during test operation"));
-            }
-            let mut workspaces = self.workspace(&owner).await?;
-            self.ensure_actor_active(actor)?;
-            let ws = workspaces
-                .get_mut(&owner)
-                .ok_or_else(|| invalid("Unknown workspace"))?;
-            if fingerprint(&ws.stored.motion_tests)? != current {
-                return Err(Error::domain(
-                    "REVISION_CONFLICT",
-                    "Motion tests changed during operation",
-                ));
-            }
-            // Copy only the catalog: unrelated jobs/title/save binding may have
-            // changed while the private simulation ran.
-            if let Some(lease) = &lease {
-                lease.check()?;
-            }
-            let mut stored = ws.stored.clone();
-            stored.motion_tests = next.clone();
-            self.persist(&stored).await?;
-            ws.stored = stored;
-            drop(workspaces);
-            for workspace_id in std::collections::BTreeSet::from([owner.clone(), addressed.id.clone()]) {
-                let _ = self.activity.send(crate::events::Activity {
-                    workspace_id,
-                    kind: "motion_tests_changed".into(),
-                    job: None,
-                    actor: Some(actor.into()),
-                    tool: Some("control_motion_tests".into()),
-                });
-            }
-        }
-        let mut snapshot = None;
-        if let Command::Replay {
-            id,
-            frame_index,
-            expected_pose_version,
-        } = &args.command
-        {
-            let saved = next
-                .get(id)
-                .and_then(Saved::test)
-                .ok_or_else(|| invalid("Unknown test"))?;
-            check_target(&saved.definition, &addressed)?;
-            let run = saved
-                .last_run
-                .as_ref()
-                .ok_or_else(|| invalid("Run the test before replaying it"))?;
-            if run.input_fingerprint != addressed.inputs || run.engine != engine() {
-                return Err(stale_error(
-                    "Rerun this test for the current design and engine",
-                ));
-            }
-            let name = saved.definition.name.clone();
-            let samples = run.samples.clone();
-            let mut workspaces = self.workspace(&addressed.id).await?;
-            self.ensure_actor_active(actor)?;
-            let ws = workspaces
-                .get_mut(&addressed.id)
-                .ok_or_else(|| invalid("Unknown workspace"))?;
-            if ws.stored.current != args.revision {
-                return Err(stale_error("Design changed during test operation"));
-            }
-            let state = motion::state(ws)?;
-            if state.version != *expected_pose_version || state.recorder.is_some() {
-                return Err(invalid(
-                    "Motion changed or recording is active; finish recording and retry",
-                ));
-            }
-            let playback = playback::Playback::test_trace(
-                id,
-                &name,
-                &args.revision,
-                samples,
-                *frame_index,
-                &state.mechanism,
-            )?;
-            state.playback = Some(playback);
-            state.version = state
-                .version
-                .checked_add(1)
-                .ok_or_else(|| invalid("Pose version exhausted"))?;
-            let mut value = motion::snapshot(ws)?;
-            value.actor = Some(actor.into());
-            let _ = self.motion_events.send(value.clone());
-            snapshot = Some(value);
-        }
-        reply(
-            &next,
-            &addressed,
-            &views,
-            snapshot,
-            self.motion_test_runs.status(&owner),
-        )
-    }
-}
-/// A requirement assigned to a model runs only in a view of that model.
-fn check_target(definition: &Definition, view: &View) -> Result<()> {
-    match &definition.model {
-        Some(model) if view.model.as_ref() != Some(model) => Err(Error::domain(
-            "INVALID_MOTION_TEST",
-            format!(
-                "This requirement checks {} ({}); open or prepare that model and address its workspace",
-                model.entry, model.builder
-            ),
-        )),
-        _ => Ok(()),
     }
 }
 
@@ -1295,7 +768,7 @@ fn format_direction(value: [f64; 3]) -> String {
             .join(", ")
     )
 }
-fn check_statement(check: &Check) -> String {
+pub(crate) fn check_statement(check: &Check) -> String {
     match check {
         Check::Displacement {
             body,
@@ -1338,440 +811,120 @@ fn check_statement(check: &Check) -> String {
         ),
     }
 }
-fn measurement_count(check: &Check) -> usize {
-    match check {
-        Check::Push { .. } => 3,
-        _ => 1,
-    }
-}
-/// Deterministic plain-language requirements and results for agents, MCP and UI.
-pub fn test_review(definition: &Definition, outcome: Option<&Outcome>) -> TestReview {
-    let measurements = outcome
-        .map(|value| value.measurements.as_slice())
-        .unwrap_or(&[]);
-    let mut offset = 0;
-    let checks = definition
-        .checks
-        .iter()
-        .map(|check| {
-            let count = measurement_count(check);
-            let slice = if outcome.is_some() && offset + count <= measurements.len() {
-                measurements[offset..offset + count].to_vec()
-            } else {
-                Vec::new()
-            };
-            if outcome.is_some() {
-                offset += count;
-            }
-            let met = (!slice.is_empty()).then(|| slice.iter().all(|item| item.passed));
-            CheckReview {
-                statement: check_statement(check),
-                met,
-                measurements: slice,
-            }
-        })
-        .collect::<Vec<_>>();
-    let summary = match outcome {
-        None => "Not run".into(),
-        Some(outcome) => {
-            let scored = checks.iter().filter(|check| check.met.is_some()).count();
-            let passed = checks
-                .iter()
-                .filter(|check| check.met == Some(true))
-                .count();
-            if scored == 0 {
-                format!(
-                    "{} of {} checks passed",
-                    outcome
-                        .measurements
-                        .iter()
-                        .filter(|item| item.passed)
-                        .count(),
-                    outcome.measurements.len()
-                )
-            } else {
-                format!("{passed} of {scored} requirements met")
-            }
-        }
-    };
-    TestReview {
-        requirement: definition.intent.clone(),
-        checks,
-        summary,
-    }
-}
-fn reply(
-    catalog: &Catalog,
-    addressed: &View,
-    views: &[View],
-    snapshot: Option<motion::Snapshot>,
-    run: Option<crate::motion_test_runs::Status>,
-) -> Result<Reply> {
-    let tests = catalog
-        .iter()
-        .filter_map(|(id, saved)| Some((id, saved.test()?)))
-        .map(|(id, saved)| {
-            let outcome = saved.last_run.as_ref().map(|run| run.outcome.clone());
-            let review = test_review(&saved.definition, outcome.as_ref());
-            // Compare the last result with a known view of the requirement's model.
-            let view = match &saved.definition.model {
-                Some(model) => views.iter().find(|view| view.model.as_ref() == Some(model)),
-                None => Some(addressed),
-            };
-            TestInfo {
-                id: id.clone(),
-                definition: saved.definition.clone(),
-                outcome,
-                review,
-                stale: saved.last_run.as_ref().is_none_or(|run| {
-                    run.engine != engine() || view.is_some_and(|view| view.inputs != run.input_fingerprint)
-                }),
-                design_compared: view.is_some(),
-                frame_count: saved.last_run.as_ref().map_or(0, |run| run.samples.len()),
-                duration_s: saved
-                    .last_run
-                    .as_ref()
-                    .and_then(|run| run.samples.last())
-                    .map_or(0., |s| s.time_s),
-            }
-        })
-        .collect();
-    Ok(Reply { catalog: fingerprint(catalog)?, project_workspace: addressed.owner.clone(), tests, run,
-            accuracy: "Approximate collision proxies and inertia. Push checks use peak sampled last-substep normal impulse, not average force; motion compared with driver disabled. CAD simulation only.".into(), snapshot })
-}
 
 #[cfg(test)]
-mod review_tests {
+mod tests {
+    //! Engine-level golden coverage for the simulation-state runner that
+    //! requirement `simulate` states evaluate through. The retired
+    //! `control_motion_tests` check semantics (push baselines, repeatability,
+    //! cancellation) live on in these traces.
     use super::*;
     use serde_json::json;
-    #[test]
-    fn plain_language_review_matches_ui_wording_and_pairs_measurements() {
-        let definition: Definition = serde_json::from_value(json!({
-            "name":"Lever pushes shoe",
-            "intent":"Make sure the lever reaches the shoe and pushes it.",
-            "initial_coordinates":{"slide":0,"hinge":0},
-            "simulation":{"gravity_m_s2":[0,0,-9.81],"bodies":{"lever":{"type":"dynamic","mass":{"type":"kilograms","mass_kg":0.2},"friction":0.3,"restitution":0},"shoe":{"type":"dynamic","mass":{"type":"kilograms","mass_kg":1},"friction":0.4,"restitution":0.1}}},
-            "actions":[{"ticks":60,"motors":[],"loads":{}}],
-            "checks":[
-                {"type":"push","pusher":"lever","receiver":"shoe","driver_joint":"hinge","direction":[1,0,0],"minimum_mm":5,"minimum_additional_mm":4,"minimum_sampled_impulse_ns":0.000001},
-                {"type":"coordinate","joint_id":"slide","target":0.01,"unit":"m","tolerance":0.0005},
-                {"type":"coordinate","joint_id":"hinge","target":1.5707963267948966,"unit":"rad","tolerance":0.017453292519943295},
-                {"type":"displacement","body":"shoe","direction":[0,-1,0],"minimum_mm":2}
-            ]
+
+    fn fixture() -> (crate::Revision, SimulationState) {
+        // Engine-only synthetic coverage. Packaged CAD coverage is a separate check.
+        let mechanism = json!({"joints":[
+            {"id":"lever_hinge","parent":null,"child":"lever","parent_frame":{"position_m":[0,0,0]},"child_frame":{"position_m":[-0.04,0,0]},"kind":{"type":"revolute","axis":[0,0,1]},"initial":0,"limits":[0,1]},
+            {"id":"shoe_slide","parent":null,"child":"shoe","parent_frame":{"position_m":[0.075,0.012,0]},"kind":{"type":"prismatic","axis":[0,1,0]},"initial":0,"limits":[0,0.04]}
+        ],"collision":{"bodies":{"lever":[{"shape":{"type":"bounds"}}],"shoe":[{"shape":{"type":"bounds"}}]},"clearance_m":0,"backoff_m":0.000001}});
+        let revision = crate::Revision {
+            id: uuid::Uuid::new_v4().to_string(),
+            parent: None,
+            actor: "test".into(),
+            restored_from: None,
+            inputs: crate::Inputs {
+                mechanism,
+                ..crate::Inputs::default()
+            },
+            model: json!({"parts":[
+                {"instance_id":"lever","position":[40,0,0],"bounds":{"min":[-40,-5,-5],"max":[40,5,5]},"volume":8000},
+                {"instance_id":"shoe","position":[75,12,0],"bounds":{"min":[-10,-5,-5],"max":[10,5,5]},"volume":2000}
+            ],"collision_validation":{"method":"brep_boolean_coverage","covered_instances":["lever","shoe"]}}),
+        };
+        let state: SimulationState = serde_json::from_value(json!({
+            "initial_coordinates":{"lever_hinge":0,"shoe_slide":0},
+            "simulation":{"gravity_m_s2":[0,0,0],"bodies":{
+                "lever":{"type":"dynamic","mass":{"type":"kilograms","mass_kg":0.2},"friction":0,"restitution":0},
+                "shoe":{"type":"dynamic","mass":{"type":"kilograms","mass_kg":0.1},"friction":0,"restitution":0}
+            }},
+            "actions":[{"ticks":120,"motors":[{"joint_id":"lever_hinge","target":0.3,"unit":"rad","stiffness":0.5,"damping":0.03,"max_force":0.2}],"loads":{"shoe":{"force_n":[0,-0.5,0],"torque_nm":[0,0,0]}}}]
         }))
         .unwrap();
-        let unread = test_review(&definition, None);
-        assert_eq!(unread.summary, "Not run");
-        assert_eq!(unread.requirement, definition.intent);
-        assert!(unread.checks[0].statement.contains("lever pushes shoe"));
-        assert!(unread.checks[0].statement.contains("at least 5 mm"));
-        assert!(unread.checks[0].statement.contains("world +X"));
-        assert!(unread.checks[0].statement.contains("hinge motor disabled"));
-        assert!(
-            unread.checks[0]
-                .statement
-                .contains("normal impulse of at least 0.000001 N s")
-        );
-        assert_eq!(
-            unread.checks[1].statement,
-            "slide finishes at 10 mm, within ±0.5 mm."
-        );
-        assert_eq!(
-            unread.checks[2].statement,
-            "hinge finishes at 90°, within ±1°."
-        );
-        assert!(unread.checks[3].statement.contains("world \u{2212}Y"));
-        assert!(unread.checks.iter().all(|check| check.met.is_none()));
+        (revision, state)
+    }
 
-        let outcome = Outcome {
-            passed: false,
-            measurements: vec![
-                Measurement {
-                    label: "shoe: final displacement".into(),
-                    actual: 6.,
-                    expected: 5.,
-                    unit: "mm".into(),
-                    passed: true,
-                },
-                Measurement {
-                    label: "shoe: additional".into(),
-                    actual: 3.,
-                    expected: 4.,
-                    unit: "mm".into(),
-                    passed: false,
-                },
-                Measurement {
-                    label: "impulse".into(),
-                    actual: 1e-6,
-                    expected: 1e-6,
-                    unit: "N s".into(),
-                    passed: true,
-                },
-                Measurement {
-                    label: "slide".into(),
-                    actual: 0.,
-                    expected: 0.,
-                    unit: "m".into(),
-                    passed: true,
-                },
-                Measurement {
-                    label: "hinge".into(),
-                    actual: 0.,
-                    expected: 0.,
-                    unit: "rad".into(),
-                    passed: true,
-                },
-                Measurement {
-                    label: "shoe: final displacement".into(),
-                    actual: 1.,
-                    expected: 2.,
-                    unit: "mm".into(),
-                    passed: false,
-                },
-            ],
-        };
-        let reviewed = test_review(&definition, Some(&outcome));
-        assert_eq!(reviewed.summary, "2 of 4 requirements met");
-        assert_eq!(reviewed.checks[0].met, Some(false));
-        assert_eq!(reviewed.checks[0].measurements.len(), 3);
-        assert_eq!(reviewed.checks[1].met, Some(true));
-        assert_eq!(reviewed.checks[3].met, Some(false));
+    fn run(
+        revision: &crate::Revision,
+        state: &SimulationState,
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<Vec<RequirementSimulationSample>> {
+        simulate_requirement_state(
+            revision,
+            state,
+            &[("lever".to_owned(), "shoe".to_owned())],
+            &["lever_hinge".to_owned()],
+            cancel,
+        )
     }
-}
 
-#[cfg(test)]
-mod run_control_tests {
-    use super::*;
-    use crate::motion_test_runs::State;
-    use serde_json::json;
-    async fn fixture() -> (tempfile::TempDir, Core, String, String, String) {
-        // Synthetic coverage metadata isolates scheduling/transaction tests.
-        // The native integration test verifies BRep-covered execution separately.
-        let temp = tempfile::tempdir().unwrap();
-        let core = Core::open(
-            temp.path().join("app"),
-            crate::worker::WorkerConfig::bundled("unused-worker".into()),
-        )
-        .await
-        .unwrap();
-        let ws = core.create_workspace("actor").await.unwrap();
-        let rev = {
-            let mut all = core.workspaces.lock().await;
-            let w = all.get_mut(&ws).unwrap();
-            let rev = w.stored.current.clone();
-            let mut revision = w.stored.revisions.resident_mut(&rev).unwrap();
-            revision.inputs.mechanism = json!({"joints":[{"id":"slide","parent":null,"child":"block","kind":{"type":"prismatic","axis":[1,0,0]},"initial":0,"limits":[0,0.02]}],"collision":{"bodies":{"block":[{"shape":{"type":"bounds"}}]},"clearance_m":0,"backoff_m":1e-6}});
-            revision.model = json!({"parts":[{"instance_id":"block","position":[0,0,0],"bounds":{"min":[-5,-5,-5],"max":[5,5,5]},"volume":1000}],"collision_validation":{"method":"brep_boolean_coverage","covered_instances":["block"]}});
-            rev
-        };
-        let catalog = call(&core, &ws, &rev, "actor", None, json!({"action":"list"}))
-            .await
-            .unwrap()
-            .catalog;
-        let saved=call(&core,&ws,&rev,"actor",Some(catalog),json!({"action":"upsert","id":"test","definition":{"name":"Slider response","intent":"Move at least 0.1 mm","initial_coordinates":{"slide":0},"simulation":{"gravity_m_s2":[0,0,0],"bodies":{"block":{"type":"dynamic","mass":{"type":"kilograms","mass_kg":1},"friction":0,"restitution":0}}},"actions":[{"ticks":30,"motors":[{"joint_id":"slide","target":0.01,"unit":"m","stiffness":100,"damping":2,"max_force":1}],"loads":{}}],"checks":[{"type":"displacement","body":"block","direction":[1,0,0],"minimum_mm":0.1}]}})).await.unwrap();
-        let completed = call(
-            &core,
-            &ws,
-            &rev,
-            "actor",
-            Some(saved.catalog),
-            json!({"action":"run","id":"test"}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(completed.run.as_ref().unwrap().state, State::Completed);
-        (temp, core, ws, rev, completed.catalog)
-    }
-    async fn call(
-        core: &Core,
-        ws: &str,
-        rev: &str,
-        actor: &str,
-        catalog: Option<String>,
-        command: serde_json::Value,
-    ) -> Result<Reply> {
-        core.control_motion_tests(actor,serde_json::from_value(json!({"workspace_id":ws,"revision":rev,"expected_catalog":catalog,"command":command})).unwrap()).await
-    }
-    async fn terminal(core: &Core, ws: &str, rev: &str) -> Reply {
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let reply = call(core, ws, rev, "local-user", None, json!({"action":"list"}))
-                    .await
-                    .unwrap();
-                if reply.run.as_ref().is_some_and(|run| !run.state.active()) {
-                    break reply;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap()
-    }
-    #[tokio::test]
-    async fn queued_background_stop_is_scoped_and_preserves_the_previous_result_definition_and_live_pose()
-     {
-        let (_temp, core, ws, rev, catalog) = fixture().await;
-        let before = serde_json::to_value(core.get_motion(&ws, &rev).await.unwrap()).unwrap();
-        let (_send, signal) = tokio::sync::watch::channel(false);
-        let one = core.construction_slot(signal.clone()).await.unwrap();
-        let two = core.construction_slot(signal).await.unwrap();
-        let started = call(
-            &core,
-            &ws,
-            &rev,
-            "actor",
-            Some(catalog.clone()),
-            json!({"action":"start_run","id":"test"}),
-        )
-        .await
-        .unwrap();
-        let run = started.run.unwrap();
-        assert_eq!(run.state, State::Queued);
+    #[test]
+    fn lever_contact_push_trace_is_repeatable_and_the_driver_baseline_stays_put() {
+        let (revision, state) = fixture();
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let first = run(&revision, &state, &cancel).unwrap();
+        assert_eq!(first.len(), 121);
+        let second = run(&revision, &state, &cancel).unwrap();
+        assert_eq!(
+            format!("{first:?}"),
+            format!("{second:?}"),
+            "identical inputs must produce identical traces"
+        );
+        // Direct normal contact happened during the push.
         assert!(
-            call(
-                &core,
-                &ws,
-                &rev,
-                "actor",
-                Some(catalog.clone()),
-                json!({"action":"start_run","id":"test"})
-            )
-            .await
-            .is_err()
+            first.iter().any(|sample| sample
+                .contact_impulses
+                .get(&("lever".to_owned(), "shoe".to_owned()))
+                .is_some_and(|impulse| impulse.iter().any(|v| v.abs() > 0.))),
+            "expected sampled contact between lever and shoe"
         );
-        assert_eq!(
-            call(
-                &core,
-                &ws,
-                &rev,
-                "intruder",
-                None,
-                json!({"action":"cancel_run","run_id":run.id})
-            )
-            .await
-            .err()
+        // The shoe travelled in +y (pose positions are mm).
+        let start_y = first[0].evaluation.poses["shoe"].position[1];
+        let end_y = first.last().unwrap().evaluation.poses["shoe"].position[1];
+        assert!(
+            end_y - start_y > 4.,
+            "shoe barely moved: {start_y} -> {end_y}"
+        );
+        // The driver-disabled baseline kept the lever parked, so its shoe
+        // trace stays at the start (modulo the small persistent load).
+        let baseline = &first
+            .last()
             .unwrap()
-            .code(),
-            "UNSUPPORTED_OPERATION"
+            .baseline_poses
+            .get("lever_hinge")
+            .expect("driver baseline pose");
+        let baseline_y = baseline["shoe"].position[1];
+        assert!(
+            (baseline_y - start_y).abs() < (end_y - start_y) / 2.,
+            "baseline shoe moved as much as the driven run: {baseline_y} vs {end_y}"
         );
-        // Stop remains possible even if the caller's design/catalog observation
-        // is old. Only the exact workspace-scoped operation is targeted.
-        let stopped = call(
-            &core,
-            &ws,
-            "old-revision",
-            "local-user",
-            None,
-            json!({"action":"cancel_run","run_id":run.id}),
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            stopped.run.unwrap().state,
-            State::Cancelling | State::Cancelled
-        ));
-        let stopped = terminal(&core, &ws, &rev).await;
-        assert_eq!(stopped.run.unwrap().state, State::Cancelled);
-        assert_eq!(stopped.catalog, catalog);
-        assert!(stopped.tests[0].outcome.is_some());
-        assert_eq!(
-            before,
-            serde_json::to_value(core.get_motion(&ws, &rev).await.unwrap()).unwrap()
-        );
-        assert_eq!(core.construction_slots.available_permits(), 0);
-        drop((one, two));
     }
-    #[tokio::test]
-    async fn revoked_actor_and_dropped_inline_wait_cancel_owned_queued_work_without_result_commits()
-    {
-        let (_temp, core, ws, rev, catalog) = fixture().await;
-        let (_send, signal) = tokio::sync::watch::channel(false);
-        let one = core.construction_slot(signal.clone()).await.unwrap();
-        let two = core.construction_slot(signal).await.unwrap();
-        call(
-            &core,
-            &ws,
-            &rev,
-            "agent",
-            Some(catalog.clone()),
-            json!({"action":"start_run","id":"test"}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(core.revoke_actor("agent").await, 1);
+
+    #[test]
+    fn cancelled_missing_coordinate_and_out_of_limit_motor_never_run() {
+        let (revision, mut state) = fixture();
+        let (_sender, cancel) = tokio::sync::watch::channel(true);
         assert_eq!(
-            terminal(&core, &ws, &rev).await.run.unwrap().state,
-            State::Cancelled
+            run(&revision, &state, &cancel).unwrap_err().code(),
+            "CANCELLED"
         );
-        let task = {
-            let core = core.clone();
-            let ws = ws.clone();
-            let rev = rev.clone();
-            let catalog = catalog.clone();
-            tokio::spawn(async move {
-                call(
-                    &core,
-                    &ws,
-                    &rev,
-                    "inline",
-                    Some(catalog),
-                    json!({"action":"run","id":"test"}),
-                )
-                .await
-            })
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while !core
-                .motion_test_runs
-                .status(&ws)
-                .is_some_and(|run| run.actor == "inline" && run.state.active())
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        task.abort();
-        let _ = task.await;
-        let ended = terminal(&core, &ws, &rev).await;
-        assert_eq!(ended.run.unwrap().state, State::Cancelled);
-        assert_eq!(ended.catalog, catalog);
-        drop((one, two));
-    }
-    #[tokio::test]
-    async fn catalog_changes_while_queued_fail_without_replacing_the_edited_definition() {
-        let (_temp, core, ws, rev, catalog) = fixture().await;
-        let (_send, signal) = tokio::sync::watch::channel(false);
-        let one = core.construction_slot(signal.clone()).await.unwrap();
-        let two = core.construction_slot(signal).await.unwrap();
-        let started = call(
-            &core,
-            &ws,
-            &rev,
-            "actor",
-            Some(catalog.clone()),
-            json!({"action":"start_run","id":"test"}),
-        )
-        .await
-        .unwrap();
-        let mut definition = serde_json::to_value(&started.tests[0].definition).unwrap();
-        definition["name"] = json!("Edited while waiting");
-        let edited = call(
-            &core,
-            &ws,
-            &rev,
-            "editor",
-            Some(catalog),
-            json!({"action":"upsert","id":"test","definition":definition}),
-        )
-        .await
-        .unwrap();
-        drop((one, two));
-        let ended = terminal(&core, &ws, &rev).await;
-        assert_eq!(ended.run.as_ref().unwrap().state, State::Failed);
-        assert_eq!(ended.run.unwrap().error.unwrap().code, "REVISION_CONFLICT");
-        assert_eq!(ended.catalog, edited.catalog);
-        assert_eq!(ended.tests[0].definition.name, "Edited while waiting");
-        assert!(ended.tests[0].outcome.is_none());
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        state.initial_coordinates.remove("shoe_slide");
+        assert_eq!(
+            run(&revision, &state, &cancel).unwrap_err().code(),
+            "INVALID_MOTION_TEST"
+        );
+        state = fixture().1;
+        state.actions[0].motors[0].target = 2.; // past the declared [0, 1] limit
+        assert!(run(&revision, &state, &cancel).is_err());
     }
 }

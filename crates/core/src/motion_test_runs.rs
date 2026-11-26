@@ -259,13 +259,6 @@ impl Lease {
             }
         });
     }
-    pub(crate) fn check(&self) -> Result<()> {
-        if *self.signal().borrow() {
-            Err(Error::domain("CANCELLED", self.0.runs.1.cancelled))
-        } else {
-            Ok(())
-        }
-    }
     pub(crate) fn finish<T>(&self, result: &mut Result<T>) -> Option<Status> {
         let mut status = None;
         self.update(|entry| {

@@ -209,48 +209,6 @@ impl Recorder {
     }
 }
 impl Playback {
-    pub(crate) fn test_trace(
-        test_id: &str,
-        name: &str,
-        revision: &str,
-        samples: Vec<Sample>,
-        index: usize,
-        mechanism: &Mechanism,
-    ) -> Result<Self> {
-        let record = Recording {
-            schema_version: 1,
-            revision: revision.into(),
-            input_fingerprint: "0".repeat(64),
-            source_mode: "simulate".into(),
-            samples,
-        };
-        let metadata = Metadata {
-            id: format!("motion-test:{test_id}"),
-            name: name.into(),
-            revision: revision.into(),
-            input_fingerprint: record.input_fingerprint.clone(),
-            source_mode: "simulate".into(),
-            digest: "0".repeat(64),
-            bytes: 0,
-            frame_count: record.samples.len(),
-            duration_s: record
-                .samples
-                .last()
-                .ok_or_else(|| invalid("Empty test trace"))?
-                .time_s,
-            capacity_reached: false,
-        };
-        if index >= record.samples.len() || record.samples.len() > MAX_FRAMES {
-            return Err(invalid("Test frame out of range"));
-        }
-        validate_samples(&record, &metadata, Some(mechanism))?;
-        record.samples[index].evaluation(mechanism)?;
-        Ok(Self {
-            metadata,
-            recording: Arc::new(record),
-            index,
-        })
-    }
     pub(crate) fn evaluation(&self, mechanism: &Mechanism) -> Result<Evaluation> {
         self.recording.samples[self.index].evaluation(mechanism)
     }
