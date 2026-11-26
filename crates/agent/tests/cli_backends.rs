@@ -5,6 +5,7 @@ use serde_json::json;
 fn backend_labels_round_trip() {
     for backend in [
         Backend::AnthropicApi,
+        Backend::OpenRouterApi,
         Backend::ClaudeCli,
         Backend::CodexCli,
         Backend::CursorCli,
@@ -13,6 +14,9 @@ fn backend_labels_round_trip() {
         assert_eq!(Backend::parse(backend.as_str()).unwrap(), backend);
     }
     assert!(Backend::parse("nope").is_err());
+    assert_eq!(Backend::parse("openrouter").unwrap(), Backend::OpenRouterApi);
+    assert!(!Backend::OpenRouterApi.is_cli());
+    assert_eq!(serde_json::to_value(Backend::OpenRouterApi).unwrap(), "openrouter_api");
 }
 
 fn run(backend: Backend, lines: &[serde_json::Value]) -> Vec<StreamEvent> {
@@ -378,7 +382,7 @@ async fn cli_stderr_is_drained_so_verbose_output_cannot_block_completion() {
 
 #[test]
 fn model_catalogs_keep_selectable_ids_and_drop_hidden_or_unsafe_values() {
-    use cadpad_agent::cli::{parse_anthropic_models, parse_claude_model_help, parse_codex_models, parse_cursor_models, selected_model};
+    use cadpad_agent::cli::{parse_anthropic_models, parse_claude_model_help, parse_codex_models, parse_cursor_models, parse_openrouter_models, selected_model};
     let cursor = parse_cursor_models("Available models\n\nauto - Auto (default)\ngpt-5.6-sol-high - GPT-5.6 Sol High\n--bad - Ignored\n");
     assert_eq!(cursor.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["auto", "gpt-5.6-sol-high"]);
     let codex = parse_codex_models(&json!({"models":[
@@ -392,6 +396,16 @@ fn model_catalogs_keep_selectable_ids_and_drop_hidden_or_unsafe_values() {
     assert_eq!(claude.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(), ["fable", "opus", "sonnet"]);
     let anthropic = parse_anthropic_models(&json!({"data":[{"id":"claude-sonnet","display_name":"Claude Sonnet"},{"id":"claude sonnet","display_name":"Spaced"}]}));
     assert_eq!(anthropic.len(), 1);
+    let openrouter = parse_openrouter_models(&json!({"data":[
+        {"id":"anthropic/claude-sonnet","name":"Anthropic: Claude Sonnet","supported_parameters":["tools","temperature"]},
+        {"id":"openai/gpt-no-tools","name":"No tools","supported_parameters":["temperature"]},
+        {"id":"google/gemini","name":"Google: Gemini","supported_parameters":["tools"]},
+        {"id":"google/gemini","name":"Duplicate","supported_parameters":["tools"]},
+        {"id":"bad model","name":"Unsafe","supported_parameters":["tools"]}
+    ]}));
+    assert_eq!(openrouter.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+        ["anthropic/claude-sonnet", "google/gemini"]);
+    assert_eq!(openrouter[0].label, "Anthropic: Claude Sonnet");
     assert_eq!(selected_model(" composer-2.5 "), "composer-2.5");
     assert_eq!(selected_model("Cursor CLI"), "");
     assert_eq!(selected_model("--model"), "");

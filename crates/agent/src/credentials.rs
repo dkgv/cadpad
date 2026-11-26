@@ -1,4 +1,6 @@
+use crate::cli::Backend;
 use cadpad_core::{Error, Result};
+use std::sync::Arc;
 use zeroize::Zeroizing;
 
 /// Never Debug/Serialize: keys stay outside tools, project files and event logs.
@@ -18,22 +20,57 @@ pub trait Credentials: Send + Sync {
     fn get(&self) -> Result<Option<Secret>>;
     fn set(&self, secret: Secret) -> Result<()>;
     fn delete(&self) -> Result<()>;
+    /// Per-backend credential storage. `None` shares the base store, which is
+    /// appropriate for test and cloud implementations.
+    fn scoped(&self, _backend: Backend) -> Option<Arc<dyn Credentials>> {
+        None
+    }
 }
+
+/// Direct API keys. Each backend keeps its key in a separate keychain account.
 pub struct SystemCredentials;
-#[cfg(target_os = "macos")]
 impl Credentials for SystemCredentials {
     fn get(&self) -> Result<Option<Secret>> {
-        keychain_get("anthropic-api-key")
+        KeychainCredentials::new(Backend::AnthropicApi).get()
     }
     fn set(&self, secret: Secret) -> Result<()> {
-        keychain_set("anthropic-api-key", secret)
+        KeychainCredentials::new(Backend::AnthropicApi).set(secret)
     }
     fn delete(&self) -> Result<()> {
-        keychain_delete("anthropic-api-key")
+        KeychainCredentials::new(Backend::AnthropicApi).delete()
+    }
+    fn scoped(&self, backend: Backend) -> Option<Arc<dyn Credentials>> {
+        Some(Arc::new(KeychainCredentials::new(backend)))
+    }
+}
+
+struct KeychainCredentials {
+    account: &'static str,
+}
+impl KeychainCredentials {
+    fn new(backend: Backend) -> Self {
+        Self {
+            account: match backend {
+                Backend::OpenRouterApi => "openrouter-api-key",
+                _ => "anthropic-api-key",
+            },
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+impl Credentials for KeychainCredentials {
+    fn get(&self) -> Result<Option<Secret>> {
+        keychain_get(self.account)
+    }
+    fn set(&self, secret: Secret) -> Result<()> {
+        keychain_set(self.account, secret)
+    }
+    fn delete(&self) -> Result<()> {
+        keychain_delete(self.account)
     }
 }
 #[cfg(not(target_os = "macos"))]
-impl Credentials for SystemCredentials {
+impl Credentials for KeychainCredentials {
     fn get(&self) -> Result<Option<Secret>> {
         Err(Error::domain(
             "UNSUPPORTED_OPERATION",
@@ -108,7 +145,8 @@ fn keychain_set(account: &str, secret: Secret) -> Result<()> {
 }
 #[cfg(target_os = "macos")]
 fn keychain_delete(account: &str) -> Result<()> {
-    match keyring::Entry::new("app.cadpad.desktop", account).and_then(|entry| entry.delete_credential())
+    match keyring::Entry::new("app.cadpad.desktop", account)
+        .and_then(|entry| entry.delete_credential())
     {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(_) => Err(Error::domain(

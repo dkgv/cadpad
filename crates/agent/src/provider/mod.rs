@@ -1,3 +1,6 @@
+mod openrouter;
+pub use openrouter::OpenRouter;
+
 use crate::credentials::Secret;
 use async_trait::async_trait;
 use cadpad_core::{Error, Result, tools::ToolSpec};
@@ -288,7 +291,7 @@ impl EventDecoder {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            if !data.is_empty() {
+            if !data.is_empty() && data != "[DONE]" {
                 events.push(serde_json::from_str(&data).map_err(|_| {
                     Error::domain(
                         "LLM_PROTOCOL_ERROR",

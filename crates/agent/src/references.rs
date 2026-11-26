@@ -522,7 +522,14 @@ mod tests {
         for bad in ["", "/etc", "../x", "a/./b", "a//b", "C:/x"] {
             assert!(validate_folders(&[bad.into()]).is_err(), "{bad}");
         }
-        assert!(validate_folders(&(0..=MAX_FOLDERS).map(|i| format!("f{i}")).collect::<Vec<_>>()).is_err());
+        assert!(
+            validate_folders(
+                &(0..=MAX_FOLDERS)
+                    .map(|i| format!("f{i}"))
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
     }
 
     #[test]

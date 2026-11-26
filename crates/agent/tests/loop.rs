@@ -977,9 +977,12 @@ async fn viewport_references_reach_the_model_with_component_source_exact_propert
     assert!(context.contains("\"label\": \"top\""));
     assert!(context.contains("<source path=\"parts/plate.py\""));
     assert!(context.contains("cq.Workplane().box(40, 20, 6)"));
-    assert!(
-        !context.contains("\"unavailable\""),
-        "exact inspection should succeed: {context}"
+    // Exact inspection succeeded: the reference block carries exact entities.
+    // History names are opt-in and report their own absence separately.
+    let references = exact_inspection(&context);
+    assert_eq!(
+        references["exact_properties"]["history_names"]["status"],
+        "unavailable"
     );
     let history = service.conversation(&ws, None).unwrap();
     assert_eq!(
@@ -1005,52 +1008,122 @@ async fn viewport_references_reach_the_model_with_component_source_exact_propert
             if let Some(revision) = job.resulting_revision {
                 break revision;
             }
-            assert_ne!(job.state, cadpad_core::JobState::Failed, "{:?}", job.diagnostics);
+            assert_ne!(
+                job.state,
+                cadpad_core::JobState::Failed,
+                "{:?}",
+                job.diagnostics
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let model_entity = cadpad_core::tools::Entity {
         revision: model_revision.clone(),
         ..entity("part:0")
     };
-    let turn = service.start_in_chat_for_model(
-        ws.clone(), "Adjust this model".into(), attachments(vec![model_entity]), None,
-        Some(model_workspace.clone()),
-    ).await.unwrap();
-    assert_eq!(turn.workspace_id, ws, "the conversation remains on the project");
+    let turn = service
+        .start_in_chat_for_model(
+            ws.clone(),
+            "Adjust this model".into(),
+            attachments(vec![model_entity]),
+            None,
+            Some(model_workspace.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        turn.workspace_id, ws,
+        "the conversation remains on the project"
+    );
     let completed = terminal(&service, &turn).await;
-    assert_eq!(completed.state, TurnState::Succeeded, "{:?}", completed.error);
+    assert_eq!(
+        completed.state,
+        TurnState::Succeeded,
+        "{:?}",
+        completed.error
+    );
     let message = provider.0.lock().unwrap().clone().unwrap();
     let context = match &message.content[0] {
         Block::Text { text } => text,
         other => panic!("expected reference context, got {other:?}"),
     };
     assert!(context.contains("parts/plate.py"));
-    assert!(!context.contains("\"unavailable\""), "model references resolve in their own workspace: {context}");
-    assert_eq!(service.conversation(&ws, None).unwrap()["messages"][2]["references"][0]["part"], "plate");
+    let references = exact_inspection(&context);
+    assert!(
+        references["exact_properties"]["entities"].as_array().is_some_and(|entities| !entities
+            .is_empty()),
+        "model references resolve in their own workspace: {references}"
+    );
+    assert_eq!(
+        service.conversation(&ws, None).unwrap()["messages"][2]["references"][0]["part"],
+        "plate"
+    );
     let unrelated = core.create_workspace("user").await.unwrap();
-    assert_eq!(service.start_in_chat_for_model(
-        ws.clone(), "Wrong model".into(), Default::default(), None, Some(unrelated),
-    ).await.unwrap_err().code(), "INVALID_REQUEST");
+    assert_eq!(
+        service
+            .start_in_chat_for_model(
+                ws.clone(),
+                "Wrong model".into(),
+                Default::default(),
+                None,
+                Some(unrelated),
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        "INVALID_REQUEST"
+    );
     // Explorer folders reach the model as a listing of the project files under them.
-    assert_eq!(service.start_with(
-        ws.clone(), "Tidy".into(),
-        cadpad_agent::references::Attachments { folders: vec!["../etc".into()], ..Default::default() },
-    ).await.unwrap_err().code(), "INVALID_REQUEST");
-    let turn = service.start_with(
-        ws.clone(), "Tidy up this folder".into(),
-        cadpad_agent::references::Attachments { folders: vec!["parts/".into()], ..Default::default() },
-    ).await.unwrap();
+    assert_eq!(
+        service
+            .start_with(
+                ws.clone(),
+                "Tidy".into(),
+                cadpad_agent::references::Attachments {
+                    folders: vec!["../etc".into()],
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        "INVALID_REQUEST"
+    );
+    let turn = service
+        .start_with(
+            ws.clone(),
+            "Tidy up this folder".into(),
+            cadpad_agent::references::Attachments {
+                folders: vec!["parts/".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let completed = terminal(&service, &turn).await;
-    assert_eq!(completed.state, TurnState::Succeeded, "{:?}", completed.error);
+    assert_eq!(
+        completed.state,
+        TurnState::Succeeded,
+        "{:?}",
+        completed.error
+    );
     let message = provider.0.lock().unwrap().clone().unwrap();
-    let [Block::Text { text: context }, Block::Text { text: prompt }] = message.content.as_slice() else {
+    let [Block::Text { text: context }, Block::Text { text: prompt }] = message.content.as_slice()
+    else {
         panic!("unexpected prompt blocks: {:?}", message.content)
     };
     assert_eq!(prompt, "Tidy up this folder");
-    assert!(context.contains("<folder path=\"parts\" files=\"1\">"), "{context}");
+    assert!(
+        context.contains("<folder path=\"parts\" files=\"1\">"),
+        "{context}"
+    );
     assert!(context.contains("- parts/plate.py"), "{context}");
-    assert!(!context.contains("model.py\n"), "files outside the folder stay out: {context}");
+    assert!(
+        !context.contains("model.py\n"),
+        "files outside the folder stay out: {context}"
+    );
     let history = service.conversation(&ws, None).unwrap();
     assert_eq!(history["messages"][4]["folders"], json!(["parts"]));
 }
@@ -1244,7 +1317,10 @@ async fn saved_chats_isolate_context_resume_and_survive_restart() {
     )
     .await
     .unwrap();
-    assert_eq!(reloaded.conversation(&ws, None).unwrap()["chats"], json!([]));
+    assert_eq!(
+        reloaded.conversation(&ws, None).unwrap()["chats"],
+        json!([])
+    );
     let restored = reloaded
         .change_chat(&ws, "restore", Some(&first_id))
         .await
@@ -1274,7 +1350,10 @@ async fn legacy_chat_migrates_and_failed_chat_save_preserves_selection() {
         core,
         root.clone(),
         Arc::new(MemoryCredentials::default()),
-        Arc::new(Factory(Arc::new(ChatHistoryProvider(Mutex::new(vec![]), None)))),
+        Arc::new(Factory(Arc::new(ChatHistoryProvider(
+            Mutex::new(vec![]),
+            None,
+        )))),
         Limits::default(),
     )
     .await
@@ -1285,7 +1364,10 @@ async fn legacy_chat_migrates_and_failed_chat_save_preserves_selection() {
     std::fs::rename(root.join("conversations"), root.join("backup")).unwrap();
     std::fs::write(root.join("conversations"), b"blocked").unwrap();
     assert!(service.change_chat(&ws, "new", None).await.is_err());
-    assert_eq!(service.conversation(&ws, None).unwrap()["active_chat_id"], id);
+    assert_eq!(
+        service.conversation(&ws, None).unwrap()["active_chat_id"],
+        id
+    );
     std::fs::remove_file(root.join("conversations")).unwrap();
     std::fs::rename(root.join("backup"), root.join("conversations")).unwrap();
     let new = service.change_chat(&ws, "new", None).await.unwrap();
@@ -1318,8 +1400,15 @@ printf '%s\n' '{"type":"tool_call","subtype":"started","call_id":"inspect","tool
 "#).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "cli_clarification_finishes_persists_and_accepts_another_message", "--nocapture"])
-            .env(FLAG, "1").env("PATH", bin.path()).spawn().unwrap();
+            .args([
+                "--exact",
+                "cli_clarification_finishes_persists_and_accepts_another_message",
+                "--nocapture",
+            ])
+            .env(FLAG, "1")
+            .env("PATH", bin.path())
+            .spawn()
+            .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
@@ -1336,18 +1425,28 @@ printf '%s\n' '{"type":"tool_call","subtype":"started","call_id":"inspect","tool
     }
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         let temp = tempfile::tempdir().unwrap();
-        let core = Core::open(temp.path().join("core"), config()).await.unwrap();
+        let core = Core::open(temp.path().join("core"), config())
+            .await
+            .unwrap();
         let ws = core.create_workspace("user").await.unwrap();
         let root = temp.path().join("agent");
         let service = AgentService::open_with_bridge(
-            core, root.clone(), Arc::new(MemoryCredentials::default()),
-            Arc::new(Factory(Arc::new(Script::new()))), Limits::default(),
+            core,
+            root.clone(),
+            Arc::new(MemoryCredentials::default()),
+            Arc::new(Factory(Arc::new(Script::new()))),
+            Limits::default(),
             Some(cadpad_agent::cli::Bridge {
                 mcp_executable: "/usr/bin/true".into(),
                 connection_file: "/unused/connection.json".into(),
             }),
-        ).await.unwrap();
-        service.configure("cursor_cli".into(), "Cursor CLI".into(), None).await.unwrap();
+        )
+        .await
+        .unwrap();
+        service
+            .configure("cursor_cli".into(), "Cursor CLI".into(), None)
+            .await
+            .unwrap();
         for prompt in ["Test the load", "Apply it to the coupler"] {
             let mut events = service.subscribe();
             let turn = service.start(ws.clone(), prompt.into()).await.unwrap();
@@ -1359,12 +1458,42 @@ printf '%s\n' '{"type":"tool_call","subtype":"started","call_id":"inspect","tool
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
                     let event = events.recv().await.unwrap();
-                    if event.turn_id == turn.id && event.kind == "turn_finished" { break; }
+                    if event.turn_id == turn.id && event.kind == "turn_finished" {
+                        break;
+                    }
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
         }
-        let stored: Value = serde_json::from_slice(&std::fs::read(root.join("conversations").join(format!("{ws}.json"))).unwrap()).unwrap();
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(root.join("conversations").join(format!("{ws}.json"))).unwrap(),
+        )
+        .unwrap();
         assert_eq!(stored["chats"][0]["messages"].as_array().unwrap().len(), 4);
         assert_eq!(stored["chats"][0]["last_turn"]["state"], "succeeded");
     });
+}
+
+/// Parse the `<references>` block and assert the exact inspection succeeded.
+/// History names are opt-in, so their own `unavailable` status is not a
+/// failure.
+fn exact_inspection(context: &str) -> serde_json::Value {
+    let block = context
+        .split_once("<references>\n")
+        .and_then(|(_, rest)| rest.split_once("\n</references>"))
+        .map(|(json, _)| json)
+        .expect("reference block");
+    let references: serde_json::Value = serde_json::from_str(block).unwrap();
+    assert!(
+        references["exact_properties"]["entities"]
+            .as_array()
+            .is_some_and(|entities| !entities.is_empty()),
+        "exact inspection should succeed: {references}"
+    );
+    assert!(
+        references["exact_properties"]["unavailable"].is_null(),
+        "{references}"
+    );
+    references
 }

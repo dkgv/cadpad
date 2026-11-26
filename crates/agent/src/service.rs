@@ -1,7 +1,9 @@
 use crate::{
     cli::{self, Backend, Bridge, StreamEvent},
     credentials::{Credentials, Secret},
-    provider::{Anthropic, Block, Message, Provider, ProviderRequest, Role, StopReason},
+    provider::{
+        Anthropic, Block, Message, OpenRouter, Provider, ProviderRequest, Role, StopReason,
+    },
     references::{self, Attachments, ChatReference},
     runner::{self, ChatMessage, EmitProgress, Limits, Progress, Step, ToolState},
 };
@@ -206,7 +208,14 @@ async fn prose_print_cross_check(
 pub struct DefaultProviderFactory;
 impl ProviderFactory for DefaultProviderFactory {
     fn create(&self, settings: &Settings, key: Secret) -> Result<Arc<dyn Provider>> {
-        Ok(Arc::new(Anthropic::new(settings.model.clone(), key)?))
+        match settings.backend {
+            Backend::AnthropicApi => Ok(Arc::new(Anthropic::new(settings.model.clone(), key)?)),
+            Backend::OpenRouterApi => Ok(Arc::new(OpenRouter::new(settings.model.clone(), key)?)),
+            _ => Err(Error::domain(
+                "INVALID_REQUEST",
+                "CLI backends do not use a direct API provider",
+            )),
+        }
     }
 }
 struct Inner {
@@ -235,6 +244,11 @@ fn valid_workspace(workspace: &str) -> Result<()> {
     uuid::Uuid::parse_str(workspace)
         .map(|_| ())
         .map_err(|_| Error::domain("INVALID_REQUEST", "Invalid workspace ID"))
+}
+fn credentials_for(credentials: &Arc<dyn Credentials>, backend: Backend) -> Arc<dyn Credentials> {
+    credentials
+        .scoped(backend)
+        .unwrap_or_else(|| credentials.clone())
 }
 async fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)?;
@@ -368,10 +382,10 @@ impl AgentService {
             ));
         }
         let settings = self.inner.settings.lock().await.clone();
-        if settings.backend != Backend::AnthropicApi || settings.model.trim().is_empty() {
+        if settings.backend.is_cli() || settings.model.trim().is_empty() {
             return Ok(None);
         }
-        let credentials = self.inner.credentials.clone();
+        let credentials = credentials_for(&self.inner.credentials, settings.backend);
         let key = tokio::task::spawn_blocking(move || credentials.get())
             .await
             .map_err(|_| {
@@ -406,7 +420,7 @@ impl AgentService {
         } else if settings.model.is_empty() {
             false
         } else {
-            let credentials = self.inner.credentials.clone();
+            let credentials = credentials_for(&self.inner.credentials, settings.backend);
             tokio::task::spawn_blocking(move || credentials.get().map(|key| key.is_some()))
                 .await
                 .map_err(|_| {
@@ -434,7 +448,7 @@ impl AgentService {
     ) -> Result<Value> {
         let backend = Backend::parse(&backend)?;
         let model = model.trim().to_string();
-        if backend == Backend::AnthropicApi {
+        if !backend.is_cli() {
             if cli::selected_model(&model).is_empty() {
                 return Err(Error::domain("INVALID_PARAMETER", "Enter an API model ID"));
             }
@@ -454,20 +468,24 @@ impl AgentService {
             }
         }
         let mut settings = self.inner.settings.lock().await;
-        if backend == Backend::AnthropicApi {
-            if let Some(key) = api_key {
-                let secret = Secret::new(key)?;
-                let credentials = self.inner.credentials.clone();
-                tokio::task::spawn_blocking(move || credentials.set(secret))
-                    .await
-                    .map_err(|_| {
-                        Error::domain("CREDENTIAL_UNAVAILABLE", "Could not save the API key")
-                    })??;
-            }
+        if !backend.is_cli()
+            && let Some(key) = api_key
+        {
+            let secret = Secret::new(key)?;
+            let credentials = credentials_for(&self.inner.credentials, backend);
+            tokio::task::spawn_blocking(move || credentials.set(secret))
+                .await
+                .map_err(|_| {
+                    Error::domain("CREDENTIAL_UNAVAILABLE", "Could not save the API key")
+                })??;
         }
         let next = Settings {
             backend,
-            model: if backend.is_cli() { cli::selected_model(&model).to_string() } else { model },
+            model: if backend.is_cli() {
+                cli::selected_model(&model).to_string()
+            } else {
+                model
+            },
         };
         write_json(&self.inner.root.join("settings.json"), &next).await?;
         *settings = next;
@@ -481,15 +499,15 @@ impl AgentService {
         } else {
             Backend::parse(&backend)?
         };
-        let models = if backend == Backend::AnthropicApi {
-            self.anthropic_models().await
-        } else {
-            cli::list_models(backend).await
+        let models = match backend {
+            Backend::AnthropicApi => self.anthropic_models().await,
+            Backend::OpenRouterApi => self.openrouter_models().await,
+            _ => cli::list_models(backend).await,
         };
         Ok(json!(models))
     }
     async fn anthropic_models(&self) -> Vec<cli::ModelChoice> {
-        let credentials = self.inner.credentials.clone();
+        let credentials = credentials_for(&self.inner.credentials, Backend::AnthropicApi);
         let key = match tokio::task::spawn_blocking(move || credentials.get()).await {
             Ok(Ok(Some(key))) => key,
             _ => return Vec::new(),
@@ -510,11 +528,49 @@ impl AgentService {
         else {
             return Vec::new();
         };
-        if !response.status().is_success() { return Vec::new(); }
-        response.json::<Value>().await.ok().map(|value| cli::parse_anthropic_models(&value)).unwrap_or_default()
+        if !response.status().is_success() {
+            return Vec::new();
+        }
+        response
+            .json::<Value>()
+            .await
+            .ok()
+            .map(|value| cli::parse_anthropic_models(&value))
+            .unwrap_or_default()
+    }
+    async fn openrouter_models(&self) -> Vec<cli::ModelChoice> {
+        let credentials = credentials_for(&self.inner.credentials, Backend::OpenRouterApi);
+        let key = match tokio::task::spawn_blocking(move || credentials.get()).await {
+            Ok(Ok(key)) => key,
+            _ => None,
+        };
+        let Ok(client) = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(8))
+            .build()
+        else {
+            return Vec::new();
+        };
+        let mut request = client.get("https://openrouter.ai/api/v1/models");
+        if let Some(key) = key {
+            request = request.bearer_auth(key.expose());
+        }
+        let Ok(response) = request.send().await else {
+            return Vec::new();
+        };
+        if !response.status().is_success() {
+            return Vec::new();
+        }
+        response
+            .json::<Value>()
+            .await
+            .ok()
+            .map(|value| cli::parse_openrouter_models(&value))
+            .unwrap_or_default()
     }
     pub async fn forget_key(&self) -> Result<()> {
-        let _settings = self.inner.settings.lock().await;
+        let settings = self.inner.settings.lock().await;
+        let backend = settings.backend;
         let turns = self
             .inner
             .state
@@ -527,7 +583,7 @@ impl AgentService {
         for turn in turns {
             let _ = self.stop(&turn).await;
         }
-        let credentials = self.inner.credentials.clone();
+        let credentials = credentials_for(&self.inner.credentials, backend);
         tokio::task::spawn_blocking(move || credentials.delete())
             .await
             .map_err(|_| Error::domain("CREDENTIAL_UNAVAILABLE", "Could not remove the API key"))?
@@ -535,7 +591,13 @@ impl AgentService {
     pub fn conversation(&self, workspace: &str, chat_id: Option<&str>) -> Result<Value> {
         valid_workspace(workspace)?;
         let mut state = self.inner.state.lock().unwrap();
-        let live = state.active.values().filter_map(|id|state.turns.get(id)).filter(|turn|turn.workspace_id==workspace).cloned().collect::<Vec<_>>();
+        let live = state
+            .active
+            .values()
+            .filter_map(|id| state.turns.get(id))
+            .filter(|turn| turn.workspace_id == workspace)
+            .cloned()
+            .collect::<Vec<_>>();
         let book = state.conversations.entry(workspace.into()).or_default();
         let chat = if let Some(id) = chat_id {
             book.chats
@@ -550,7 +612,8 @@ impl AgentService {
         } else {
             book.current()
         };
-        let turn = live.into_iter()
+        let turn = live
+            .into_iter()
             .find(|turn| turn.chat_id == chat.id)
             .or_else(|| chat.last_turn.clone());
         let mut chats = book.chats.iter().filter(|chat| !chat.archived && !chat.messages.is_empty()).map(|chat| json!({"id": chat.id, "title": chat.title, "created_at": chat.created_at, "updated_at": chat.updated_at, "message_count": chat.messages.len()})).collect::<Vec<_>>();
@@ -574,7 +637,17 @@ impl AgentService {
         let _storage = self.inner.storage.lock().await;
         let next = {
             let mut state = self.inner.state.lock().unwrap();
-            if state.changing_chats.contains(workspace) || (!matches!(action,"new"|"select") && state.active.values().filter_map(|id|state.turns.get(id)).any(|turn| turn.workspace_id==workspace && chat_id.is_none_or(|id|turn.chat_id==id))) {
+            if state.changing_chats.contains(workspace)
+                || (!matches!(action, "new" | "select")
+                    && state
+                        .active
+                        .values()
+                        .filter_map(|id| state.turns.get(id))
+                        .any(|turn| {
+                            turn.workspace_id == workspace
+                                && chat_id.is_none_or(|id| turn.chat_id == id)
+                        }))
+            {
                 return Err(Error::domain(
                     "AGENT_BUSY",
                     "Wait for the assistant to finish or stop it before changing chats",
@@ -646,11 +719,21 @@ impl AgentService {
                     }
                 }
                 action if action.starts_with("rewind:") => {
-                    let index = action[7..].parse::<usize>().map_err(|_| Error::domain("INVALID_REQUEST", "Invalid message"))?;
-                    let id = chat_id.ok_or_else(|| Error::domain("INVALID_REQUEST", "Choose a chat"))?;
-                    let chat = book.chats.iter_mut().find(|chat| chat.id == id && !chat.archived)
+                    let index = action[7..]
+                        .parse::<usize>()
+                        .map_err(|_| Error::domain("INVALID_REQUEST", "Invalid message"))?;
+                    let id =
+                        chat_id.ok_or_else(|| Error::domain("INVALID_REQUEST", "Choose a chat"))?;
+                    let chat = book
+                        .chats
+                        .iter_mut()
+                        .find(|chat| chat.id == id && !chat.archived)
                         .ok_or_else(|| Error::domain("INVALID_REQUEST", "Unknown chat"))?;
-                    if !chat.messages.get(index).is_some_and(|message| message.role == "user") {
+                    if !chat
+                        .messages
+                        .get(index)
+                        .is_some_and(|message| message.role == "user")
+                    {
                         return Err(Error::domain("INVALID_REQUEST", "Choose a user message"));
                     }
                     chat.messages.truncate(index);
@@ -730,22 +813,30 @@ impl AgentService {
         let model_workspace = model_workspace.unwrap_or_else(|| workspace.clone());
         valid_workspace(&model_workspace)?;
         if model_workspace != workspace
-            && self.inner.core.model_parent(&model_workspace).await.as_deref() != Some(workspace.as_str())
+            && self
+                .inner
+                .core
+                .model_parent(&model_workspace)
+                .await
+                .as_deref()
+                != Some(workspace.as_str())
         {
-            return Err(Error::domain("INVALID_REQUEST", "The selected model does not belong to this project"));
+            return Err(Error::domain(
+                "INVALID_REQUEST",
+                "The selected model does not belong to this project",
+            ));
         }
         references::validate_image(&attachments.image)?;
         let folders = references::validate_folders(&attachments.folders)?;
         if prompt.trim().is_empty() {
-            return Err(Error::domain(
-                "INVALID_REQUEST",
-                "Enter a request",
-            ));
+            return Err(Error::domain("INVALID_REQUEST", "Enter a request"));
         }
         if !self.inner.core.has_workspace(&workspace).await {
             return Err(Error::domain("APP_UNAVAILABLE", "Unknown workspace"));
         }
-        let checkpoint = self.inner.core.get_project(&workspace).await?["revision"].as_str().map(str::to_owned);
+        let checkpoint = self.inner.core.get_project(&workspace).await?["revision"]
+            .as_str()
+            .map(str::to_owned);
         let chips = if attachments.references.is_empty() {
             vec![]
         } else {
@@ -790,8 +881,21 @@ impl AgentService {
         };
         let (history, previous_chat) = {
             let mut state = self.inner.state.lock().unwrap();
-            let target_chat = expected_chat.as_deref().or_else(||state.conversations.get(&workspace).map(|book|book.active_id.as_str()));
-            if state.changing_chats.contains(&workspace) || state.active.values().filter_map(|id|state.turns.get(id)).any(|turn| turn.workspace_id==workspace && Some(turn.chat_id.as_str())==target_chat) {
+            let target_chat = expected_chat.as_deref().or_else(|| {
+                state
+                    .conversations
+                    .get(&workspace)
+                    .map(|book| book.active_id.as_str())
+            });
+            if state.changing_chats.contains(&workspace)
+                || state
+                    .active
+                    .values()
+                    .filter_map(|id| state.turns.get(id))
+                    .any(|turn| {
+                        turn.workspace_id == workspace && Some(turn.chat_id.as_str()) == target_chat
+                    })
+            {
                 return Err(Error::domain(
                     "AGENT_BUSY",
                     "Stop or wait for the current agent turn in this workspace",
@@ -821,10 +925,7 @@ impl AgentService {
                     break;
                 }
             }
-            let book = state
-                .conversations
-                .entry(workspace.clone())
-                .or_default();
+            let book = state.conversations.entry(workspace.clone()).or_default();
             if let Some(id) = expected_chat.as_ref() {
                 if !book
                     .chats
@@ -1093,7 +1194,7 @@ impl AgentService {
                     artifacts: vec![],
                 })
             } else {
-                let credentials = self.inner.credentials.clone();
+                let credentials = credentials_for(&self.inner.credentials, settings.backend);
                 let read_key = tokio::task::spawn_blocking(move || credentials.get());
                 let mut cancelled = self.inner.core.actor_signal(&turn.actor);
                 let key = tokio::select! {
@@ -1103,7 +1204,7 @@ impl AgentService {
                 .ok_or_else(|| {
                     Error::domain(
                         "LLM_NOT_CONFIGURED",
-                        "Add your Anthropic API key in the agent settings",
+                        format!("Add your {} key in the agent settings", settings.backend.label()),
                     )
                 })?;
                 self.inner.core.ensure_actor_active(&turn.actor)?;
@@ -1233,12 +1334,7 @@ impl AgentService {
         {
             stored.error = Some(error_value(&error));
         }
-        self.inner
-            .state
-            .lock()
-            .unwrap()
-            .active
-            .remove(&turn.id);
+        self.inner.state.lock().unwrap().active.remove(&turn.id);
         let finished = self.turn(&finished.id).unwrap_or(finished);
         self.emit(&finished, "turn_finished", None);
     }
@@ -1461,7 +1557,6 @@ fn activity(tool: &str) -> String {
         "define_mechanism" => "Defining the mechanism",
         "get_motion" => "Reading the mechanism",
         "set_joint_coordinate" => "Moving a joint",
-        "control_motion_tests" => "Working on motion tests",
         "control_requirements" => "Working on requirements",
         "control_playback" => "Controlling playback",
         "capture_views" => "Capturing model views",

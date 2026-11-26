@@ -1,7 +1,8 @@
 use cadpad_agent::{
     credentials::Secret,
     provider::{
-        Anthropic, Block, EventDecoder, Message, Provider, ProviderRequest, Role, StopReason,
+        Anthropic, Block, EventDecoder, Message, OpenRouter, Provider, ProviderRequest, Role,
+        StopReason,
     },
 };
 use serde_json::{Value, json};
@@ -50,6 +51,53 @@ async fn server(body: Vec<u8>, status: &str) -> (String, tokio::task::JoinHandle
         serde_json::from_slice(&payload).unwrap()
     });
     (format!("http://{address}/v1/messages"), task)
+}
+fn openrouter_frame(event: Value) -> String {
+    format!("data: {event}\n\n")
+}
+async fn openrouter_server(
+    body: Vec<u8>,
+    status: &str,
+) -> (String, tokio::task::JoinHandle<Value>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let status = status.to_string();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        let mut length = 0;
+        let mut headers = String::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            headers.push_str(&line);
+            if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        assert!(length < 2 * 1024 * 1024);
+        assert!(
+            headers
+                .to_lowercase()
+                .contains("authorization: bearer test-secret")
+        );
+        let mut payload = vec![0; length];
+        reader.read_exact(&mut payload).await.unwrap();
+        let stream = reader.get_mut();
+        stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).as_bytes()).await.unwrap();
+        for chunk in body.chunks(5) {
+            if stream.write_all(chunk).await.is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        serde_json::from_slice(&payload).unwrap()
+    });
+    (format!("http://{address}/api/v1/chat/completions"), task)
 }
 fn request() -> ProviderRequest {
     ProviderRequest {
@@ -232,4 +280,194 @@ async fn cancellation_interrupts_a_live_http_stream_without_waiting_for_provider
     assert_eq!(error.code(), "CANCELLED");
     release.notify_one();
     server.await.unwrap();
+}
+
+#[test]
+fn openrouter_body_uses_openai_messages_tools_and_data_url_images() {
+    let provider = OpenRouter::new(
+        "anthropic/claude-sonnet".into(),
+        Secret::new("test-secret".into()).unwrap(),
+    )
+    .unwrap();
+    let mut request = request();
+    request.messages = vec![
+        Message {
+            role: Role::User,
+            content: vec![
+                Block::Text {
+                    text: "Look at this".into(),
+                },
+                Block::Native {
+                    value: json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"png-data"}}),
+                },
+            ],
+        },
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                Block::Text {
+                    text: "Checking".into(),
+                },
+                Block::ToolUse {
+                    id: "call-1".into(),
+                    name: "get_project".into(),
+                    input: json!({"workspace_id":"w"}),
+                },
+                Block::Native {
+                    value: json!({"type":"openrouter_reasoning_details","details":[{"type":"reasoning.text","text":"why"}]}),
+                },
+            ],
+        },
+        Message {
+            role: Role::User,
+            content: vec![
+                Block::ToolResult {
+                    tool_use_id: "call-1".into(),
+                    result: json!({"images":[{"label":"front","mime_type":"image/png","data":"front-png"}]}),
+                    is_error: false,
+                },
+                Block::Text {
+                    text: "Continue".into(),
+                },
+            ],
+        },
+    ];
+    let body = provider.body(&request);
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][1]["content"][0]["text"], "Look at this");
+    assert_eq!(
+        body["messages"][1]["content"][1]["image_url"]["url"],
+        "data:image/png;base64,png-data"
+    );
+    assert_eq!(body["messages"][2]["content"], "Checking");
+    assert_eq!(body["messages"][2]["tool_calls"][0]["id"], "call-1");
+    assert_eq!(
+        body["messages"][2]["tool_calls"][0]["function"]["arguments"],
+        "{\"workspace_id\":\"w\"}"
+    );
+    assert_eq!(body["messages"][2]["reasoning_details"][0]["text"], "why");
+    assert_eq!(body["messages"][3]["role"], "tool");
+    assert_eq!(body["messages"][3]["tool_call_id"], "call-1");
+    assert_eq!(
+        serde_json::from_str::<Value>(body["messages"][3]["content"].as_str().unwrap()).unwrap(),
+        json!({})
+    );
+    assert_eq!(body["messages"][4]["content"][0]["text"], "Continue");
+    assert_eq!(body["messages"][4]["content"][1]["text"], "front");
+    assert_eq!(
+        body["messages"][4]["content"][2]["image_url"]["url"],
+        "data:image/png;base64,front-png"
+    );
+    assert_eq!(
+        body["tools"][0]["function"]["parameters"],
+        cadpad_core::tools::definitions()[0].input_schema
+    );
+    assert_eq!(body["tools"][0]["type"], "function");
+    request.tools = vec![];
+    assert!(provider.body(&request).get("tools").is_none());
+}
+
+#[tokio::test]
+async fn openrouter_fragmented_stream_keeps_reasoning_text_and_tool_calls() {
+    let events = vec![
+        json!({"choices":[{"delta":{"role":"assistant","reasoning":"considering"}}]}),
+        json!({"choices":[{"delta":{"reasoning_details":[{"type":"reasoning.text","text":"considering","index":0}]}}]}),
+        json!({"choices":[{"delta":{"content":"A plate — 50 mm"}}]}),
+        json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"get_project","arguments":"{\"workspace_id\":"}}]}}]}),
+        json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"w\"}"}}]}}]}),
+        json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+    ];
+    let mut body = events.into_iter().map(openrouter_frame).collect::<String>();
+    body.push_str("data: [DONE]\n\n");
+    let (url, server) = openrouter_server(body.into_bytes(), "200 OK").await;
+    let provider = OpenRouter::with_endpoint(
+        &url,
+        "anthropic/claude-sonnet".into(),
+        Secret::new("test-secret".into()).unwrap(),
+    )
+    .unwrap();
+    let text = Arc::new(Mutex::new(String::new()));
+    let output = text.clone();
+    let (_send, cancel) = tokio::sync::watch::channel(false);
+    let reply = provider
+        .respond(
+            request(),
+            cancel,
+            Arc::new(move |delta| output.lock().unwrap().push_str(&delta)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(*text.lock().unwrap(), "A plate — 50 mm");
+    assert!(matches!(reply.stop, StopReason::ToolUse));
+    assert!(
+        matches!(&reply.content[0], Block::Native { value } if value["details"][0]["text"] == "considering")
+    );
+    assert!(matches!(&reply.content[1], Block::Text { text } if text == "A plate — 50 mm"));
+    assert!(
+        matches!(&reply.content[2], Block::ToolUse { id, name, input } if id == "call-1" && name == "get_project" && input["workspace_id"] == "w")
+    );
+    let received = server.await.unwrap();
+    assert_eq!(received["model"], "anthropic/claude-sonnet");
+    assert_eq!(received["stream"], true);
+    assert_eq!(received["messages"][0]["role"], "system");
+    assert_eq!(
+        received["tools"][0]["function"]["parameters"],
+        cadpad_core::tools::definitions()[0].input_schema
+    );
+}
+
+#[tokio::test]
+async fn openrouter_errors_and_incomplete_streams_never_return_executable_calls_or_keys() {
+    for (body, status, code) in [
+        (
+            vec![json!({"error":{"type":"insufficient_quota","message":"test-secret"}})]
+                .into_iter()
+                .map(openrouter_frame)
+                .collect::<String>()
+                .into_bytes(),
+            "200 OK",
+            "LLM_UNAVAILABLE",
+        ),
+        (
+            vec![json!({"message":"test-secret"})].into_iter().map(openrouter_frame).collect::<String>().into_bytes(),
+            "401 Unauthorized",
+            "LLM_AUTHENTICATION_FAILED",
+        ),
+        (
+            vec![
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"update_source","arguments":"{\"changes\":"}}]}}]}),
+                json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
+            ]
+            .into_iter()
+            .map(openrouter_frame)
+            .collect::<String>()
+            .into_bytes(),
+            "200 OK",
+            "LLM_PROTOCOL_ERROR",
+        ),
+    ] {
+        let (url, server) = openrouter_server(body, status).await;
+        let provider = OpenRouter::with_endpoint(
+            &url,
+            "anthropic/claude-sonnet".into(),
+            Secret::new("test-secret".into()).unwrap(),
+        )
+        .unwrap();
+        let (_send, cancel) = tokio::sync::watch::channel(false);
+        let error = provider
+            .respond(request(), cancel, Arc::new(|_| {}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), code);
+        assert!(!error.to_string().contains("test-secret"));
+        server.await.unwrap();
+    }
+    assert!(
+        OpenRouter::with_endpoint(
+            "https://untrusted.example/api/v1/chat/completions",
+            "anthropic/claude-sonnet".into(),
+            Secret::new("test-secret".into()).unwrap()
+        )
+        .is_err()
+    );
 }

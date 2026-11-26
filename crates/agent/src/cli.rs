@@ -18,6 +18,8 @@ use tokio::{
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     AnthropicApi,
+    #[serde(rename = "openrouter_api")]
+    OpenRouterApi,
     ClaudeCli,
     CodexCli,
     CursorCli,
@@ -33,6 +35,7 @@ impl Backend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::AnthropicApi => "anthropic_api",
+            Self::OpenRouterApi => "openrouter_api",
             Self::ClaudeCli => "claude_cli",
             Self::CodexCli => "codex_cli",
             Self::CursorCli => "cursor_cli",
@@ -42,6 +45,7 @@ impl Backend {
     pub fn label(self) -> &'static str {
         match self {
             Self::AnthropicApi => "Anthropic API",
+            Self::OpenRouterApi => "OpenRouter API",
             Self::ClaudeCli => "Claude Code CLI",
             Self::CodexCli => "Codex CLI",
             Self::CursorCli => "Cursor CLI",
@@ -49,18 +53,22 @@ impl Backend {
         }
     }
     pub fn is_cli(self) -> bool {
-        !matches!(self, Self::AnthropicApi)
+        matches!(
+            self,
+            Self::ClaudeCli | Self::CodexCli | Self::CursorCli | Self::OpenCodeCli
+        )
     }
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "anthropic" | "anthropic_api" => Ok(Self::AnthropicApi),
+            "openrouter" | "openrouter_api" => Ok(Self::OpenRouterApi),
             "claude_cli" | "claude" => Ok(Self::ClaudeCli),
             "codex_cli" | "codex" => Ok(Self::CodexCli),
             "cursor_cli" | "cursor" => Ok(Self::CursorCli),
             "opencode_cli" | "opencode" => Ok(Self::OpenCodeCli),
             _ => Err(Error::domain(
                 "INVALID_PARAMETER",
-                "Choose Anthropic API, Claude CLI, Codex CLI, Cursor CLI, or OpenCode CLI",
+                "Choose Anthropic API, OpenRouter API, Claude CLI, Codex CLI, Cursor CLI, or OpenCode CLI",
             )),
         }
     }
@@ -88,7 +96,7 @@ fn candidates(backend: Backend) -> &'static [&'static str] {
         Backend::CodexCli => &["codex"],
         Backend::CursorCli => &["cursor-agent", "agent"],
         Backend::OpenCodeCli => &["opencode"],
-        Backend::AnthropicApi => &[],
+        Backend::AnthropicApi | Backend::OpenRouterApi => &[],
     }
 }
 
@@ -112,7 +120,11 @@ async fn run_status(binary: &Path, args: &[&str]) -> Option<(bool, String)> {
     run_status_at(binary, args, None).await
 }
 
-async fn run_status_at(binary: &Path, args: &[&str], directory: Option<&Path>) -> Option<(bool, String)> {
+async fn run_status_at(
+    binary: &Path,
+    args: &[&str],
+    directory: Option<&Path>,
+) -> Option<(bool, String)> {
     let mut command = Command::new(binary);
     command.args(args);
     if let Some(directory) = directory {
@@ -149,10 +161,10 @@ pub async fn detect(backend: Backend) -> Detection {
         path: None,
         detail: String::new(),
     };
-    if backend == Backend::AnthropicApi {
+    if !backend.is_cli() {
         detection.installed = true;
         detection.authenticated = true;
-        detection.detail = "Uses an Anthropic API key from the keychain".into();
+        detection.detail = format!("Uses an {} key from the keychain", backend.label());
         return detection;
     }
     let Some(binary) = binary(backend).await else {
@@ -210,10 +222,12 @@ pub async fn detect(backend: Backend) -> Detection {
                 detection.authenticated = true;
                 detection.detail = "Models available through your OpenCode configuration".into();
             } else {
-                detection.detail = "Configure a provider with `opencode auth login`, then check `opencode models`".into();
+                detection.detail =
+                    "Configure a provider with `opencode auth login`, then check `opencode models`"
+                        .into();
             }
         }
-        Backend::AnthropicApi => {}
+        Backend::AnthropicApi | Backend::OpenRouterApi => {}
     }
     detection
 }
@@ -252,7 +266,22 @@ pub fn valid_model_id(model: &str) -> bool {
         && !model.starts_with('-')
         && model.chars().all(|char| {
             char.is_ascii_alphanumeric()
-                || matches!(char, '.' | '_' | '-' | ':' | '@' | '/' | '+' | '=' | '[' | ']' | ',' | '#' | '~' | '%')
+                || matches!(
+                    char,
+                    '.' | '_'
+                        | '-'
+                        | ':'
+                        | '@'
+                        | '/'
+                        | '+'
+                        | '='
+                        | '['
+                        | ']'
+                        | ','
+                        | '#'
+                        | '~'
+                        | '%'
+                )
         })
 }
 
@@ -267,6 +296,7 @@ pub fn legacy_default_model(model: &str) -> bool {
     model.is_empty()
         || [
             Backend::AnthropicApi,
+            Backend::OpenRouterApi,
             Backend::ClaudeCli,
             Backend::CodexCli,
             Backend::CursorCli,
@@ -279,20 +309,26 @@ pub fn legacy_default_model(model: &str) -> bool {
 pub fn parse_cursor_models(text: &str) -> Vec<ModelChoice> {
     let mut models: Vec<ModelChoice> = Vec::new();
     for line in text.lines() {
-        let Some((id, label)) = line.trim().split_once(" - ") else { continue };
+        let Some((id, label)) = line.trim().split_once(" - ") else {
+            continue;
+        };
         let id = id.trim();
         let label = label.trim();
         if !valid_model_id(id) || label.is_empty() || models.iter().any(|model| model.id == id) {
             continue;
         }
-        models.push(ModelChoice { id: id.to_string(), label: label.to_string() });
+        models.push(ModelChoice {
+            id: id.to_string(),
+            label: label.to_string(),
+        });
     }
     models
 }
 
 fn opencode_v2(text: &str) -> bool {
     text.split_whitespace().any(|word| {
-        word.trim_start_matches('v').split_once('.')
+        word.trim_start_matches('v')
+            .split_once('.')
             .is_some_and(|(major, _)| major.parse::<u32>().is_ok_and(|major| major >= 2))
     })
 }
@@ -302,10 +338,17 @@ pub fn parse_opencode_models(text: &str) -> Vec<ModelChoice> {
     let mut models: Vec<ModelChoice> = Vec::new();
     for id in text.lines().map(str::trim) {
         if !valid_model_id(id)
-            || !id.split_once('/').is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
+            || !id
+                .split_once('/')
+                .is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
             || models.iter().any(|model| model.id == id)
-        { continue; }
-        models.push(ModelChoice { id: id.into(), label: id.into() });
+        {
+            continue;
+        }
+        models.push(ModelChoice {
+            id: id.into(),
+            label: id.into(),
+        });
     }
     models
 }
@@ -313,34 +356,119 @@ pub fn parse_opencode_models(text: &str) -> Vec<ModelChoice> {
 async fn opencode_models(binary: &Path) -> Vec<ModelChoice> {
     // Match the isolated launch directory while retaining the user's global
     // OpenCode configuration and authentication.
-    run_status_at(binary, &["models", "--standalone"], Some(&std::env::temp_dir()))
-        .await.filter(|(ok, _)| *ok)
-        .map(|(_, text)| parse_opencode_models(&text)).unwrap_or_default()
+    run_status_at(
+        binary,
+        &["models", "--standalone"],
+        Some(&std::env::temp_dir()),
+    )
+    .await
+    .filter(|(ok, _)| *ok)
+    .map(|(_, text)| parse_opencode_models(&text))
+    .unwrap_or_default()
 }
 
 pub fn parse_codex_models(value: &Value) -> Vec<ModelChoice> {
-    let Some(entries) = value.get("models").and_then(Value::as_array) else { return Vec::new() };
+    let Some(entries) = value.get("models").and_then(Value::as_array) else {
+        return Vec::new();
+    };
     let mut rows = Vec::new();
     for entry in entries {
-        if entry.get("visibility").and_then(Value::as_str) == Some("hide") { continue; }
-        let Some(id) = entry.get("slug").and_then(Value::as_str).filter(|id| valid_model_id(id)) else { continue };
-        let label = entry.get("display_name").and_then(Value::as_str).filter(|label| !label.is_empty()).unwrap_or(id);
-        let priority = entry.get("priority").and_then(Value::as_i64).unwrap_or(1_000);
-        rows.push((priority, ModelChoice { id: id.to_string(), label: label.to_string() }));
+        if entry.get("visibility").and_then(Value::as_str) == Some("hide") {
+            continue;
+        }
+        let Some(id) = entry
+            .get("slug")
+            .and_then(Value::as_str)
+            .filter(|id| valid_model_id(id))
+        else {
+            continue;
+        };
+        let label = entry
+            .get("display_name")
+            .and_then(Value::as_str)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(id);
+        let priority = entry
+            .get("priority")
+            .and_then(Value::as_i64)
+            .unwrap_or(1_000);
+        rows.push((
+            priority,
+            ModelChoice {
+                id: id.to_string(),
+                label: label.to_string(),
+            },
+        ));
     }
     rows.sort_by_key(|(priority, _)| *priority);
     rows.into_iter().map(|(_, model)| model).collect()
 }
 
 pub fn parse_anthropic_models(value: &Value) -> Vec<ModelChoice> {
-    let Some(entries) = value.get("data").and_then(Value::as_array) else { return Vec::new() };
+    let Some(entries) = value.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
     let mut models: Vec<ModelChoice> = Vec::new();
     for entry in entries {
-        let Some(id) = entry.get("id").and_then(Value::as_str).filter(|id| valid_model_id(id)) else { continue };
-        if models.iter().any(|model| model.id == id) { continue; }
-        let label = entry.get("display_name").and_then(Value::as_str).filter(|label| !label.is_empty()).unwrap_or(id);
-        models.push(ModelChoice { id: id.to_string(), label: label.to_string() });
+        let Some(id) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_model_id(id))
+        else {
+            continue;
+        };
+        if models.iter().any(|model| model.id == id) {
+            continue;
+        }
+        let label = entry
+            .get("display_name")
+            .and_then(Value::as_str)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(id);
+        models.push(ModelChoice {
+            id: id.to_string(),
+            label: label.to_string(),
+        });
     }
+    models
+}
+
+/// `GET /api/v1/models` lists OpenAI-compatible model ids. Cadpad needs tool
+/// calling, so entries that advertise parameters without tools are omitted.
+pub fn parse_openrouter_models(value: &Value) -> Vec<ModelChoice> {
+    let Some(entries) = value.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut models: Vec<ModelChoice> = Vec::new();
+    for entry in entries {
+        let Some(id) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_model_id(id))
+        else {
+            continue;
+        };
+        if let Some(parameters) = entry.get("supported_parameters").and_then(Value::as_array)
+            && !parameters
+                .iter()
+                .any(|parameter| parameter.as_str() == Some("tools"))
+        {
+            continue;
+        }
+        if models.iter().any(|model| model.id == id) {
+            continue;
+        }
+        let label = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(id);
+        models.push(ModelChoice {
+            id: id.to_string(),
+            label: label.chars().take(200).collect(),
+        });
+    }
+    models.sort_by(|left, right| left.id.cmp(&right.id));
     models
 }
 
@@ -349,10 +477,16 @@ pub fn parse_claude_model_help(help: &str) -> Vec<ModelChoice> {
     let mut remaining = 0u8;
     for line in help.lines() {
         let trimmed = line.trim_start();
-        if trimmed.starts_with("--model") { remaining = 8; }
-        if remaining == 0 { continue; }
+        if trimmed.starts_with("--model") {
+            remaining = 8;
+        }
+        if remaining == 0 {
+            continue;
+        }
         // The alias examples sit in the wrapped --model description, before the next flag.
-        if !trimmed.starts_with("--model") && trimmed.starts_with('-') { break; }
+        if !trimmed.starts_with("--model") && trimmed.starts_with('-') {
+            break;
+        }
         block.push_str(line);
         block.push(' ');
         remaining -= 1;
@@ -366,19 +500,32 @@ pub fn parse_claude_model_help(help: &str) -> Vec<ModelChoice> {
         rest = &rest[end + 1..];
         if valid_model_id(id) && !models.iter().any(|model| model.id == id) {
             let mut label = id.to_string();
-            if let Some(first) = label.get_mut(..1) { first.make_ascii_uppercase(); }
-            models.push(ModelChoice { id: id.to_string(), label: format!("{label} (latest)") });
+            if let Some(first) = label.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            models.push(ModelChoice {
+                id: id.to_string(),
+                label: format!("{label} (latest)"),
+            });
         }
     }
     models
 }
 
 fn claude_fallback() -> Vec<ModelChoice> {
-    ["fable", "opus", "sonnet"].into_iter().map(|id| {
-        let mut label = id.to_string();
-        if let Some(first) = label.get_mut(..1) { first.make_ascii_uppercase(); }
-        ModelChoice { id: id.to_string(), label: format!("{label} (latest)") }
-    }).collect()
+    ["fable", "opus", "sonnet"]
+        .into_iter()
+        .map(|id| {
+            let mut label = id.to_string();
+            if let Some(first) = label.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            ModelChoice {
+                id: id.to_string(),
+                label: format!("{label} (latest)"),
+            }
+        })
+        .collect()
 }
 
 fn json_document(text: &str) -> Option<&str> {
@@ -389,33 +536,56 @@ fn json_document(text: &str) -> Option<&str> {
 
 async fn binary(backend: Backend) -> Option<PathBuf> {
     for name in candidates(backend) {
-        if let Some(path) = which(name).await { return Some(path); }
+        if let Some(path) = which(name).await {
+            return Some(path);
+        }
     }
     None
 }
 
 /// Models the installed CLI can run. Claude falls back to the aliases its help documents.
 pub async fn list_models(backend: Backend) -> Vec<ModelChoice> {
-    if backend == Backend::AnthropicApi { return Vec::new(); }
+    if !backend.is_cli() {
+        return Vec::new();
+    }
     let Some(binary) = binary(backend).await else {
-        return if backend == Backend::ClaudeCli { claude_fallback() } else { Vec::new() };
+        return if backend == Backend::ClaudeCli {
+            claude_fallback()
+        } else {
+            Vec::new()
+        };
     };
     match backend {
         Backend::ClaudeCli => {
             let help = run_status(&binary, &["--help"]).await.map(|(_, text)| text);
-            let parsed = help.as_deref().map(parse_claude_model_help).unwrap_or_default();
-            if parsed.is_empty() { claude_fallback() } else { parsed }
+            let parsed = help
+                .as_deref()
+                .map(parse_claude_model_help)
+                .unwrap_or_default();
+            if parsed.is_empty() {
+                claude_fallback()
+            } else {
+                parsed
+            }
         }
         Backend::CodexCli => {
-            let Some((ok, text)) = run_status(&binary, &["debug", "models"]).await else { return Vec::new() };
-            if !ok { return Vec::new(); }
-            json_document(&text).and_then(|text| serde_json::from_str(text).ok()).map(|value| parse_codex_models(&value)).unwrap_or_default()
+            let Some((ok, text)) = run_status(&binary, &["debug", "models"]).await else {
+                return Vec::new();
+            };
+            if !ok {
+                return Vec::new();
+            }
+            json_document(&text)
+                .and_then(|text| serde_json::from_str(text).ok())
+                .map(|value| parse_codex_models(&value))
+                .unwrap_or_default()
         }
-        Backend::CursorCli => {
-            run_status(&binary, &["--list-models"]).await.map(|(_, text)| parse_cursor_models(&text)).unwrap_or_default()
-        }
+        Backend::CursorCli => run_status(&binary, &["--list-models"])
+            .await
+            .map(|(_, text)| parse_cursor_models(&text))
+            .unwrap_or_default(),
         Backend::OpenCodeCli => opencode_models(&binary).await,
-        Backend::AnthropicApi => Vec::new(),
+        Backend::AnthropicApi | Backend::OpenRouterApi => Vec::new(),
     }
 }
 
@@ -459,9 +629,11 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
             }
         }
     });
-    let catalog = cadpad_core::tools::definitions_ref().iter()
+    let catalog = cadpad_core::tools::definitions_ref()
+        .iter()
         .map(|tool| format!("- {}: {}", tool.name, tool.description))
-        .collect::<Vec<_>>().join("\n");
+        .collect::<Vec<_>>()
+        .join("\n");
     let system = format!(
         "You are editing a Cadpad CAD document through the cadpad MCP server. \
          Call get_project with workspace_id={} first, then use explicit workspace_id and revision \
@@ -475,9 +647,19 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
          Modeling workflow: get_project first. Use the source path from the project or selection to locate text with search_source, then read around hits with read_source and start_line. Use read_source when you need the full file. Use trace_cad_edge for native edge adjacency and observed operation sites. For an STL edge use trace_mesh_edges, and use match_mesh_edge if the user identifies a corresponding CAD tab. Read-only lookup and edge tracing in that explicitly identified tab within this project are allowed. Use trace_part_source for a component publication site or linked asset path. Use update_source to stage changes, build the returned draft,          and poll get_job until terminal. A failed build leaves the previous model displayed; repair the draft rather than claiming success.          After success, get_project again and use inspect for geometry properties (mesh accuracy for STL) and capture_views with single=true to check the visible result. For multiple angles omit single; for before/after comparisons capture_views before editing, retain capture_id, then compare_views after building with current revision and pose_version.          Only claim a change is reflected in the canvas after verifying the committed revision. Use managed asset tools for imports;          an STL reference mesh is not an editable parametric solid. For rigid tweaks on STL assets use transform_mesh; use check_printability for slicer triage (watertightness, build volume, feature size, overhangs) and re-run it after edits. Keep all other project calls scoped to this workspace.          Use the connected cadpad MCP commands directly rather than asking the user to run them.",
         request.workspace_id
     );
-    let system = format!("{system}\nProject folder: {}. This is the sole source of truth. Paths mentioned in old messages are historical context, not additional workspaces. Do not read, edit, synchronize or export to other project folders. Use Cadpad MCP for all model edits and managed exports. Never maintain a second copy of the model.", request.project_directory.map(|path| path.display().to_string()).unwrap_or_else(|| "unsaved Cadpad workspace".into()));
+    let system = format!(
+        "{system}\nProject folder: {}. This is the sole source of truth. Paths mentioned in old messages are historical context, not additional workspaces. Do not read, edit, synchronize or export to other project folders. Use Cadpad MCP for all model edits and managed exports. Never maintain a second copy of the model.",
+        request
+            .project_directory
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "unsaved Cadpad workspace".into())
+    );
     let model = selected_model(request.model);
-    let model_args: &[&str] = if model.is_empty() { &[] } else { &["--model", model] };
+    let model_args: &[&str] = if model.is_empty() {
+        &[]
+    } else {
+        &["--model", model]
+    };
     let child = match request.backend {
         Backend::ClaudeCli => {
             let mcp_path = work_dir.join("mcp.json");
@@ -538,6 +720,11 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                     "--skip-git-repo-check",
                     "-c",
                     "approval_policy=\"never\"",
+                    // approval_policy=never suppresses the prompt, so every MCP
+                    // tool call fails with "requires approval" unless the
+                    // Cadpad server is set to auto-approve its tools.
+                    "-c",
+                    "mcp_servers.cadpad.default_tools_approval_mode=\"approve\"",
                     "-c",
                     &command_config,
                     "-c",
@@ -589,7 +776,15 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                 .current_dir(&work_dir)
                 .env("PWD", &work_dir)
                 .env("OPENCODE_CONFIG_CONTENT", serde_json::to_string(&config)?)
-                .args(["run", "--standalone", "--format", "json", "--thinking", "--agent", "cadpad"])
+                .args([
+                    "run",
+                    "--standalone",
+                    "--format",
+                    "json",
+                    "--thinking",
+                    "--agent",
+                    "cadpad",
+                ])
                 .args(model_args)
                 .arg("--")
                 .arg(request.prompt)
@@ -599,10 +794,10 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                 .kill_on_drop(true)
                 .spawn()
         }
-        Backend::AnthropicApi => {
+        Backend::AnthropicApi | Backend::OpenRouterApi => {
             return Err(Error::domain(
                 "INVALID_REQUEST",
-                "Anthropic API turns do not spawn a CLI",
+                "API turns do not spawn a CLI",
             ));
         }
     }
@@ -823,15 +1018,31 @@ fn cursor_tool(value: &Value) -> (Option<String>, String, Option<String>, bool) 
         "getMcpToolsToolCall" => "tool_schema".into(),
         other => format!("cursor:{}", other.trim_end_matches("ToolCall")),
     };
-    let detail = call["description"].as_str().map(str::to_string).or_else(|| {
-        if key != "getMcpToolsToolCall" { return None; }
-        let names = args.get("toolNames").or_else(||args.get("tools")).or_else(||args.get("toolName"));
-        names.and_then(|value| match value {
-            Value::String(name) => Some(name.clone()),
-            Value::Array(names) => Some(names.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")),
-            _ => None,
-        }).filter(|names|!names.is_empty())
-    });
+    let detail = call["description"]
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| {
+            if key != "getMcpToolsToolCall" {
+                return None;
+            }
+            let names = args
+                .get("toolNames")
+                .or_else(|| args.get("tools"))
+                .or_else(|| args.get("toolName"));
+            names
+                .and_then(|value| match value {
+                    Value::String(name) => Some(name.clone()),
+                    Value::Array(names) => Some(
+                        names
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    _ => None,
+                })
+                .filter(|names| !names.is_empty())
+        });
     let result = &call["result"];
     let error = result.get("error").is_some()
         || result.get("failure").is_some()
@@ -970,22 +1181,42 @@ fn codex(value: &Value) -> Vec<StreamEvent> {
 fn opencode(value: &Value) -> Vec<StreamEvent> {
     let part = &value["part"];
     match value["type"].as_str().unwrap_or("") {
-        "text" => part["text"].as_str()
+        "text" => part["text"]
+            .as_str()
             .map(|text| vec![StreamEvent::Text(text.into()), StreamEvent::TextBreak])
             .unwrap_or_default(),
-        "reasoning" => part["text"].as_str()
-            .map(|text| vec![StreamEvent::Thinking(text.into()), StreamEvent::ThinkingDone])
+        "reasoning" => part["text"]
+            .as_str()
+            .map(|text| {
+                vec![
+                    StreamEvent::Thinking(text.into()),
+                    StreamEvent::ThinkingDone,
+                ]
+            })
             .unwrap_or_default(),
         "tool_use" => {
-            let id = part["callID"].as_str().or_else(|| part["id"].as_str()).map(str::to_string);
+            let id = part["callID"]
+                .as_str()
+                .or_else(|| part["id"].as_str())
+                .map(str::to_string);
             let name = tool_name(part["tool"].as_str().unwrap_or("tool"));
             let status = part["state"]["status"].as_str().unwrap_or("");
-            if !matches!(status, "completed" | "error") { return vec![]; }
+            if !matches!(status, "completed" | "error") {
+                return vec![];
+            }
             // OpenCode reports tools only after completion. Emit the pair so
             // the chat still records the call and its outcome.
             vec![
-                StreamEvent::ToolStarted { id: id.clone(), name: name.clone(), detail: None },
-                StreamEvent::ToolFinished { id, name, error: status == "error" },
+                StreamEvent::ToolStarted {
+                    id: id.clone(),
+                    name: name.clone(),
+                    detail: None,
+                },
+                StreamEvent::ToolFinished {
+                    id,
+                    name,
+                    error: status == "error",
+                },
             ]
         }
         // A step is one model invocation; tool-calls finishes are not terminal.

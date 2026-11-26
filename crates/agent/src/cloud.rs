@@ -116,14 +116,15 @@ impl CloudService {
 
     pub async fn settings(&self) -> Result<Value> {
         let credentials = self.credentials.clone();
-        let configured = tokio::task::spawn_blocking(move || credentials.get().map(|key| key.is_some()))
-            .await
-            .map_err(|_| {
-                Error::domain(
-                    "CREDENTIAL_UNAVAILABLE",
-                    "Could not access the system keychain",
-                )
-            })??;
+        let configured =
+            tokio::task::spawn_blocking(move || credentials.get().map(|key| key.is_some()))
+                .await
+                .map_err(|_| {
+                    Error::domain(
+                        "CREDENTIAL_UNAVAILABLE",
+                        "Could not access the system keychain",
+                    )
+                })??;
         Ok(json!({
             "base_url": self.endpoints.base_url,
             "configured": configured,
@@ -165,7 +166,10 @@ impl CloudService {
             return Err(api_error(status.as_u16(), &body));
         }
         let started: DeviceStartResponse = serde_json::from_slice(&body).map_err(|error| {
-            Error::domain("NETWORK_ERROR", format!("Invalid device login response: {error}"))
+            Error::domain(
+                "NETWORK_ERROR",
+                format!("Invalid device login response: {error}"),
+            )
         })?;
         let mut verification = started.verification_uri.trim().to_string();
         if verification.is_empty() {
@@ -217,7 +221,10 @@ impl CloudService {
                 return Err(api_error(status.as_u16(), &body));
             }
             let poll_body: DevicePollResponse = serde_json::from_slice(&body).map_err(|error| {
-                Error::domain("NETWORK_ERROR", format!("Invalid device poll response: {error}"))
+                Error::domain(
+                    "NETWORK_ERROR",
+                    format!("Invalid device poll response: {error}"),
+                )
             })?;
             match poll_body.status.as_str() {
                 "pending" => continue,
@@ -277,7 +284,10 @@ impl CloudService {
             return Err(api_error(status.as_u16(), &body));
         }
         serde_json::from_slice(&body).map_err(|error| {
-            Error::domain("NETWORK_ERROR", format!("Invalid account response: {error}"))
+            Error::domain(
+                "NETWORK_ERROR",
+                format!("Invalid account response: {error}"),
+            )
         })
     }
 
@@ -311,7 +321,9 @@ impl CloudService {
             .mime_str(&mime)
             .map_err(|error| Error::domain("INVALID_PARAMETER", error.to_string()))?;
         let mut form = Form::new().part("image", part);
-        if let Some(prompt) = prompt.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+        if let Some(prompt) = prompt
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
         {
             form = form.text("prompt", prompt);
         }
@@ -329,7 +341,10 @@ impl CloudService {
             return Err(api_error(status.as_u16(), &body));
         }
         let created: Value = serde_json::from_slice(&body).map_err(|error| {
-            Error::domain("NETWORK_ERROR", format!("Invalid generate response: {error}"))
+            Error::domain(
+                "NETWORK_ERROR",
+                format!("Invalid generate response: {error}"),
+            )
         })?;
         let job_id = created
             .get("id")
@@ -414,10 +429,7 @@ impl CloudService {
             })?
             .and_then(|key| {
                 key.ok_or_else(|| {
-                    Error::domain(
-                        "LLM_NOT_CONFIGURED",
-                        "Sign in to Cadpad Cloud in Settings",
-                    )
+                    Error::domain("LLM_NOT_CONFIGURED", "Sign in to Cadpad Cloud in Settings")
                 })
             })
     }
