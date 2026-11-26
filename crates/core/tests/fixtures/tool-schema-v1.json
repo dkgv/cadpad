@@ -8343,7 +8343,7 @@
       }
     },
     {
-      "description": "Build an immutable draft snapshot in a separate worker. Returns a job immediately; only valid success on an unchanged base commits.",
+      "description": "Build an immutable draft snapshot in a separate worker. Returns a job immediately; only valid success on an unchanged base commits. The job's diagnostics.auto_edit records whether the edit was naming/metadata only or changed geometry (see get_job).",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -8595,7 +8595,7 @@
       }
     },
     {
-      "description": "Poll build state and bounded diagnostics. snapshot_id identifies the durable immutable inputs readable through read_source; draft_id remains the editable repair target. Failed drafts and original job snapshots survive recovery.",
+      "description": "Poll build state and bounded diagnostics. snapshot_id identifies the durable immutable inputs readable through read_source; draft_id remains the editable repair target. Failed drafts and original job snapshots survive recovery. A succeeded build's diagnostics.auto_edit is {\"decision\":\"apply\"} when every part's geometry hash is unchanged (the edit only renamed parts or changed metadata) or {\"decision\":\"needs_review\",\"reason\":...} when geometry moved.",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -15187,7 +15187,7 @@
       }
     },
     {
-      "description": "Create/list/edit/delete/run/replay saved CAD simulation tests (requirements) from natural-language intent. A project keeps one requirement catalog shared by all of its model workspaces; each requirement records definition.model (source entry + builder) and is listed, run and replayed through that model's workspace. Address the model's workspace: upsert without definition.model assigns that model; run/replay of a requirement assigned to another model is rejected. Addressing the project workspace edits the catalog only. List first for catalog CAS. Ground body/joint IDs in get_project/get_motion; inspect the full mechanism before defining actions. Upsert saves a named intent, explicit initial coordinates for every moving joint (m/rad), body masses/friction/gravity, timed motor/load actions and measurable checks. Ask the user to resolve missing targets/tolerances rather than inventing a requirement. Every list/run/upsert reply includes tests[].review: the original requirement, plain-language acceptance statements, Met/Not met per check, and measured values — use that review when explaining the test; do not rephrase thresholds. Run uses a fresh private 1/120 s simulation and never changes live poses or geometry. Run waits for completion; start_run returns a queued run ID immediately. List reports the latest queued/running/cancelling/completed/cancelled/failed operation. After start_run, poll list for that same run ID to become terminal before interpreting results. Existing outcomes belong to the previous run while an operation is active. Completed means execution finished; outcome.passed determines assertion success. cancel_run takes that exact workspace-scoped run_id, requires its actor or the local user, and needs no catalog/revision freshness. Stop preserves the previous result and stays cancelling until entered CPU work ends. Actor revocation cancels owned runs. There is one active run per workspace, two per actor and eight per application; queued and cancelling runs count. A 60-second wall deadline signals cancellation at safe tick boundaries; it is not a hard thread kill. Push requires direct signed normal contact, final receiver displacement and additional displacement versus an identical run without the selected driver motor. Contact threshold is peak sampled last-solver-substep impulse in N s, not force or total impulse. Approximate verified collision proxies/inertia only. Reports pass/fail measurements with thresholds; results become stale when the model's inputs or the engine change; design_compared is false when no workspace of that model was available to compare. Replay selects an accepted frame into canonical playback for visual and exact pose inspection; use control_playback leave to restore live pose. Up to 16 tests, 10 seconds/run, 32768 body-frames and 8 MiB catalog. Definitions travel with Save/Open; imported runs must be rerun. CAD simulation only.",
+      "description": "Compiled, checkable design requirements for a project: statements like \"the lid never touches the base through its whole travel\" that are compiled into an exact plan of geometric checks, reviewed and approved by the user, and re-run as the design changes. Requirements belong to the project; any of its workspaces addresses the same catalog. Commands: list (catalog with status, print, diagnostics and results; returns the catalog CAS), compile {ir} (full compile, saves nothing), save {ir} (compile and store as a DRAFT; needs expected_catalog from list), library (rules, primitives, defaults, print templates, vague-word table), run / start_run {id} / cancel_run {run_id} (evaluate an approved requirement). There is no approve command: only the user approves, in the app. Loop: turn the user's prose into IR against the schema, keeping @[Label](entry#builder) chips as written, with `source` on every number (text, model, library or inferred); compile; fix every diagnostic whose fix is edit_ir by applying its edits; for ask_user and E_VAGUE save the draft with its diagnostics so the app can show each question and its suggested answers; record the user's answers in the IR; for edit_source propose the source change (a claim that names parts of more than one model gets an assembly skeleton: it lists each tagged model's parts and features, the origin= each part must record and the show(place(...), origin=...) form, so create that assembly and then retarget the claim to its parts); when compile is ok, save, then tell the user to review the print and approve it. Chips map to assembly parts and are verified on every build: the covered part must record the tagged entry#builder as its origin and agree on shared parameters, so a missing or wrong origin is E_BIND_CHIP_MISMATCH with the origin= argument to add. A referenced place()ment becomes an inferred seated claim in the print; a raw-transform placement that no contact claim verifies warns W_PLACEMENT_UNVERIFIED. Never invent numbers: a clearance, tolerance or size comes from the user's text, the model or the library, otherwise propose it marked inferred and say so. Explain a requirement only from its print and results, never from the IR or your own reading. A build job's diagnostics.auto_edit says whether the source edit was naming/metadata only: decision apply means every part's geometry hash is unchanged, so a renamed part, added features= name or fastener metadata may be kept without asking; needs_review names the part whose geometry moved, so present that edit as a normal code change. When a requirement fails or needs review during design work, report it plainly and propose fixes; do not change geometry just to make a requirement pass unless the user asks, and never edit, approve or weaken an approved requirement: saving over an approved requirement only creates a draft that stays needs_review until the user approves it, and the approved version keeps running. Results: run and start_run evaluate the approved version. Approval is required for the first run. Inconclusive means nothing is claimed for a check that hit its time limit. Up to 64 requirements, 1 MiB each, within the 8 MiB catalog shared with motion tests; requirements travel with Save/Open and imported results must be re-run. Geometry only; this is not a certification.",
       "input_schema": {
         "$defs": {
           "Action": {
@@ -15219,1921 +15219,6 @@
             ],
             "type": "object"
           },
-          "Body": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "friction": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "restitution": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "fixed",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "friction",
-                  "restitution"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "friction": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "mass": {
-                    "$ref": "#/$defs/Mass"
-                  },
-                  "restitution": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "dynamic",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "mass",
-                  "friction",
-                  "restitution"
-                ],
-                "type": "object"
-              }
-            ]
-          },
-          "Check": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "description": "Final projected displacement relative to the saved initial pose.",
-                "properties": {
-                  "body": {
-                    "type": "string"
-                  },
-                  "direction": {
-                    "items": {
-                      "format": "double",
-                      "type": "number"
-                    },
-                    "maxItems": 3,
-                    "minItems": 3,
-                    "type": "array"
-                  },
-                  "minimum_mm": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "displacement",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "body",
-                  "direction",
-                  "minimum_mm"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "description": "Final joint coordinate, with an explicit absolute tolerance in m/rad.",
-                "properties": {
-                  "joint_id": {
-                    "type": "string"
-                  },
-                  "target": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "tolerance": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "coordinate",
-                    "type": "string"
-                  },
-                  "unit": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "joint_id",
-                  "target",
-                  "unit",
-                  "tolerance"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "description": "Direct normal contact plus final receiver displacement, and additional\ndisplacement versus an otherwise identical run without driver_joint.",
-                "properties": {
-                  "direction": {
-                    "items": {
-                      "format": "double",
-                      "type": "number"
-                    },
-                    "maxItems": 3,
-                    "minItems": 3,
-                    "type": "array"
-                  },
-                  "driver_joint": {
-                    "type": "string"
-                  },
-                  "minimum_additional_mm": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "minimum_mm": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "minimum_sampled_impulse_ns": {
-                    "description": "Peak sampled last-substep normal impulse, N s; not average force.",
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "pusher": {
-                    "type": "string"
-                  },
-                  "receiver": {
-                    "type": "string"
-                  },
-                  "type": {
-                    "const": "push",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "pusher",
-                  "receiver",
-                  "driver_joint",
-                  "direction",
-                  "minimum_mm",
-                  "minimum_additional_mm",
-                  "minimum_sampled_impulse_ns"
-                ],
-                "type": "object"
-              }
-            ]
-          },
-          "Command": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "action": {
-                    "const": "list",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "action"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "action": {
-                    "const": "upsert",
-                    "type": "string"
-                  },
-                  "definition": {
-                    "$ref": "#/$defs/Definition"
-                  },
-                  "id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "action",
-                  "id",
-                  "definition"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "action": {
-                    "const": "delete",
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "action",
-                  "id"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "action": {
-                    "const": "run",
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "action",
-                  "id"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "action": {
-                    "const": "start_run",
-                    "type": "string"
-                  },
-                  "id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "action",
-                  "id"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "action": {
-                    "const": "cancel_run",
-                    "type": "string"
-                  },
-                  "run_id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "action",
-                  "run_id"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "action": {
-                    "const": "replay",
-                    "type": "string"
-                  },
-                  "expected_pose_version": {
-                    "format": "uint64",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "frame_index": {
-                    "format": "uint",
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "id": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "action",
-                  "id",
-                  "frame_index",
-                  "expected_pose_version"
-                ],
-                "type": "object"
-              }
-            ]
-          },
-          "Definition": {
-            "additionalProperties": false,
-            "properties": {
-              "actions": {
-                "items": {
-                  "$ref": "#/$defs/Action"
-                },
-                "type": "array"
-              },
-              "checks": {
-                "items": {
-                  "$ref": "#/$defs/Check"
-                },
-                "type": "array"
-              },
-              "initial_coordinates": {
-                "additionalProperties": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "description": "Every moving joint must have an explicit starting coordinate, m/rad.",
-                "type": "object"
-              },
-              "intent": {
-                "type": "string"
-              },
-              "model": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/ModelRef"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Project model this requirement checks. Omit when saving from a model's\nworkspace: that model is recorded. None means the addressed design itself."
-              },
-              "name": {
-                "type": "string"
-              },
-              "simulation": {
-                "$ref": "#/$defs/Definition2"
-              }
-            },
-            "required": [
-              "name",
-              "intent",
-              "initial_coordinates",
-              "simulation",
-              "actions",
-              "checks"
-            ],
-            "type": "object"
-          },
-          "Definition2": {
-            "additionalProperties": false,
-            "properties": {
-              "bodies": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/Body"
-                },
-                "type": "object"
-              },
-              "gravity_m_s2": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "gravity_m_s2",
-              "bodies"
-            ],
-            "type": "object"
-          },
-          "Load": {
-            "additionalProperties": false,
-            "description": "Persistent world-space load. Force acts at the body's center of mass;\ntorque is an independent couple, not an application-point offset.",
-            "properties": {
-              "force_n": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "torque_nm": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "force_n",
-              "torque_nm"
-            ],
-            "type": "object"
-          },
-          "Mass": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "mass_kg": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "kilograms",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "mass_kg"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "density_kg_m3": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "density",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "density_kg_m3"
-                ],
-                "type": "object"
-              }
-            ]
-          },
-          "ModelRef": {
-            "additionalProperties": false,
-            "description": "A model in the project's source catalog: source file plus builder ID.",
-            "properties": {
-              "builder": {
-                "type": "string"
-              },
-              "entry": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "entry",
-              "builder"
-            ],
-            "type": "object"
-          },
-          "Motor": {
-            "additionalProperties": false,
-            "properties": {
-              "damping": {
-                "format": "double",
-                "type": "number"
-              },
-              "joint_id": {
-                "type": "string"
-              },
-              "max_force": {
-                "description": "Force in N for prismatic joints; torque in N m for revolute joints.",
-                "format": "double",
-                "type": "number"
-              },
-              "stiffness": {
-                "format": "double",
-                "type": "number"
-              },
-              "target": {
-                "format": "double",
-                "type": "number"
-              },
-              "unit": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "joint_id",
-              "target",
-              "unit",
-              "stiffness",
-              "damping",
-              "max_force"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "additionalProperties": false,
-        "properties": {
-          "command": {
-            "$ref": "#/$defs/Command"
-          },
-          "expected_catalog": {
-            "description": "Returned by list. Required for edits/runs to prevent lost updates.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "model_views": {
-            "description": "Other model workspaces of the same project. Each requirement's stale\nflag is compared against the listed workspace of its model.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "revision": {
-            "default": "",
-            "description": "Current revision of workspace_id. Required for run/replay; empty skips\nthe design check for list/upsert/delete.",
-            "type": "string"
-          },
-          "workspace_id": {
-            "description": "A model's workspace (to run, replay or inspect against that model) or\nthe project workspace (catalog edits only). Model workspaces of one\nproject share a single requirement catalog stored on the project.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "workspace_id",
-          "command"
-        ],
-        "title": "Control",
-        "type": "object"
-      },
-      "name": "control_motion_tests",
-      "output_schema": {
-        "$defs": {
-          "Action": {
-            "additionalProperties": false,
-            "properties": {
-              "loads": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/Load"
-                },
-                "type": "object"
-              },
-              "motors": {
-                "items": {
-                  "$ref": "#/$defs/Motor"
-                },
-                "type": "array"
-              },
-              "ticks": {
-                "description": "1/120 s ticks. Motor targets persist between actions; loads replace.",
-                "format": "uint32",
-                "minimum": 0,
-                "type": "integer"
-              }
-            },
-            "required": [
-              "ticks",
-              "motors",
-              "loads"
-            ],
-            "type": "object"
-          },
-          "Body": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "friction": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "restitution": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "fixed",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "friction",
-                  "restitution"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "friction": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "mass": {
-                    "$ref": "#/$defs/Mass"
-                  },
-                  "restitution": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "dynamic",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "mass",
-                  "friction",
-                  "restitution"
-                ],
-                "type": "object"
-              }
-            ]
-          },
-          "CadUnits": {
-            "enum": [
-              "mm"
-            ],
-            "type": "string"
-          },
-          "Check": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "description": "Final projected displacement relative to the saved initial pose.",
-                "properties": {
-                  "body": {
-                    "type": "string"
-                  },
-                  "direction": {
-                    "items": {
-                      "format": "double",
-                      "type": "number"
-                    },
-                    "maxItems": 3,
-                    "minItems": 3,
-                    "type": "array"
-                  },
-                  "minimum_mm": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "displacement",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "body",
-                  "direction",
-                  "minimum_mm"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "description": "Final joint coordinate, with an explicit absolute tolerance in m/rad.",
-                "properties": {
-                  "joint_id": {
-                    "type": "string"
-                  },
-                  "target": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "tolerance": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "coordinate",
-                    "type": "string"
-                  },
-                  "unit": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "joint_id",
-                  "target",
-                  "unit",
-                  "tolerance"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "description": "Direct normal contact plus final receiver displacement, and additional\ndisplacement versus an otherwise identical run without driver_joint.",
-                "properties": {
-                  "direction": {
-                    "items": {
-                      "format": "double",
-                      "type": "number"
-                    },
-                    "maxItems": 3,
-                    "minItems": 3,
-                    "type": "array"
-                  },
-                  "driver_joint": {
-                    "type": "string"
-                  },
-                  "minimum_additional_mm": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "minimum_mm": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "minimum_sampled_impulse_ns": {
-                    "description": "Peak sampled last-substep normal impulse, N s; not average force.",
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "pusher": {
-                    "type": "string"
-                  },
-                  "receiver": {
-                    "type": "string"
-                  },
-                  "type": {
-                    "const": "push",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "pusher",
-                  "receiver",
-                  "driver_joint",
-                  "direction",
-                  "minimum_mm",
-                  "minimum_additional_mm",
-                  "minimum_sampled_impulse_ns"
-                ],
-                "type": "object"
-              }
-            ]
-          },
-          "CheckReview": {
-            "properties": {
-              "measurements": {
-                "items": {
-                  "$ref": "#/$defs/Measurement"
-                },
-                "type": "array"
-              },
-              "met": {
-                "description": "Set when this check has measured results from the latest run.",
-                "type": [
-                  "boolean",
-                  "null"
-                ]
-              },
-              "statement": {
-                "description": "Plain-language acceptance criterion, matching the Motion tests panel.",
-                "type": "string"
-              }
-            },
-            "required": [
-              "statement",
-              "met",
-              "measurements"
-            ],
-            "type": "object"
-          },
-          "Definition": {
-            "additionalProperties": false,
-            "properties": {
-              "actions": {
-                "items": {
-                  "$ref": "#/$defs/Action"
-                },
-                "type": "array"
-              },
-              "checks": {
-                "items": {
-                  "$ref": "#/$defs/Check"
-                },
-                "type": "array"
-              },
-              "initial_coordinates": {
-                "additionalProperties": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "description": "Every moving joint must have an explicit starting coordinate, m/rad.",
-                "type": "object"
-              },
-              "intent": {
-                "type": "string"
-              },
-              "model": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/ModelRef"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "description": "Project model this requirement checks. Omit when saving from a model's\nworkspace: that model is recorded. None means the addressed design itself."
-              },
-              "name": {
-                "type": "string"
-              },
-              "simulation": {
-                "$ref": "#/$defs/Definition2"
-              }
-            },
-            "required": [
-              "name",
-              "intent",
-              "initial_coordinates",
-              "simulation",
-              "actions",
-              "checks"
-            ],
-            "type": "object"
-          },
-          "Definition2": {
-            "additionalProperties": false,
-            "properties": {
-              "bodies": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/Body"
-                },
-                "type": "object"
-              },
-              "gravity_m_s2": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "gravity_m_s2",
-              "bodies"
-            ],
-            "type": "object"
-          },
-          "Failure": {
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "message": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "code",
-              "message"
-            ],
-            "type": "object"
-          },
-          "Frame": {
-            "properties": {
-              "angular_velocity_rad_s": {
-                "additionalProperties": {
-                  "items": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "maxItems": 3,
-                  "minItems": 3,
-                  "type": "array"
-                },
-                "type": "object"
-              },
-              "linear_velocity_m_s": {
-                "additionalProperties": {
-                  "items": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "maxItems": 3,
-                  "minItems": 3,
-                  "type": "array"
-                },
-                "type": "object"
-              },
-              "poses": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/Pose"
-                },
-                "type": "object"
-              },
-              "tick": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "time_s": {
-                "format": "double",
-                "type": "number"
-              }
-            },
-            "required": [
-              "tick",
-              "time_s",
-              "poses",
-              "linear_velocity_m_s",
-              "angular_velocity_rad_s"
-            ],
-            "type": "object"
-          },
-          "JointState": {
-            "properties": {
-              "axis_world": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "child": {
-                "type": "string"
-              },
-              "coordinate": {
-                "format": "double",
-                "type": "number"
-              },
-              "drivable": {
-                "type": "boolean"
-              },
-              "id": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string"
-              },
-              "limits": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 2,
-                "minItems": 2,
-                "type": [
-                  "array",
-                  "null"
-                ]
-              },
-              "origin_mm": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "parent": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "path": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/State"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "unit": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "parent",
-              "child",
-              "kind",
-              "coordinate",
-              "unit",
-              "limits",
-              "axis_world",
-              "origin_mm",
-              "drivable"
-            ],
-            "type": "object"
-          },
-          "Load": {
-            "additionalProperties": false,
-            "description": "Persistent world-space load. Force acts at the body's center of mass;\ntorque is an independent couple, not an application-point offset.",
-            "properties": {
-              "force_n": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "torque_nm": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "force_n",
-              "torque_nm"
-            ],
-            "type": "object"
-          },
-          "Mass": {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "mass_kg": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "kilograms",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "mass_kg"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "density_kg_m3": {
-                    "format": "double",
-                    "type": "number"
-                  },
-                  "type": {
-                    "const": "density",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "type",
-                  "density_kg_m3"
-                ],
-                "type": "object"
-              }
-            ]
-          },
-          "Measurement": {
-            "properties": {
-              "actual": {
-                "format": "double",
-                "type": "number"
-              },
-              "expected": {
-                "format": "double",
-                "type": "number"
-              },
-              "label": {
-                "type": "string"
-              },
-              "passed": {
-                "type": "boolean"
-              },
-              "unit": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "label",
-              "actual",
-              "expected",
-              "unit",
-              "passed"
-            ],
-            "type": "object"
-          },
-          "ModelRef": {
-            "additionalProperties": false,
-            "description": "A model in the project's source catalog: source file plus builder ID.",
-            "properties": {
-              "builder": {
-                "type": "string"
-              },
-              "entry": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "entry",
-              "builder"
-            ],
-            "type": "object"
-          },
-          "Motor": {
-            "additionalProperties": false,
-            "properties": {
-              "damping": {
-                "format": "double",
-                "type": "number"
-              },
-              "joint_id": {
-                "type": "string"
-              },
-              "max_force": {
-                "description": "Force in N for prismatic joints; torque in N m for revolute joints.",
-                "format": "double",
-                "type": "number"
-              },
-              "stiffness": {
-                "format": "double",
-                "type": "number"
-              },
-              "target": {
-                "format": "double",
-                "type": "number"
-              },
-              "unit": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "joint_id",
-              "target",
-              "unit",
-              "stiffness",
-              "damping",
-              "max_force"
-            ],
-            "type": "object"
-          },
-          "MotorImpulse": {
-            "properties": {
-              "coordinate_unit": {
-                "type": "string"
-              },
-              "force_unit": {
-                "type": "string"
-              },
-              "impulse": {
-                "description": "Last internal solver-substep impulse; CCD can shorten the nominal substep.",
-                "format": "double",
-                "type": "number"
-              },
-              "impulse_unit": {
-                "type": "string"
-              },
-              "max_force": {
-                "format": "double",
-                "type": "number"
-              },
-              "target_position": {
-                "format": "double",
-                "type": "number"
-              }
-            },
-            "required": [
-              "impulse",
-              "impulse_unit",
-              "max_force",
-              "force_unit",
-              "target_position",
-              "coordinate_unit"
-            ],
-            "type": "object"
-          },
-          "Outcome": {
-            "properties": {
-              "measurements": {
-                "items": {
-                  "$ref": "#/$defs/Measurement"
-                },
-                "type": "array"
-              },
-              "passed": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "passed",
-              "measurements"
-            ],
-            "type": "object"
-          },
-          "Policy": {
-            "properties": {
-              "accuracy": {
-                "type": "string"
-              },
-              "backoff_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "clearance_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "coverage_method": {
-                "type": "string"
-              },
-              "ignored_pairs": {
-                "items": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "maxItems": 2,
-                  "minItems": 2,
-                  "type": "array"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "accuracy",
-              "clearance_m",
-              "backoff_m",
-              "coverage_method",
-              "ignored_pairs"
-            ],
-            "type": "object"
-          },
-          "Pose": {
-            "additionalProperties": false,
-            "properties": {
-              "position": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              },
-              "quaternion": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 4,
-                "minItems": 4,
-                "type": "array"
-              }
-            },
-            "required": [
-              "position",
-              "quaternion"
-            ],
-            "type": "object"
-          },
-          "Reply": {
-            "properties": {
-              "accuracy": {
-                "type": "string"
-              },
-              "catalog": {
-                "type": "string"
-              },
-              "project_workspace": {
-                "description": "Workspace that stores this catalog (the project for model workspaces).",
-                "type": "string"
-              },
-              "run": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Status2"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "snapshot": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Snapshot"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "tests": {
-                "items": {
-                  "$ref": "#/$defs/TestInfo"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "catalog",
-              "project_workspace",
-              "tests",
-              "accuracy",
-              "snapshot",
-              "run"
-            ],
-            "type": "object"
-          },
-          "Report": {
-            "properties": {
-              "angle_tolerance_rad": {
-                "format": "double",
-                "type": "number"
-              },
-              "axis_error_rad": {
-                "format": "double",
-                "type": "number"
-              },
-              "continuation_steps": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "coordinate_error_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "coordinate_error_rad": {
-                "format": "double",
-                "type": "number"
-              },
-              "iterations": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "length_tolerance_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "max_normalized_residual": {
-                "format": "double",
-                "type": "number"
-              },
-              "path_certified": {
-                "type": "boolean"
-              },
-              "position_error_m": {
-                "format": "double",
-                "type": "number"
-              }
-            },
-            "required": [
-              "position_error_m",
-              "axis_error_rad",
-              "coordinate_error_m",
-              "coordinate_error_rad",
-              "max_normalized_residual",
-              "iterations",
-              "continuation_steps",
-              "path_certified",
-              "length_tolerance_m",
-              "angle_tolerance_rad"
-            ],
-            "type": "object"
-          },
-          "Sample": {
-            "properties": {
-              "coordinate_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "position_mm": {
-                "items": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "maxItems": 3,
-                "minItems": 3,
-                "type": "array"
-              }
-            },
-            "required": [
-              "coordinate_m",
-              "position_mm"
-            ],
-            "type": "object"
-          },
-          "Selection": {
-            "properties": {
-              "duration_s": {
-                "format": "double",
-                "type": "number"
-              },
-              "frame_count": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "frame_index": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "name": {
-                "type": "string"
-              },
-              "recording_id": {
-                "type": "string"
-              },
-              "source_mode": {
-                "type": "string"
-              },
-              "time_s": {
-                "format": "double",
-                "type": "number"
-              }
-            },
-            "required": [
-              "recording_id",
-              "name",
-              "frame_index",
-              "frame_count",
-              "time_s",
-              "duration_s",
-              "source_mode"
-            ],
-            "type": "object"
-          },
-          "Snapshot": {
-            "properties": {
-              "actor": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "cad_units": {
-                "$ref": "#/$defs/CadUnits"
-              },
-              "collision": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Policy"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "collision_checked": {
-                "type": "boolean"
-              },
-              "constraints": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Report"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "joints": {
-                "items": {
-                  "$ref": "#/$defs/JointState"
-                },
-                "type": "array"
-              },
-              "mode": {
-                "$ref": "#/$defs/SnapshotMode"
-              },
-              "playback": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Selection"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "pose_version": {
-                "format": "uint64",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "poses": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/Pose"
-                },
-                "type": "object"
-              },
-              "recording": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Status"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "revision": {
-                "type": "string"
-              },
-              "simulation": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Snapshot2"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "simulation_unavailable_reason": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "workspace_id": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "workspace_id",
-              "revision",
-              "pose_version",
-              "mode",
-              "cad_units",
-              "collision_checked",
-              "collision",
-              "simulation_unavailable_reason",
-              "actor",
-              "poses",
-              "joints"
-            ],
-            "type": "object"
-          },
-          "Snapshot2": {
-            "properties": {
-              "accuracy": {
-                "type": "string"
-              },
-              "current": {
-                "$ref": "#/$defs/Frame"
-              },
-              "external_loads": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/Load"
-                },
-                "type": "object"
-              },
-              "mass_kg": {
-                "additionalProperties": {
-                  "format": "double",
-                  "type": "number"
-                },
-                "type": "object"
-              },
-              "motor_impulses": {
-                "additionalProperties": {
-                  "$ref": "#/$defs/MotorImpulse"
-                },
-                "type": "object"
-              },
-              "previous": {
-                "$ref": "#/$defs/Frame"
-              },
-              "solver_settings": {
-                "$ref": "#/$defs/SolverSettings"
-              },
-              "timestep_s": {
-                "format": "double",
-                "type": "number"
-              }
-            },
-            "required": [
-              "external_loads",
-              "solver_settings",
-              "motor_impulses",
-              "timestep_s",
-              "accuracy",
-              "mass_kg",
-              "previous",
-              "current"
-            ],
-            "type": "object"
-          },
-          "SnapshotMode": {
-            "enum": [
-              "manipulate",
-              "simulate"
-            ],
-            "type": "string"
-          },
-          "SolverSettings": {
-            "properties": {
-              "contact_damping_ratio": {
-                "format": "double",
-                "type": "number"
-              },
-              "contact_frequency_hz": {
-                "format": "double",
-                "type": "number"
-              },
-              "contact_recycle_distance_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "internal_pgs_iterations": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "internal_stabilization_iterations": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "max_ccd_substeps": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "nominal_solver_substep_s": {
-                "format": "double",
-                "type": "number"
-              },
-              "solver_substeps": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "static_contact_damping_ratio": {
-                "format": "double",
-                "type": "number"
-              },
-              "static_contact_frequency_hz": {
-                "format": "double",
-                "type": "number"
-              },
-              "warmstart_joints": {
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "solver_substeps",
-              "internal_pgs_iterations",
-              "internal_stabilization_iterations",
-              "nominal_solver_substep_s",
-              "contact_frequency_hz",
-              "static_contact_frequency_hz",
-              "contact_damping_ratio",
-              "static_contact_damping_ratio",
-              "contact_recycle_distance_m",
-              "warmstart_joints",
-              "max_ccd_substeps"
-            ],
-            "type": "object"
-          },
-          "State": {
-            "properties": {
-              "closed": {
-                "type": "boolean"
-              },
-              "frame_rule": {
-                "type": "string"
-              },
-              "length_m": {
-                "format": "double",
-                "type": "number"
-              },
-              "samples": {
-                "items": {
-                  "$ref": "#/$defs/Sample"
-                },
-                "type": "array"
-              }
-            },
-            "required": [
-              "length_m",
-              "closed",
-              "frame_rule",
-              "samples"
-            ],
-            "type": "object"
-          },
-          "State2": {
-            "enum": [
-              "queued",
-              "running",
-              "cancelling",
-              "completed",
-              "cancelled",
-              "failed"
-            ],
-            "type": "string"
-          },
-          "Status": {
-            "properties": {
-              "capacity": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "capacity_reached": {
-                "type": "boolean"
-              },
-              "duration_s": {
-                "format": "double",
-                "type": "number"
-              },
-              "frame_count": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "name": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "name",
-              "frame_count",
-              "duration_s",
-              "capacity",
-              "capacity_reached"
-            ],
-            "type": "object"
-          },
-          "Status2": {
-            "properties": {
-              "actor": {
-                "type": "string"
-              },
-              "error": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Failure"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "id": {
-                "type": "string"
-              },
-              "revision": {
-                "type": "string"
-              },
-              "state": {
-                "$ref": "#/$defs/State2"
-              },
-              "test_id": {
-                "type": "string"
-              },
-              "workspace_id": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "id",
-              "workspace_id",
-              "revision",
-              "test_id",
-              "actor",
-              "state",
-              "error"
-            ],
-            "type": "object"
-          },
-          "TestInfo": {
-            "properties": {
-              "definition": {
-                "$ref": "#/$defs/Definition"
-              },
-              "design_compared": {
-                "description": "False when no workspace of the requirement's model was available to\ncompare: stale then reflects only engine changes, not design edits.",
-                "type": "boolean"
-              },
-              "duration_s": {
-                "format": "double",
-                "type": "number"
-              },
-              "frame_count": {
-                "format": "uint",
-                "minimum": 0,
-                "type": "integer"
-              },
-              "id": {
-                "type": "string"
-              },
-              "outcome": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/Outcome"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "review": {
-                "$ref": "#/$defs/TestReview",
-                "description": "Deterministic plain-language requirements and results for agents/MCP/UI."
-              },
-              "stale": {
-                "description": "No result, or the result belongs to another design of this model or engine.",
-                "type": "boolean"
-              }
-            },
-            "required": [
-              "id",
-              "definition",
-              "outcome",
-              "review",
-              "stale",
-              "design_compared",
-              "frame_count",
-              "duration_s"
-            ],
-            "type": "object"
-          },
-          "TestReview": {
-            "properties": {
-              "checks": {
-                "items": {
-                  "$ref": "#/$defs/CheckReview"
-                },
-                "type": "array"
-              },
-              "requirement": {
-                "description": "Original free-text requirement / intent.",
-                "type": "string"
-              },
-              "summary": {
-                "description": "Short status for conversation: \"Not run\" or \"N of M requirements met\".",
-                "type": "string"
-              }
-            },
-            "required": [
-              "requirement",
-              "checks",
-              "summary"
-            ],
-            "type": "object"
-          },
-          "ToolFailure": {
-            "description": "Machine-readable execution failure. Non-domain errors omit details.",
-            "properties": {
-              "code": {
-                "type": "string"
-              },
-              "details": true,
-              "message": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "code",
-              "message"
-            ],
-            "type": "object"
-          }
-        },
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "anyOf": [
-          {
-            "$ref": "#/$defs/Reply"
-          },
-          {
-            "$ref": "#/$defs/ToolFailure"
-          }
-        ],
-        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
-        "title": "StructuredResult",
-        "type": "object"
-      }
-    },
-    {
-      "description": "Compiled, checkable design requirements for a project: statements like \"the lid never touches the base through its whole travel\" that are compiled into an exact plan of geometric checks, reviewed and approved by the user, and re-run as the design changes. Requirements belong to the project; any of its workspaces addresses the same catalog. Commands: list (catalog with status, print, diagnostics and results; returns the catalog CAS), compile {ir} (full compile, saves nothing), save {ir} (compile and store as a DRAFT; needs expected_catalog from list), library (rules, primitives, defaults, print templates, vague-word table), run / start_run {id} / cancel_run {run_id} (evaluate an approved requirement). There is no approve command: only the user approves, in the app. Loop: turn the user's prose into IR against the schema, keeping @[Label](entry#builder) chips as written, with `source` on every number (text, model, library or inferred); compile; fix every diagnostic whose fix is edit_ir by applying its edits; for ask_user and E_VAGUE save the draft with its diagnostics so the app can show each question and its suggested answers; record the user's answers in the IR; for edit_source propose the source change; when compile is ok, save, then tell the user to review the print and approve it. Never invent numbers: a clearance, tolerance or size comes from the user's text, the model or the library, otherwise propose it marked inferred and say so. Explain a requirement only from its print and results, never from the IR or your own reading. When a requirement fails or needs review during design work, report it plainly and propose fixes; do not change geometry just to make a requirement pass unless the user asks, and never edit, approve or weaken an approved requirement: saving over an approved requirement only creates a draft that stays needs_review until the user approves it, and the approved version keeps running. Results: run and start_run evaluate the approved version. Approval is required for the first run. Inconclusive means nothing is claimed for a check that hit its time limit. Up to 64 requirements, 1 MiB each, within the 8 MiB catalog shared with motion tests; requirements travel with Save/Open and imported results must be re-run. Geometry only; this is not a certification.",
-      "input_schema": {
-        "$defs": {
           "AllowKind": {
             "oneOf": [
               {
@@ -17473,6 +15558,60 @@
               }
             ]
           },
+          "Body": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "friction": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "restitution": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "fixed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "friction",
+                  "restitution"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "friction": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "mass": {
+                    "$ref": "#/$defs/Mass"
+                  },
+                  "restitution": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "dynamic",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mass",
+                  "friction",
+                  "restitution"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "Claim": {
             "additionalProperties": false,
             "description": "One checkable statement: a library rule or primitive applied to arguments.",
@@ -17772,6 +15911,31 @@
             ],
             "type": "object"
           },
+          "Definition": {
+            "additionalProperties": false,
+            "properties": {
+              "bodies": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/Body"
+                },
+                "type": "object"
+              },
+              "gravity_m_s2": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "gravity_m_s2",
+              "bodies"
+            ],
+            "type": "object"
+          },
           "EntityKind": {
             "description": "Kind of a geometric entity.",
             "enum": [
@@ -17810,6 +15974,10 @@
                 "additionalProperties": false,
                 "description": "History name: the operation that created the entity, e.g.\n`make_door/hole#1/wall`.",
                 "properties": {
+                  "hash": {
+                    "description": "Exact group hash returned by opt-in history tracing.",
+                    "type": "string"
+                  },
                   "kind": {
                     "const": "history",
                     "type": "string"
@@ -17819,12 +15987,18 @@
                   },
                   "part": {
                     "$ref": "#/$defs/PartRef"
+                  },
+                  "positional": {
+                    "default": false,
+                    "description": "Positional names are diagnostic evidence only, never stable refs.",
+                    "type": "boolean"
                   }
                 },
                 "required": [
                   "kind",
                   "part",
-                  "name"
+                  "name",
+                  "hash"
                 ],
                 "type": "object"
               },
@@ -17901,6 +16075,75 @@
             ],
             "type": "object"
           },
+          "Load": {
+            "additionalProperties": false,
+            "description": "Persistent world-space load. Force acts at the body's center of mass;\ntorque is an independent couple, not an application-point offset.",
+            "properties": {
+              "force_n": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "torque_nm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "force_n",
+              "torque_nm"
+            ],
+            "type": "object"
+          },
+          "Mass": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mass_kg": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "kilograms",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mass_kg"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "density_kg_m3": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "density",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "density_kg_m3"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "ModelRef": {
             "additionalProperties": false,
             "description": "A model in the project's source catalog: source file plus builder ID.\n`@cabinet`.",
@@ -17915,6 +16158,43 @@
             "required": [
               "entry",
               "builder"
+            ],
+            "type": "object"
+          },
+          "Motor": {
+            "additionalProperties": false,
+            "properties": {
+              "damping": {
+                "format": "double",
+                "type": "number"
+              },
+              "joint_id": {
+                "type": "string"
+              },
+              "max_force": {
+                "description": "Force in N for prismatic joints; torque in N m for revolute joints.",
+                "format": "double",
+                "type": "number"
+              },
+              "stiffness": {
+                "format": "double",
+                "type": "number"
+              },
+              "target": {
+                "format": "double",
+                "type": "number"
+              },
+              "unit": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "joint_id",
+              "target",
+              "unit",
+              "stiffness",
+              "damping",
+              "max_force"
             ],
             "type": "object"
           },
@@ -18171,6 +16451,34 @@
             "description": "A named set from the requirement's `sets` table (`let turntable = ...`).",
             "type": "string"
           },
+          "SimulationState": {
+            "additionalProperties": false,
+            "description": "Reusable input portion of a motion test, embedded by requirement simulation\nstates. Keeps the legacy action and dynamics payloads byte-compatible.",
+            "properties": {
+              "actions": {
+                "items": {
+                  "$ref": "#/$defs/Action"
+                },
+                "type": "array"
+              },
+              "initial_coordinates": {
+                "additionalProperties": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              "simulation": {
+                "$ref": "#/$defs/Definition"
+              }
+            },
+            "required": [
+              "initial_coordinates",
+              "simulation",
+              "actions"
+            ],
+            "type": "object"
+          },
           "Source": {
             "description": "Where a value, claim, allowance or set membership comes from (spec §3.6).\nChecked mechanically; anything not from the text, model or library must be\n`inferred`, which is marked in the review and confirmed by approving it.",
             "oneOf": [
@@ -18306,6 +16614,32 @@
                   "kind",
                   "joint",
                   "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "One trace from the existing proxy dynamics engine, tied to one model.",
+                "properties": {
+                  "kind": {
+                    "const": "simulate",
+                    "type": "string"
+                  },
+                  "model": {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  "simulation": {
+                    "$ref": "#/$defs/SimulationState"
+                  },
+                  "when": {
+                    "$ref": "#/$defs/When"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "model",
+                  "simulation",
+                  "when"
                 ],
                 "type": "object"
               },
@@ -18481,6 +16815,67 @@
               "reason"
             ],
             "type": "object"
+          },
+          "When": {
+            "description": "Which proxy sample(s) of a simulation trace a primitive checks.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "end",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "at",
+                    "type": "string"
+                  },
+                  "time": {
+                    "$ref": "#/$defs/Literal"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "time"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "always",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "eventually",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -18512,6 +16907,35 @@
       "name": "control_requirements",
       "output_schema": {
         "$defs": {
+          "Action": {
+            "additionalProperties": false,
+            "properties": {
+              "loads": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/Load"
+                },
+                "type": "object"
+              },
+              "motors": {
+                "items": {
+                  "$ref": "#/$defs/Motor"
+                },
+                "type": "array"
+              },
+              "ticks": {
+                "description": "1/120 s ticks. Motor targets persist between actions; loads replace.",
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "ticks",
+              "motors",
+              "loads"
+            ],
+            "type": "object"
+          },
           "AllowKind": {
             "oneOf": [
               {
@@ -18891,6 +17315,60 @@
               }
             ]
           },
+          "Body": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "friction": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "restitution": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "fixed",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "friction",
+                  "restitution"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "friction": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "mass": {
+                    "$ref": "#/$defs/Mass"
+                  },
+                  "restitution": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "dynamic",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mass",
+                  "friction",
+                  "restitution"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "Claim": {
             "additionalProperties": false,
             "description": "One checkable statement: a library rule or primitive applied to arguments.",
@@ -19143,6 +17621,31 @@
             ],
             "type": "object"
           },
+          "Definition": {
+            "additionalProperties": false,
+            "properties": {
+              "bodies": {
+                "additionalProperties": {
+                  "$ref": "#/$defs/Body"
+                },
+                "type": "object"
+              },
+              "gravity_m_s2": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "gravity_m_s2",
+              "bodies"
+            ],
+            "type": "object"
+          },
           "Diagnostic": {
             "additionalProperties": false,
             "properties": {
@@ -19381,6 +17884,10 @@
                 "additionalProperties": false,
                 "description": "History name: the operation that created the entity, e.g.\n`make_door/hole#1/wall`.",
                 "properties": {
+                  "hash": {
+                    "description": "Exact group hash returned by opt-in history tracing.",
+                    "type": "string"
+                  },
                   "kind": {
                     "const": "history",
                     "type": "string"
@@ -19390,12 +17897,19 @@
                   },
                   "part": {
                     "$ref": "#/$defs/PartRef"
+                  },
+                  "positional": {
+                    "default": false,
+                    "description": "Positional names are diagnostic evidence only, never stable refs.",
+                    "type": "boolean"
                   }
                 },
                 "required": [
                   "kind",
                   "part",
-                  "name"
+                  "name",
+                  "hash",
+                  "positional"
                 ],
                 "type": "object"
               },
@@ -19577,6 +18091,75 @@
             ],
             "type": "object"
           },
+          "Load": {
+            "additionalProperties": false,
+            "description": "Persistent world-space load. Force acts at the body's center of mass;\ntorque is an independent couple, not an application-point offset.",
+            "properties": {
+              "force_n": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "torque_nm": {
+                "items": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "force_n",
+              "torque_nm"
+            ],
+            "type": "object"
+          },
+          "Mass": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "mass_kg": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "kilograms",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "mass_kg"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "density_kg_m3": {
+                    "format": "double",
+                    "type": "number"
+                  },
+                  "type": {
+                    "const": "density",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "type",
+                  "density_kg_m3"
+                ],
+                "type": "object"
+              }
+            ]
+          },
           "ModelRef": {
             "additionalProperties": false,
             "description": "A model in the project's source catalog: source file plus builder ID.\n`@cabinet`.",
@@ -19591,6 +18174,43 @@
             "required": [
               "entry",
               "builder"
+            ],
+            "type": "object"
+          },
+          "Motor": {
+            "additionalProperties": false,
+            "properties": {
+              "damping": {
+                "format": "double",
+                "type": "number"
+              },
+              "joint_id": {
+                "type": "string"
+              },
+              "max_force": {
+                "description": "Force in N for prismatic joints; torque in N m for revolute joints.",
+                "format": "double",
+                "type": "number"
+              },
+              "stiffness": {
+                "format": "double",
+                "type": "number"
+              },
+              "target": {
+                "format": "double",
+                "type": "number"
+              },
+              "unit": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "joint_id",
+              "target",
+              "unit",
+              "stiffness",
+              "damping",
+              "max_force"
             ],
             "type": "object"
           },
@@ -20241,6 +18861,34 @@
             ],
             "type": "string"
           },
+          "SimulationState": {
+            "additionalProperties": false,
+            "description": "Reusable input portion of a motion test, embedded by requirement simulation\nstates. Keeps the legacy action and dynamics payloads byte-compatible.",
+            "properties": {
+              "actions": {
+                "items": {
+                  "$ref": "#/$defs/Action"
+                },
+                "type": "array"
+              },
+              "initial_coordinates": {
+                "additionalProperties": {
+                  "format": "double",
+                  "type": "number"
+                },
+                "type": "object"
+              },
+              "simulation": {
+                "$ref": "#/$defs/Definition"
+              }
+            },
+            "required": [
+              "initial_coordinates",
+              "simulation",
+              "actions"
+            ],
+            "type": "object"
+          },
           "Source": {
             "description": "Where a value, claim, allowance or set membership comes from (spec §3.6).\nChecked mechanically; anything not from the text, model or library must be\n`inferred`, which is marked in the review and confirmed by approving it.",
             "oneOf": [
@@ -20387,6 +19035,32 @@
                   "kind",
                   "joint",
                   "range"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "One trace from the existing proxy dynamics engine, tied to one model.",
+                "properties": {
+                  "kind": {
+                    "const": "simulate",
+                    "type": "string"
+                  },
+                  "model": {
+                    "$ref": "#/$defs/ModelRef"
+                  },
+                  "simulation": {
+                    "$ref": "#/$defs/SimulationState"
+                  },
+                  "when": {
+                    "$ref": "#/$defs/When"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "model",
+                  "simulation",
+                  "when"
                 ],
                 "type": "object"
               },
@@ -20599,6 +19273,67 @@
               "reason"
             ],
             "type": "object"
+          },
+          "When": {
+            "description": "Which proxy sample(s) of a simulation trace a primitive checks.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "end",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "at",
+                    "type": "string"
+                  },
+                  "time": {
+                    "$ref": "#/$defs/Literal"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "time"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "always",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "eventually",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind"
+                ],
+                "type": "object"
+              }
+            ]
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -12,13 +12,13 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub const TIMESTEP_S: f64 = 1. / 120.;
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Mass {
     Kilograms { mass_kg: f64 },
     Density { density_kg_m3: f64 },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Body {
     Fixed {
@@ -31,13 +31,13 @@ pub enum Body {
         restitution: f64,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
     pub gravity_m_s2: [f64; 3],
     pub bodies: BTreeMap<String, Body>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Motor {
     pub joint_id: String,

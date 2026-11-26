@@ -1,0 +1,6 @@
+PCB fits case
+  1. Pcb does not overlap case, as built.
+  2. Clearance of pcb/board from inner_walls of case along +x, -x, +y, -y is at least 2 mm, as built.
+  3. pcb/J1 is aligned with usb_cutout of case within 0.2 mm and clears it by 0.3 mm, as built.
+  Numbers I chose: margin 0.3 mm, tol 0.2 mm
+     ▸ details: 4 checks · overlap tolerance ε 0.001 mm³ · accuracy exact (clearance_along, interference, profile_centre, profile_size) · margin 0.3 mm (my proposal; no margin stated) · tol 0.2 mm (my proposal; no tolerance stated)

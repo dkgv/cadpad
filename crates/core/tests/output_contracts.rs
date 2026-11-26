@@ -47,7 +47,7 @@ fn advertised_output_schemas_are_valid_and_accept_both_execution_error_forms() {
     }
 }
 #[tokio::test]
-async fn motion_test_catalog_reply_matches_the_advertised_agent_contract() {
+async fn requirement_catalog_reply_matches_the_advertised_agent_contract() {
     let temp = tempfile::tempdir().unwrap();
     let core = Core::open(
         temp.path().join("app"),
@@ -56,18 +56,23 @@ async fn motion_test_catalog_reply_matches_the_advertised_agent_contract() {
     .await
     .unwrap();
     let ws = core.create_workspace("test").await.unwrap();
-    let rev = core.get_project(&ws).await.unwrap()["revision"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let reply = core.dispatch(&tools::ToolContext { actor: "test".into() }, "control_motion_tests", json!({"workspace_id":ws,"revision":rev,"expected_catalog":null,"command":{"action":"list"}})).await.unwrap();
+    let reply = core
+        .dispatch(
+            &tools::ToolContext {
+                actor: "test".into(),
+            },
+            "control_requirements",
+            json!({"workspace_id":ws,"expected_catalog":null,"command":{"action":"list"}}),
+        )
+        .await
+        .unwrap();
     assert!(
-        validator("control_motion_tests").is_valid(&reply),
+        validator("control_requirements").is_valid(&reply),
         "{reply}"
     );
     let mut invalid = reply;
-    invalid["tests"] = json!("not a test list");
-    assert!(!validator("control_motion_tests").is_valid(&invalid));
+    invalid["requirements"] = json!("not a requirement list");
+    assert!(!validator("control_requirements").is_valid(&invalid));
 }
 #[test]
 fn job_schemas_match_serialized_fields_and_reject_invalid_states_and_types() {

@@ -2,7 +2,7 @@
 use super::dispatch::ModelView;
 use super::evaluate::ResultBody;
 use super::ir::ModelRef;
-use super::states::ConcreteState;
+use super::states::{ConcreteState, StateValue};
 use super::worker_plan::{split_part_key, worker_state};
 use crate::motion_tests::Saved;
 use crate::{Core, Error, JobKind, JobState, Result};
@@ -21,6 +21,7 @@ pub enum ReplayMode {
     Rest,
     Rigid,
     Parameter,
+    Simulation,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +43,10 @@ pub struct RequirementReplay {
     pub view: ReplayView,
     /// Ordered world-space moves, exactly as sent to the evaluator.
     pub moves: Vec<Value>,
+    /// Body poses from the selected dynamics sample, when replaying a
+    /// simulation-backed state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub simulation_poses: Option<BTreeMap<String, crate::kinematics::Pose>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -129,13 +134,47 @@ impl Core {
             .and_then(|states| states.get(state_index))
             .cloned()
             .ok_or_else(|| invalid("The state is outside the evaluated plan"))?;
-        let sample = worker_state(
-            primitive_id,
-            &state,
-            &run.manifest,
-            &mut Some(key.to_owned()),
-        )
-        .map_err(|error| invalid(error.to_string()))?;
+        let mut simulation_poses = None;
+        let sample = if let Some(StateValue::Simulate {
+            model: simulation_model,
+            simulation,
+            sample_index,
+            ..
+        }) = state
+            .values
+            .iter()
+            .find(|value| matches!(value, StateValue::Simulate { .. }))
+        {
+            if simulation_model != &model {
+                return Err(invalid("The simulation state belongs to another model"));
+            }
+            let revision = self
+                .requirement_revision(&source.workspace, &source.revision)
+                .await?;
+            let trace = crate::motion_tests::simulate_requirement_state(
+                &revision,
+                simulation,
+                &[],
+                &[],
+                &cancel,
+            )?;
+            let selected = trace
+                .get(*sample_index)
+                .ok_or_else(|| invalid("The simulation sample is outside its trace"))?;
+            simulation_poses = Some(selected.evaluation.poses.clone());
+            super::worker_plan::WorkerState {
+                params: BTreeMap::new(),
+                moves: vec![],
+            }
+        } else {
+            worker_state(
+                primitive_id,
+                &state,
+                &run.manifest,
+                &mut Some(key.to_owned()),
+            )
+            .map_err(|error| invalid(error.to_string()))?
+        };
         let (_, catalog) = self.requirement_catalog(actor, workspace).await?;
         let current = catalog.get(requirement_id).and_then(Saved::requirement);
         if !current.is_some_and(|entry| {
@@ -154,7 +193,16 @@ impl Core {
                 "The requirement changed. Open its latest result to replay.",
             ));
         }
-        let (mode, view) = if sample.params.is_empty() {
+        let (mode, view) = if simulation_poses.is_some() {
+            (
+                ReplayMode::Simulation,
+                ReplayView {
+                    workspace: source.workspace.clone(),
+                    revision: source.revision.clone(),
+                    temporary: false,
+                },
+            )
+        } else if sample.params.is_empty() {
             let mode = if sample.moves.is_empty() {
                 ReplayMode::Rest
             } else {
@@ -183,6 +231,7 @@ impl Core {
             mode,
             view,
             moves: sample.moves,
+            simulation_poses,
         })
     }
 

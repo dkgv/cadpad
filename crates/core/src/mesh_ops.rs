@@ -180,10 +180,7 @@ pub(crate) fn write_stl_binary(triangles: &[[[f64; 3]; 3]]) -> Result<Vec<u8>> {
 
 /// Resolve a caller-supplied asset reference to a managed `inputs.assets` key.
 /// Accepts the bare key, an `assets/`-prefixed path, or the stripped form.
-fn resolve_asset_key<'a>(
-    assets: &'a BTreeMap<String, String>,
-    requested: &str,
-) -> Result<&'a str> {
+fn resolve_asset_key<'a>(assets: &'a BTreeMap<String, String>, requested: &str) -> Result<&'a str> {
     if requested.is_empty() || requested.len() > 512 {
         return Err(Error::domain(
             "INVALID_REQUEST",
@@ -409,9 +406,7 @@ mod tests {
         assert!(!flip);
         let out: Vec<[[f64; 3]; 3]> = read
             .iter()
-            .map(|t| {
-                t.map(|v| matrix.transform_point3(DVec3::from_array(v)).to_array())
-            })
+            .map(|t| t.map(|v| matrix.transform_point3(DVec3::from_array(v)).to_array()))
             .collect();
         assert_eq!(out[0][1], [12.0, 0.0, 0.0]);
     }

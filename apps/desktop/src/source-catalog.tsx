@@ -248,17 +248,14 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   };
   const modelTree=(node:Tree,prefix:string)=>{
     const entries=sortedModels(node);
-    const groups=new Map<string,IndexedModel[]>(),namePaths=new Map<string,Set<string>>();
+    const groups=new Map<string,IndexedModel[]>();
     for(const model of entries){
-      const name=caption(model.builder);
-      const paths=namePaths.get(name)??new Set<string>();
-      paths.add(model.file.path);namePaths.set(name,paths);
       if(model.builder.kind!=='model_file')continue;
       const stem=model.builder.label.replace(/\.[^.]+$/,'');
       const group=groups.get(stem)??[];
       group.push(model);groups.set(stem,group);
     }
-    const row=({file,builder}:IndexedModel)=><li key={`${file.path}:${builder.id}`}><button type="button" className="library-part-link" aria-busy={openingModel?.entry===file.path&&openingModel.builder===builder.id||undefined} title={builder.kind==='model_file'?file.path:`${file.path}:${builder.line} · ${builder.label}`} aria-current={highlighted?.entry===file.path&&highlighted.builder===builder.id?'true':undefined} disabled={disabled} onClick={()=>openEntry(file,builder)}><Icon name="cube" size={13}/><span>{caption(builder)}</span>{openingModel?.entry===file.path&&openingModel.builder===builder.id&&<small className="library-opening-status" role="status" aria-label={`Opening ${caption(builder)}`}>Opening…</small>}{(namePaths.get(caption(builder))?.size??0)>1&&<small>{file.path.split('/').at(-1)}</small>}</button></li>;
+    const row=({file,builder}:IndexedModel)=><li key={`${file.path}:${builder.id}`}><button type="button" className="library-part-link" aria-busy={openingModel?.entry===file.path&&openingModel.builder===builder.id||undefined} title={builder.kind==='model_file'?file.path:`${file.path}:${builder.line} · ${builder.label}`} aria-current={highlighted?.entry===file.path&&highlighted.builder===builder.id?'true':undefined} disabled={disabled} onClick={()=>openEntry(file,builder)}><Icon name="cube" size={13}/><span className="library-model-name">{caption(builder)}</span>{builder.kind!=='model_file'&&<small className="library-source-file">{file.path.split('/').at(-1)}</small>}{openingModel?.entry===file.path&&openingModel.builder===builder.id&&<small className="library-opening-status" role="status" aria-label={`Opening ${caption(builder)}`}>Opening…</small>}</button></li>;
     return entries.map(model=>{
       if(model.builder.kind!=='model_file')return row(model);
       const stem=model.builder.label.replace(/\.[^.]+$/,'');
@@ -273,7 +270,7 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   const fileTree=(node:Tree,prefix=''):React.ReactNode=><ul>{sortedFolders(node).map(([name,child])=>{
     const path=prefix+name,change=showGit?folderGit(path,git):undefined,mark=gitMark(change);
     const automatic=!!search||activeFolder===path||activeFolder.startsWith(path+'/')||folder===path||folder.startsWith(path+'/');
-    const summary=<><Icon name="folder" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}{onReferenceFolder&&<button type="button" className="folder-chat-reference" title="Reference this folder in the Assistant" aria-label={`Reference ${path} in the Assistant`} onClick={event=>{event.preventDefault();event.stopPropagation();onReferenceFolder(path);}}><Icon name="chat" size={12}/></button>}</>;
+    const summary=<><Icon name="folder" size={14}/><span className="tree-label">{name}</span>{mark?<i className="git-dot" aria-hidden="true"/>:null}</>;
     return <li key={name}>{compact?branch(`folder:${path}`,automatic,summary,()=>fileTree(child,path+'/'),{
       className:mark||undefined,title:change?GIT_LABEL[change]:undefined,'aria-label':change?`${name}, ${GIT_LABEL[change]}`:undefined,
       ...(onReferenceFolder?{draggable:true,onDragStart:event=>{event.dataTransfer.setData(FOLDER_DRAG_TYPE,path);event.dataTransfer.setData('text/plain',path);event.dataTransfer.effectAllowed='copy';}}:{}),

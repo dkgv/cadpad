@@ -1,27 +1,39 @@
-//! The compiler end to end on Appendix A cases that use only v1 rules
-//! (R1, R2, R4, E3, E5), against fixture build snapshots.
+//! The compiler end to end on representative requirements, including the
+//! newer press_fit and seated rules, against fixture build snapshots.
 use cadpad_core::requirements::{
-    Compiled, DiagnosticCode, ProjectSettings, Requirement, Source, WorkspaceSnapshot, compile,
+    ChunkOptions, Compiled, DiagnosticCode, Dimension, Pairing, ProjectSettings, Requirement,
+    Source, Unit, WorkspaceSnapshot, build_requests, compile, evaluate, library, run_plan,
 };
 use serde_json::{Value, json};
 
 macro_rules! case {
     ($name:literal) => {
+        case!($name, $name)
+    };
+    ($name:literal, $snapshot:literal) => {
         (
             $name,
             include_str!(concat!("fixtures/requirements/", $name, ".json")),
-            include_str!(concat!("fixtures/requirements/snapshots/", $name, ".json")),
+            include_str!(concat!(
+                "fixtures/requirements/snapshots/",
+                $snapshot,
+                ".json"
+            )),
             include_str!(concat!("fixtures/requirements/print/", $name, ".txt")),
         )
     };
 }
 
-const CASES: [(&str, &str, &str, &str); 5] = [
+const CASES: [(&str, &str, &str, &str); 9] = [
     case!("R1"),
     case!("R2"),
+    case!("R3"),
     case!("R4"),
+    case!("E2"),
     case!("E3"),
     case!("E5"),
+    case!("PF1", "fit-and-seating"),
+    case!("SE1", "fit-and-seating"),
 ];
 
 fn run(requirement: &str, snapshot: &str) -> Compiled {
@@ -36,7 +48,7 @@ fn case(name: &str) -> (&'static str, &'static str) {
 }
 
 #[test]
-fn v1_reference_cases_compile_without_diagnostics() {
+fn reference_cases_compile_without_diagnostics_or_downgrades() {
     for (name, req, snap, _) in CASES {
         let c = run(req, snap);
         assert!(c.diagnostics.is_empty(), "{name}: {:?}", c.diagnostics);
@@ -68,7 +80,11 @@ fn regenerate_golden() {
             "{}/tests/fixtures/requirements/print/{name}.txt",
             env!("CARGO_MANIFEST_DIR")
         );
-        std::fs::write(path, run(req, snap).print.unwrap().render()).unwrap();
+        let compiled = run(req, snap);
+        let print = compiled
+            .print
+            .unwrap_or_else(|| panic!("{name}: {:?}", compiled.diagnostics));
+        std::fs::write(path, print.render()).unwrap();
     }
 }
 
@@ -89,6 +105,9 @@ fn plans_have_the_expected_size_and_canonical_order() {
     assert_eq!(jobs("R4"), [2 * 2 * 11, 2]);
     assert_eq!(jobs("E3"), [56]);
     assert_eq!(jobs("E5"), [1, 1, 1, 1]);
+    // E2: no_overlap pair, clearance against the four-face wall selection
+    // (one argument, the worker reduces it), aligned centre + size.
+    assert_eq!(jobs("E2"), [1, 1, 1, 1]);
     for (name, req, snap, _) in CASES {
         let plan = run(req, snap).plan.unwrap();
         for claim in &plan.claims {
@@ -103,6 +122,98 @@ fn plans_have_the_expected_size_and_canonical_order() {
             assert!(claim.jobs.iter().all(|j| j.state < claim.state_count));
         }
     }
+}
+
+#[test]
+fn contact_area_is_published_typed_planned_printed_and_evaluated_in_mm2() {
+    let text = "The rotor has at least 50 mm2 of face contact with the base.";
+    let req: Requirement = serde_json::from_value(json!({
+        "ir_version": 1,
+        "id": "bearing-contact",
+        "name": "Rotor bearing contact",
+        "text": text,
+        "claims": [{
+            "id": "contact",
+            "rule": "measure",
+            "span": [0, text.chars().count()],
+            "args": {
+                "fn": {"text": "contact_area"},
+                "a": {"part": {"model": {"entry": "machine.py", "builder": "machine"}, "part": {"name": "rotor"}}},
+                "b": {"part": {"model": {"entry": "machine.py", "builder": "machine"}, "part": {"name": "base"}}},
+                "cmp": {"compare": {"op": ">=", "value": {"value": 50.0, "unit": "mm2", "source": "text"}}}
+            }
+        }]
+    })).unwrap();
+    let (_, snapshot) = case("R1");
+    let snap: WorkspaceSnapshot = serde_json::from_str(snapshot).unwrap();
+    let compiled = compile(&req, &snap, &ProjectSettings::default());
+    assert!(!compiled.has_errors(), "{:?}", compiled.diagnostics);
+    assert_eq!(
+        library().primitive("contact_area").unwrap().result,
+        Dimension::Area
+    );
+    let public_library = serde_json::to_value(library()).unwrap();
+    let published = public_library["primitives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|primitive| primitive["name"] == "contact_area")
+        .unwrap();
+    assert_eq!(published["result"], "area");
+    assert_eq!(published["accuracy"], "exact");
+    let plan = compiled.plan.as_ref().unwrap();
+    assert_eq!(plan.claims[0].primitive, "contact_area");
+    assert_eq!(plan.claims[0].pairing, Pairing::EachPair);
+    let chunks = build_requests(
+        plan,
+        compiled.manifest.as_ref().unwrap(),
+        &ChunkOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        chunks[0].params["states"][0]["measurements"][0]["primitive"],
+        "contact_area"
+    );
+    assert_eq!(
+        chunks[0].params["states"][0]["measurements"][0]["a"],
+        json!(["base"])
+    );
+    assert_eq!(
+        chunks[0].params["states"][0]["measurements"][0]["b"],
+        json!(["rotor"])
+    );
+    let printed = compiled.print.as_ref().unwrap().render();
+    assert!(
+        printed.contains("Area of common faces between rotor and base"),
+        "{printed}"
+    );
+    assert!(printed.contains("at least 50 mm²"), "{printed}");
+
+    let mut exec = cadpad_core::requirements::FakeExecutor::new(|_, measurement| {
+        let (a, b) = (measurement["a"][0].clone(), measurement["b"][0].clone());
+        json!({"status":"ok", "value":75.0, "witness":[a,b],
+               "items":[{"a":a,"b":b,"status":"ok","value":75.0}]})
+    });
+    let manifest = compiled.manifest.as_ref().unwrap();
+    let raw = run_plan(plan, manifest, &mut exec, &ChunkOptions::default()).unwrap();
+    let evaluated = evaluate(
+        plan,
+        manifest,
+        &raw,
+        &ProjectSettings::default(),
+        "bearing-contact",
+        0,
+    );
+    let measured = evaluated.body.primitives[0].worst.as_ref().unwrap();
+    assert_eq!(
+        measured.value,
+        Some(cadpad_core::requirements::Quantity::new(75.0, Unit::Mm2))
+    );
+    assert_eq!(
+        measured.margin,
+        Some(cadpad_core::requirements::Quantity::new(25.0, Unit::Mm2))
+    );
 }
 
 #[test]
@@ -266,7 +377,9 @@ fn text_values_not_in_the_prose_are_downgraded_not_rejected() {
 }
 
 #[test]
-fn library_rules_that_need_later_phases_say_so() {
+fn library_rules_check_their_signature() {
+    // `bolted` is available since P3.6: rewriting a claim to it must surface
+    // signature diagnostics on the arguments, not a "not available" rule error.
     let (r, _) = case("E3");
     let mut v: Value = serde_json::from_str(r).unwrap();
     v["claims"][0]["rule"] = "bolted".into();
@@ -275,7 +388,12 @@ fn library_rules_that_need_later_phases_say_so() {
     assert!(
         c.diagnostics
             .iter()
-            .any(|d| d.code == DiagnosticCode::ETypeKind && d.at == "claims[0].rule"),
+            .any(|d| d.code == DiagnosticCode::ETypeKind && d.at.starts_with("claims[0].args")),
+        "{:?}",
+        c.diagnostics
+    );
+    assert!(
+        !c.diagnostics.iter().any(|d| d.at == "claims[0].rule"),
         "{:?}",
         c.diagnostics
     );

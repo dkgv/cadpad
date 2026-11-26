@@ -61,7 +61,7 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.equal(summary('axle.py').classList.contains('git-modified'),false);
   assert.equal(summary('axle.py').querySelector('.git-dot'),null);
   await act(async()=>root.render(React.createElement(SourceCatalog,{workspace:'ws',revision:'r1',compact:true,onChoose:(...args)=>chosen.push(args)})));
-  const pin=[...document.querySelectorAll('.catalog-compact .library-part-link')].find(button=>button.textContent==='Pin');
+  const pin=[...document.querySelectorAll('.catalog-compact .library-part-link')].find(button=>button.querySelector('.library-model-name')?.textContent==='Pin');
   assert.ok(pin);
   await act(async()=>pin.click());
   assert.deepEqual(chosen.at(-1),['cad/brake.py','pin']);
@@ -73,9 +73,10 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.doesNotMatch(document.body.textContent,/Ask the assistant to create a part/);
   assert.match(document.body.textContent,/Models/);
   const currentModel=()=>document.querySelector('[aria-label="Indexed models"] [aria-current="true"]');
+  const modelName=button=>button.querySelector('.library-model-name')?.textContent;
   assert.equal(currentModel(),null,'a project tab has no active model, even after a catalog click');
   await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:'cad/brake.py',builder:'pin'}})));
-  assert.equal(currentModel().textContent,'Pin','the focused model is selected');
+  assert.equal(modelName(currentModel()),'Pin','the focused model is selected');
   assert.ok(currentModel().closest('details').open,'the active model folder is revealed');
   await act(async()=>{currentModel().closest('details').open=false;});
   const modelsSection=currentModel().closest('.sidebar-section');
@@ -85,18 +86,18 @@ test('source candidates use generic labels and shared Explorer sections',async()
   Object.defineProperty(modelPane,'clientHeight',{configurable:true,get:()=>modelsSection.querySelector(':scope > div[id]').hidden?0:100});
   modelPane.getBoundingClientRect=()=>({top:0});
   const modelButtons=[...document.querySelectorAll('[aria-label="Indexed models"] .library-part-link')];
-  const brakeRow=modelButtons.find(row=>row.textContent==='Brake body');
-  const pinRow=modelButtons.find(row=>row.textContent==='Pin');
+  const brakeRow=modelButtons.find(row=>modelName(row)==='Brake body');
+  const pinRow=modelButtons.find(row=>modelName(row)==='Pin');
   brakeRow.getBoundingClientRect=()=>({top:250-modelPane.scrollTop,bottom:270-modelPane.scrollTop});
   pinRow.getBoundingClientRect=()=>({top:20-modelPane.scrollTop,bottom:40-modelPane.scrollTop});
 
   await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:'cad/brake.py',builder:'brake_body'}})));
-  assert.equal(currentModel().textContent,'Brake body','selection distinguishes builders in the same file');
+  assert.equal(modelName(currentModel()),'Brake body','selection distinguishes builders in the same file');
   assert.equal(modelsSection.querySelector(':scope > div[id]').hidden,false,'tab focus expands the Models section');
   assert.ok(currentModel().closest('details').open,'tab focus reopens a manually collapsed model folder');
   assert.equal(modelPane.scrollTop,170,'the active entry scrolls into view after its section expands');
   await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:'zoo/nested/yoke.py',builder:'yoke'}})));
-  assert.equal(currentModel().textContent,'Yoke','selection follows tab focus into another folder');
+  assert.equal(modelName(currentModel()),'Yoke','selection follows tab focus into another folder');
   assert.ok(currentModel().closest('details').open);
   await act(async()=>root.render(React.createElement(ProjectExplorer,{...explorer,activeModel:{entry:'cad/brake.py',builder:'pin'}})));
   assert.equal(modelPane.scrollTop,20,'an entry above the visible tree scrolls back into view');
@@ -110,13 +111,13 @@ test('source candidates use generic labels and shared Explorer sections',async()
   assert.ok(search,'Explorer search is visible before any geometry is loaded');
   const enter=async(value)=>act(async()=>{Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype,'value').set.call(search,value);search.dispatchEvent(new dom.window.Event('input',{bubbles:true}));});
   await enter('pin');
-  assert.deepEqual([...document.querySelectorAll('.catalog-compact .library-part-link')].map(button=>button.textContent),['Pin']);
+  assert.deepEqual([...document.querySelectorAll('.catalog-compact .library-part-link')].map(modelName),['Pin']);
   assert.ok([...document.querySelectorAll('.catalog-compact details')].every(node=>node.open),'search reveals matching paths');
   await enter('missing');
   assert.match(document.body.textContent,/No matching models/);
   await act(async()=>document.querySelector('[aria-label="Clear Explorer search"]').click());
   const modelsTree=document.querySelector('[aria-label="Indexed models"]');
-  assert.ok(![...modelsTree.querySelectorAll('.library-part-link')].some(row=>row.textContent==='Yoke'),'collapsed model folders do not mount their rows');
+  assert.ok(![...modelsTree.querySelectorAll('.library-part-link')].some(row=>modelName(row)==='Yoke'),'collapsed model folders do not mount their rows');
   const expandModelFolder=async name=>act(async()=>{
     const summary=[...modelsTree.querySelectorAll('summary')].find(summary=>summary.textContent===name);
     if(!summary.parentElement.open)summary.click();
@@ -124,7 +125,8 @@ test('source candidates use generic labels and shared Explorer sections',async()
   await expandModelFolder('cad');
   await expandModelFolder('zoo');
   await expandModelFolder('nested');
-  assert.deepEqual([...modelsTree.querySelectorAll('.library-part-link')].map(button=>[...button.querySelectorAll('span,small')].map(node=>node.textContent).join('')),['Axle','Brake body','Pin','Yoke'],'Explorer models sort alphabetically');
+  assert.deepEqual([...modelsTree.querySelectorAll('.library-part-link')].map(modelName),['Axle','Brake body','Pin','Yoke'],'Explorer models sort alphabetically');
+  assert.deepEqual([...modelsTree.querySelectorAll('.library-source-file')].map(node=>node.textContent),['axle.py','brake.py','brake.py','yoke.py'],'Explorer models show which file sourced them');
   assert.equal(calls.filter(call=>call[0]==='project_source_index').length,1,'typing filters the existing index without another worker request');
   assert.ok(document.querySelector('[aria-label="Indexed models"] .library-part-link'));
   assert.equal(document.querySelector('[aria-label="Indexed models"] .git-dot'),null);
@@ -245,7 +247,8 @@ test('source candidates use generic labels and shared Explorer sections',async()
       diskSearch.dispatchEvent(new dom.window.Event('input',{bubbles:true}));
     });
     const diskRow=()=>document.querySelector('[aria-label="Indexed models"] .library-part-link');
-    assert.equal(diskRow().textContent,'Added');
+    assert.equal(diskRow().querySelector('.library-model-name').textContent,'Added');
+    assert.equal(diskRow().querySelector('.library-source-file').textContent,'added.py','the model row names the file it comes from');
     const row=diskRow();
     assert.equal(timers.size,0,'Explorer installs no polling intervals');
     const watch=diskCalls.find(([command])=>command==='connect_project_files')[1].channel;

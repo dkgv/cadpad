@@ -56,7 +56,7 @@ fn sweep_values_mut(s: &mut Sweep, at: &str, f: &mut dyn FnMut(&str, ValueMut)) 
 /// Every literal in a state space.
 pub fn state_values_mut(s: &mut StateSpace, at: &str, f: &mut dyn FnMut(&str, ValueMut)) {
     match s {
-        StateSpace::Rest {} => {}
+        StateSpace::Rest {} | StateSpace::Simulate { .. } => {}
         StateSpace::Param { values, .. } => match values {
             ParamValues::Value { value } => lit(value, format!("{at}.values.value"), f),
             ParamValues::Range { from, to, step } => {
@@ -327,6 +327,7 @@ mod tests {
                         geometry_hash: "h".into(),
                         source: None,
                         fastener: None,
+                        source_assets: vec![],
                     }],
                     params: vec![ParamInfo {
                         name: "door_angle".into(),

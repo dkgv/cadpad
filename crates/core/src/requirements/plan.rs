@@ -2,10 +2,12 @@
 //! canonical order (claim, state, pair), with allowances applied. The
 //! evaluator executes it and compares numbers; every decision about *what* to
 //! check is made here and is visible.
-use super::bind::{Bindings, BoundPart, members_of_arg};
+use super::bind::{Bindings, BoundPart, feature_ref_key, members_of_arg};
 use super::diagnostics::{Diagnostic, DiagnosticCode};
 use super::expand::{Origin, Pairing, PrimitiveClaim};
-use super::ir::{AllowKind, Allowance, Arg, AxisRef, Comparator, Quantifier, Requirement};
+use super::ir::{
+    AllowKind, Allowance, Arg, AxisRef, Comparator, FeatureRef, Quantifier, Requirement,
+};
 use super::manifest::{Manifest, canonical_hash};
 use super::quantity::Quantity;
 use super::states::expand_states;
@@ -23,13 +25,52 @@ pub struct Allowed {
     pub reason: String,
 }
 
+/// One entity a measurement runs on: a whole published part, or a bound
+/// feature (face/edge set) of one. `part` is the part key
+/// `entry#builder/name`; `feature` is the reference the worker resolves
+/// against that state's geometry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EntityArg {
+    pub part: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature: Option<FeatureRef>,
+}
+
+impl EntityArg {
+    /// Sort key of the feature reference (empty for whole parts).
+    fn feature_key(&self) -> String {
+        self.feature
+            .as_ref()
+            .and_then(feature_ref_key)
+            .unwrap_or_default()
+    }
+}
+
+impl PartialOrd for EntityArg {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for EntityArg {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (&self.part, self.feature_key()).cmp(&(&other.part, other.feature_key()))
+    }
+}
+
 /// One measurement: at state `state` (index into the manifest's states for
-/// this claim), measure `a` against `b` (part keys, sorted).
+/// this claim), measure `a` against `b` (part keys, sorted). `a_entities` /
+/// `b_entities` carry feature descriptors when an argument named features;
+/// they are empty for part-only arguments so older plans are unchanged.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Job {
     pub state: usize,
     pub a: Vec<String>,
     pub b: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub a_entities: Vec<EntityArg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub b_entities: Vec<EntityArg>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed: Option<Allowed>,
 }
@@ -40,6 +81,8 @@ pub struct ClaimPlan {
     pub id: String,
     pub origin: Origin,
     pub primitive: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub args: BTreeMap<String, Arg>,
     pub pairing: Pairing,
     pub quantifier: Quantifier,
     pub cmp: Comparator,
@@ -85,11 +128,60 @@ fn keys(parts: &[BoundPart]) -> Vec<String> {
     k
 }
 
-fn resolve(arg: &Arg, claim_id: &str, b: &Bindings) -> Option<Vec<String>> {
+/// Resolve an entity-valued argument (`Entities` kind) to the entities it
+/// names: whole parts, or features of one part. `None` when the argument is
+/// not entity-valued or something in it failed to bind.
+fn entities_of(arg: &Arg, claim_id: &str, b: &Bindings) -> Option<Vec<EntityArg>> {
     match arg {
-        Arg::Others => b.others.get(claim_id).map(|o| keys(o)),
-        Arg::Feature(_) => None,
-        a => members_of_arg(a, b).map(|m| keys(&m)),
+        Arg::Feature(f) => {
+            let bound = b.features.get(&feature_ref_key(f)?)?;
+            Some(vec![EntityArg {
+                part: bound.part.key(),
+                feature: Some(f.clone()),
+            }])
+        }
+        Arg::Others => b.others.get(claim_id).map(|o| {
+            o.iter()
+                .map(|p| EntityArg {
+                    part: p.key(),
+                    feature: None,
+                })
+                .collect()
+        }),
+        Arg::List(items) => {
+            let mut all = Vec::new();
+            for i in items {
+                all.extend(entities_of(i, claim_id, b)?);
+            }
+            Some(all)
+        }
+        a => members_of_arg(a, b).map(|m| {
+            m.iter()
+                .map(|p| EntityArg {
+                    part: p.key(),
+                    feature: None,
+                })
+                .collect()
+        }),
+    }
+}
+
+/// Sorted, deduplicated part keys of a set of entities (what `Job.a`/`Job.b`
+/// and `PairRef` display).
+fn keys_of(entities: &[EntityArg]) -> Vec<String> {
+    let mut k: Vec<String> = entities.iter().map(|e| e.part.clone()).collect();
+    k.sort();
+    k.dedup();
+    k
+}
+
+/// The entity list a job carries to the worker: only when at least one
+/// element names a feature (part-only arguments keep the plain part names).
+fn emit_entities(entities: &[EntityArg]) -> Vec<EntityArg> {
+    if entities.iter().any(|e| e.feature.is_some()) {
+        entities.to_vec()
+    } else {
+        Vec::new()
     }
 }
 
@@ -126,12 +218,15 @@ pub fn plan(
         .collect();
     for p in prims {
         let at = format!("claims[{}]", p.origin.claim);
+        let proxy = super::library::library()
+            .primitive(&p.primitive)
+            .is_some_and(|d| d.accuracy == super::library::Accuracy::Proxy);
         let side = |name: &str| {
             p.args
                 .get(name)
-                .and_then(|a| resolve(a, &p.origin.claim, bindings))
+                .and_then(|a| entities_of(a, &p.origin.claim, bindings))
         };
-        let Some(a) = side("a") else {
+        let Some(mut a) = side("a").or_else(|| proxy.then(Vec::new)) else {
             errors.push(Diagnostic::new(
                 DiagnosticCode::ETypeKind,
                 &at,
@@ -139,7 +234,11 @@ pub fn plan(
             ));
             continue;
         };
-        let b = side("b").or_else(|| side("envelope")).unwrap_or_default();
+        let mut b = side("b").or_else(|| side("envelope")).unwrap_or_default();
+        a.sort();
+        a.dedup();
+        b.sort();
+        b.dedup();
         let axis = match p.args.get("axis") {
             Some(Arg::Axis(x)) => Some(x.clone()),
             _ => None,
@@ -149,8 +248,9 @@ pub fn plan(
             .get(&p.id)
             .cloned()
             .unwrap_or_else(|| expand_states(&p.states));
-        // Pairs in sorted order; (x, y) and (y, x) are one pair.
-        let pairs: Vec<(String, String)> = match p.pairing {
+        // Pairs in sorted entity order; (x, y) and (y, x) are one pair.
+        // Entities, not part keys: two features of the same part are distinct.
+        let pairs: Vec<(EntityArg, EntityArg)> = match p.pairing {
             Pairing::EachPair => {
                 let mut set = BTreeSet::new();
                 for x in &a {
@@ -168,7 +268,7 @@ pub fn plan(
             }
             _ => vec![],
         };
-        let unit_jobs: Vec<(Vec<String>, Vec<String>)> = match p.pairing {
+        let unit_jobs: Vec<(Vec<EntityArg>, Vec<EntityArg>)> = match p.pairing {
             Pairing::Whole | Pairing::AnyPair => vec![(a.clone(), b.clone())],
             Pairing::Each => a.iter().map(|x| (vec![x.clone()], vec![])).collect(),
             Pairing::EachPair => pairs
@@ -194,8 +294,8 @@ pub fn plan(
                     .then(|| {
                         req.allow.iter().enumerate().find_map(|(i, al)| {
                             let (m0, m1) = &allow_members[i];
-                            let pair_hit = (m0.contains(&ja[0]) && m1.contains(&jb[0]))
-                                || (m1.contains(&ja[0]) && m0.contains(&jb[0]));
+                            let pair_hit = (m0.contains(&ja[0].part) && m1.contains(&jb[0].part))
+                                || (m1.contains(&ja[0].part) && m0.contains(&jb[0].part));
                             let state_hit = allow_states[i]
                                 .as_ref()
                                 .is_none_or(|alts| alts.iter().any(|s| state.contains(s)));
@@ -209,8 +309,10 @@ pub fn plan(
                     });
                 jobs.push(Job {
                     state: si,
-                    a: ja.clone(),
-                    b: jb.clone(),
+                    a: keys_of(ja),
+                    b: keys_of(jb),
+                    a_entities: emit_entities(ja),
+                    b_entities: emit_entities(jb),
                     allowed: allowed.flatten(),
                 });
             }
@@ -219,6 +321,7 @@ pub fn plan(
             id: p.id.clone(),
             origin: p.origin.clone(),
             primitive: p.primitive.clone(),
+            args: p.args.clone(),
             pairing: p.pairing,
             quantifier: p.quantifier,
             cmp: p.cmp.clone(),
@@ -251,6 +354,12 @@ pub fn plan(
         requires
             .models
             .insert(super::bind::model_key(&s.model), s.fingerprint.clone());
+    }
+    // Feature measurements depend on the part geometry too.
+    for f in bindings.features.values() {
+        requires
+            .parts
+            .insert(f.part.key(), f.part.geometry_hash.clone());
     }
     Ok(Plan {
         manifest_hash: manifest.content_hash(),

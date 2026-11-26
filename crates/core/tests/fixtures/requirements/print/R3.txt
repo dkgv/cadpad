@@ -1,0 +1,6 @@
+Slab bolts to upright
+  1. Slab is bolted to upright_near with flange_bolt_* (flange_bolt_1, flange_bolt_2) (M8); hole between 8.4 and 9 mm, protrusion at least 1 mm, bearing at least 100 mm².
+  2. Inferred: stub_nut_* (stub_nut_1) does not overlap upright_far, as built. [crush ribs: the stub nut is meant to interfere with the far upright]
+  3. Inferred: stub_nut_* (stub_nut_1) may overlap upright_far by up to 0.5 mm³, at every state (crush ribs, 0.25 mm interference by design).
+  Numbers I chose: bearing 100 mm², hole lower 8.4 mm, hole upper 9 mm, protrusion 1 mm, allowance 1 limit 0.5 mm³
+     ▸ details: 12 checks · overlap tolerance ε 0.001 mm³ · accuracy exact (contact_area, diameter, interference, thread_protrusion) · bearing 100 mm² (my proposal; bearing area, not stated) · hole lower 8.4 mm (my proposal; clearance hole for M8, not stated) · hole upper 9 mm (my proposal; clearance hole for M8, not stated) · protrusion 1 mm (my proposal; engagement, not stated) · allowance 1 limit 0.5 mm³ (my proposal; crush ribs)

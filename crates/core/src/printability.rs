@@ -102,11 +102,7 @@ pub struct PrintabilityReport {
 fn vertex_key(point: [f64; 3]) -> [u32; 3] {
     point.map(|coordinate| {
         let value = coordinate as f32;
-        if value == 0.0 {
-            0
-        } else {
-            value.to_bits()
-        }
+        if value == 0.0 { 0 } else { value.to_bits() }
     })
 }
 
@@ -156,7 +152,8 @@ pub fn analyze(bytes: &[u8], preset: Preset, source: &str) -> Result<Printabilit
             ab[2] * ac[0] - ab[0] * ac[2],
             ab[0] * ac[1] - ab[1] * ac[0],
         ];
-        let twice_area = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        let twice_area =
+            (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         if twice_area == 0.0 {
             degenerate += 1;
             continue;
@@ -173,7 +170,11 @@ pub fn analyze(bytes: &[u8], preset: Preset, source: &str) -> Result<Printabilit
         }
         let keys = [vertex_key(a), vertex_key(b), vertex_key(c)];
         for pair in [(keys[0], keys[1]), (keys[1], keys[2]), (keys[2], keys[0])] {
-            let edge = if pair.0 <= pair.1 { pair } else { (pair.1, pair.0) };
+            let edge = if pair.0 <= pair.1 {
+                pair
+            } else {
+                (pair.1, pair.0)
+            };
             *edge_use.entry(edge).or_insert(0) += 1;
         }
     }
@@ -193,10 +194,17 @@ pub fn analyze(bytes: &[u8], preset: Preset, source: &str) -> Result<Printabilit
     let mut exceeds = Vec::new();
     for (axis, label) in ["x", "y", "z"].iter().enumerate() {
         if size[axis] > preset.build_volume_mm[axis] {
-            exceeds.push(format!("{label} {:.1} mm > {:.0} mm", size[axis], preset.build_volume_mm[axis]));
+            exceeds.push(format!(
+                "{label} {:.1} mm > {:.0} mm",
+                size[axis], preset.build_volume_mm[axis]
+            ));
         }
     }
-    let overhang_fraction = if total_area > 0.0 { overhang_area / total_area } else { 0.0 };
+    let overhang_fraction = if total_area > 0.0 {
+        overhang_area / total_area
+    } else {
+        0.0
+    };
 
     if !watertight {
         warn(
@@ -221,7 +229,11 @@ pub fn analyze(bytes: &[u8], preset: Preset, source: &str) -> Result<Printabilit
             &mut warnings,
             "exceeds_build_volume",
             "error",
-            format!("Part exceeds the {} build volume on {}.", preset.name, exceeds.join(", ")),
+            format!(
+                "Part exceeds the {} build volume on {}.",
+                preset.name,
+                exceeds.join(", ")
+            ),
         );
     }
     if small_features > 0 {
@@ -242,12 +254,18 @@ pub fn analyze(bytes: &[u8], preset: Preset, source: &str) -> Result<Printabilit
             "warning",
             format!(
                 "{:.0}% of surface area faces downward steeper than {}° — expect supports or print issues.",
-                overhang_fraction * 100.0, preset.overhang_deg
+                overhang_fraction * 100.0,
+                preset.overhang_deg
             ),
         );
     }
     if triangles.is_empty() {
-        warn(&mut warnings, "empty", "error", "Mesh has no triangles.".into());
+        warn(
+            &mut warnings,
+            "empty",
+            "error",
+            "Mesh has no triangles.".into(),
+        );
     }
 
     Ok(PrintabilityReport {
@@ -258,11 +276,7 @@ pub fn analyze(bytes: &[u8], preset: Preset, source: &str) -> Result<Printabilit
         boundary_edges: boundary,
         nonmanifold_edges: nonmanifold,
         degenerate_triangles: degenerate,
-        bounds_mm: Bounds {
-            min,
-            max,
-            size,
-        },
+        bounds_mm: Bounds { min, max, size },
         exceeds_build_volume: exceeds,
         min_edge_mm: if min_edge.is_finite() { min_edge } else { 0.0 },
         min_triangle_area_mm2: if min_area.is_finite() { min_area } else { 0.0 },
@@ -307,8 +321,7 @@ impl crate::Core {
                 .await?,
         )?;
         let bytes = self.artifact(workspace_id, revision, &reply.handle).await?;
-        blocking(move || analyze(&bytes, preset, "exported STL"))
-            .await
+        blocking(move || analyze(&bytes, preset, "exported STL")).await
     }
 }
 
@@ -365,10 +378,12 @@ mod tests {
         let report = report(&triangles);
         assert!(!report.watertight);
         assert_eq!(report.boundary_edges, 4);
-        assert!(report
-            .warnings
-            .iter()
-            .any(|w| w.code == "not_watertight" && w.severity == "error"));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.code == "not_watertight" && w.severity == "error")
+        );
     }
 
     #[test]
@@ -380,10 +395,12 @@ mod tests {
         let report = report(&triangles);
         assert_eq!(report.exceeds_build_volume.len(), 1);
         assert!(report.exceeds_build_volume[0].starts_with('x'));
-        assert!(report
-            .warnings
-            .iter()
-            .any(|w| w.code == "exceeds_build_volume"));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.code == "exceeds_build_volume")
+        );
     }
 
     #[test]

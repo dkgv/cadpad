@@ -1,0 +1,78 @@
+[
+  {
+    "args": {
+      "a": {
+        "feature": {
+          "kind": "explicit",
+          "name": "hook_lip",
+          "part": {
+            "model": {
+              "builder": "snap",
+              "entry": "snap.py"
+            },
+            "part": {
+              "name": "clip"
+            }
+          }
+        }
+      },
+      "along": {
+        "feature": {
+          "kind": "explicit",
+          "name": "insertion_axis",
+          "part": {
+            "model": {
+              "builder": "snap",
+              "entry": "snap.py"
+            },
+            "part": {
+              "name": "clip"
+            }
+          }
+        }
+      },
+      "b": {
+        "feature": {
+          "kind": "explicit",
+          "name": "ledge",
+          "part": {
+            "model": {
+              "builder": "snap",
+              "entry": "snap.py"
+            },
+            "part": {
+              "name": "boss"
+            }
+          }
+        }
+      }
+    },
+    "cmp": {
+      "hi": {
+        "unit": "mm",
+        "value": 0.5
+      },
+      "lo": {
+        "unit": "mm",
+        "value": 0.3
+      },
+      "op": "in"
+    },
+    "id": "c1.1",
+    "origin": {
+      "claim": "c1",
+      "library_version": "33e5a9f2126b4bba814c1f007cbec3eb504f9ab8c9096f82b90a97ee0e5ee4d8",
+      "rule": "measure"
+    },
+    "pairing": "each_pair",
+    "primitive": "overlap_depth",
+    "quantifier": "for_all",
+    "span": [
+      0,
+      80
+    ],
+    "states": {
+      "kind": "rest"
+    }
+  }
+]

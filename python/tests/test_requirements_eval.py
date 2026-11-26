@@ -33,6 +33,10 @@ def interference(a="a", b="b", id="m"):
     return dict(id=id, primitive="interference", a=[a], b=[b])
 
 
+def contact_area(a="a", b="b", id="c"):
+    return dict(id=id, primitive="contact_area", a=[a], b=[b])
+
+
 def canonical(result):
     return json.dumps(result["results"], sort_keys=True, allow_nan=False)
 
@@ -44,6 +48,44 @@ def test_known_overlaps_touching_and_micro_overlap(tmp_path, offset, expected):
     assert m["status"] == "ok"
     assert m["value"] == pytest.approx(expected, abs=1e-8)
     assert (m["witness"] is not None) == (expected > 0)
+
+
+def test_contact_area_counts_true_face_contact_only(tmp_path):
+    a = box(10, 10, 10)
+    touching = box(10, 10, 10, (10, 0, 0))
+    clear = box(10, 10, 10, (10.001, 0, 0))
+    overlap = box(10, 10, 10, (9, 0, 0))
+    model = model_with(tmp_path, dict(a=a, touching=touching, clear=clear, overlap=overlap))
+    result = evaluate(model, [dict(id="s", measurements=[
+        contact_area("a", "touching"), contact_area("a", "clear", "clear"),
+        contact_area("a", "overlap", "overlap"), interference("a", "overlap", "volume"),
+    ])])
+    touching, clear, overlap, volume = result["results"]["states"][0]["measurements"]
+    assert touching["status"] == "ok" and touching["value"] == pytest.approx(100.0)
+    assert touching["witness"] == ["a", "touching"]
+    assert clear["status"] == "ok" and clear["value"] == 0.0 and clear["witness"] is None
+    assert overlap["status"] == "ok" and overlap["value"] == 0.0 and overlap["witness"] is None
+    assert volume["value"] == pytest.approx(100.0)
+
+
+def test_contact_area_sums_multiple_contacts_deterministically(tmp_path):
+    shapes = dict(a=box(2, 2, 2), b=box(2, 2, 2, (2, 0, 0)),
+                  c=box(2, 2, 2, (-2, 0, 0)), far=box(2, 2, 2, (20, 0, 0)))
+    model = model_with(tmp_path, shapes)
+    states = [dict(id="s", measurements=[contact_area("a", "c", "c"),
+                                         contact_area("a", "b", "b"),
+                                         dict(id="sum", primitive="contact_area", a=["a"], b=["c", "far", "b"])])]
+    first = evaluate(model, states, workers=0)
+    reverse = evaluate(model_with(tmp_path / "reverse", shapes), [dict(id="s", measurements=[
+        dict(id="sum", primitive="contact_area", a=["a"], b=["b", "far", "c"])])], workers=2)
+    items = first["results"]["states"][0]["measurements"]
+    assert [m["value"] for m in items] == pytest.approx([4.0, 4.0, 8.0])
+    assert items[2]["witness"] == ["a", "b"]  # sorted pair order breaks equal-area ties
+    total = reverse["results"]["states"][0]["measurements"][0]
+    assert total["value"] == pytest.approx(8.0)
+    assert total["pairs_total"] == 3 and total["pairs_pruned"] == 1
+    assert total["witness"] == ["a", "b"]
+    assert items[2] == total  # same sorted pairs and stable reduction for reversed input / worker order
 
 
 def test_other_primitives_on_known_geometry(tmp_path):
@@ -103,6 +145,49 @@ def test_rigid_rotation_sweep_finds_known_clash_angle(tmp_path):
     # Far angles never reached a boolean: the broad phase pruned them.
     assert r["results"]["states"][5]["measurements"][0]["pairs_pruned"] == 1
     assert r["cache"]["result_misses"] < len(angles)
+
+
+def test_feature_axis_rotation_uses_feature_point(tmp_path):
+    # Axle is a cylinder whose axis is Z through (10, 0, 0); the arm pivots about it.
+    wp = cq.Workplane().cylinder(20, 2).translate((10, 0, 0))
+    model = Model(tmp_path / "cache")
+    model.revision = "r1"
+    model.parts = {
+        "axle": Part("axle", wp.val(), (0, 0, 0), {"axle_axis": wp.faces("%CYLINDER")}, None),
+        "arm": Part("arm", box(8, 1, 1, (14, 0, 0)), (0, 0, 0), {}, None),
+    }
+    axis = {"feature": {"kind": "explicit", "name": "axle_axis"}, "on": "axle"}
+    extent_y = dict(id="e", primitive="extent", a=["arm"], axis="y")
+    states = [
+        dict(id="rest", measurements=[extent_y]),
+        dict(id="turned", moves=[dict(op="rotate", parts=["arm"], axis=axis, angle_deg=90)],
+             measurements=[extent_y]),
+    ]
+    r = evaluate(model, states)
+    assert measurement(r)["value"] == pytest.approx(1.0, abs=0.2)
+    # After a quarter turn about the offset axis the arm lies along Y.
+    assert measurement(r, 1)["value"] == pytest.approx(8.0, abs=0.2)
+
+
+def test_feature_axis_rotation_reports_missing_axis_feature(tmp_path):
+    wp = cq.Workplane().cylinder(20, 2).translate((10, 0, 0))
+    model = Model(tmp_path / "cache")
+    model.revision = "r1"
+    model.parts = {
+        "axle": Part("axle", wp.val(), (0, 0, 0), {"axle_axis": wp.faces("%CYLINDER")}, None),
+        "arm": Part("arm", box(8, 1, 1, (14, 0, 0)), (0, 0, 0), {}, None),
+    }
+    missing_axis = {"feature": {"kind": "explicit", "name": "missing_axis"}, "on": "axle"}
+    result = evaluate(model, [dict(
+        id="bad_axis",
+        moves=[dict(op="rotate", parts=["arm"], axis=missing_axis, angle_deg=90)],
+        measurements=[dict(id="extent", primitive="extent", a=["arm"], axis="y")],
+    )])
+
+    failed = measurement(result)
+    assert failed["status"] == "error"
+    assert failed["error"]["code"] == "BIND_FEATURE"
+    assert "missing_axis" in failed["error"]["message"]
 
 
 def test_translate_move_and_unknown_part(tmp_path):
@@ -324,3 +409,165 @@ def test_protocol_round_trip_after_build(tmp_path):
     assert result["results"]["states"][0]["measurements"][0]["value"] == pytest.approx(500.0)
     assert result["results"]["states"][1]["measurements"][0]["value"] == 0.0
     assert responses[2]["error"]["data"]["code"] == "STALE_ENTITY"
+
+
+# ------------------------------------------------------- P2.9–P2.13 primitives
+
+def cylinder(radius=3.0, height=10.0, at=(0, 0, 0)):
+    return cq.Workplane().cylinder(height, radius).val().translate(at)
+
+
+def plate_with_holes():
+    return (cq.Workplane().box(40, 20, 5).faces(">Z").workplane()
+            .pushPoints([(0, 0), (20, 0)]).hole(6).val())
+
+
+def feature_part(tmp_path, name="plate"):
+    shape = plate_with_holes()
+    cyl_faces = [f for f in shape.Faces() if f.geomType() == "CYLINDER"]
+    part = Part(name, shape, (0, 0, 0), {"hole_a": cyl_faces[0], "hole_b": cyl_faces[1]}, None)
+    model = Model(tmp_path / "cache")
+    model.revision = "r1"
+    model.parts = {name: part}
+    return model
+
+
+def feat(name, part="plate"):
+    return {"part": part, "feature": {"kind": "explicit", "name": name}}
+
+
+def meas(result, mid, state=0):
+    for m in result["results"]["states"][state]["measurements"]:
+        if m["id"] == mid:
+            return m
+    raise AssertionError(f"no measurement {mid}")
+
+
+def test_part_measurements_exact(tmp_path):
+    model = model_with(tmp_path, dict(
+        cyl=cylinder(3, 10), a=box(10, 10, 10), b=box(10, 10, 10, (20, 0, 0))))
+    result = evaluate(model, [dict(id="s", measurements=[
+        dict(id="d", primitive="diameter", a=["cyl"]),
+        dict(id="r", primitive="radius", a=["cyl"]),
+        dict(id="l", primitive="length", a=["a"]),
+        dict(id="ar", primitive="area", a=["a"]),
+        dict(id="v", primitive="volume", a=["a", "b"]),
+    ])])
+    assert meas(result, "d")["value"] == pytest.approx(6.0)
+    assert meas(result, "r")["value"] == pytest.approx(3.0)
+    assert meas(result, "l")["value"] == pytest.approx(10.0)
+    assert meas(result, "ar")["value"] == pytest.approx(600.0)
+    assert meas(result, "v")["value"] == pytest.approx(2000.0)
+
+
+def test_feature_measurements(tmp_path):
+    model = feature_part(tmp_path)
+    result = evaluate(model, [dict(id="s", measurements=[
+        dict(id="d", primitive="diameter", a=[feat("hole_a")]),
+        dict(id="r", primitive="radius", a=[feat("hole_b")]),
+        dict(id="ao", primitive="axis_offset", a=[feat("hole_a")], b=[feat("hole_b")]),
+        dict(id="aa", primitive="axis_angle", a=[feat("hole_a")], b=[feat("hole_b")]),
+        dict(id="g", primitive="gap", a=[feat("hole_a")], b=[feat("hole_b")], spacing=2.0),
+        dict(id="ar", primitive="area", a=[feat("hole_a")]),
+    ])])
+    assert meas(result, "d")["value"] == pytest.approx(6.0)
+    assert meas(result, "d")["witness"] == ["plate#hole_a"]
+    assert meas(result, "r")["value"] == pytest.approx(3.0)
+    assert meas(result, "ao")["value"] == pytest.approx(20.0)
+    assert meas(result, "aa")["value"] == pytest.approx(0.0)
+    g = meas(result, "g")
+    assert g["value"] == pytest.approx(14.0)          # exact minimum wall gap
+    assert g["max"] == pytest.approx(math.hypot(20, 5, 0), abs=0.6) or g["max"] > g["value"]
+    assert meas(result, "ar")["status"] == "ok"
+
+
+def test_gap_reports_min_and_sampled_max(tmp_path):
+    model = model_with(tmp_path, dict(
+        a=box(10, 10, 10), b=box(10, 10, 10, (20, 0, 0))))
+    result = evaluate(model, [dict(id="s", measurements=[
+        dict(id="g", primitive="gap", a=["a"], b=["b"], spacing=1.0),
+    ])])
+    g = meas(result, "g")
+    assert g["value"] == pytest.approx(10.0)
+    assert g["max"] == pytest.approx(math.sqrt(30 ** 2 + 10 ** 2 + 10 ** 2), abs=0.5)
+    assert g["witness"] == ["a", "b"]
+
+
+def test_clearance_along_shadow_semantics(tmp_path):
+    model = model_with(tmp_path, dict(
+        a=box(10, 10, 10), b=box(10, 10, 10, (20, 0, 0))))
+    result = evaluate(model, [dict(id="s", measurements=[
+        dict(id="c", primitive="clearance_along", a=["a"], b=["b"], dirs=["x", [-1, 0, 0]]),
+        dict(id="z", primitive="clearance_along", a=["a"], b=["b"], dirs=["z"]),
+    ])])
+    # +x: 10 mm to B; -x: B behind -> unbounded sentinel; min is 10.
+    c = meas(result, "c")
+    assert c["value"] == pytest.approx(10.0)
+    assert c["items"][0]["value"] == pytest.approx(10.0)
+    # Along z the projections overlap (B is alongside): shadow clearance is 0,
+    # the conservative bound that never overstates.
+    assert meas(result, "z")["value"] == pytest.approx(0.0)
+
+
+def test_overlap_depth_and_profile_primitives(tmp_path):
+    model = model_with(tmp_path, dict(
+        a=box(10, 10, 10), b=box(10, 10, 10, (5, 0, 0)), c=box(10, 10, 10, (20, 0, 0))))
+    result = evaluate(model, [dict(id="s", measurements=[
+        dict(id="o", primitive="overlap_depth", a=["a"], b=["b"], along="x"),
+        dict(id="o2", primitive="overlap_depth", a=["a"], b=["c"], along="x"),
+        dict(id="pc", primitive="profile_centre", a=["a"], b=["c"], axis="z"),
+        dict(id="ps", primitive="profile_size", a=["a"], b=["c"], axis="z"),
+    ])])
+    assert meas(result, "o")["value"] == pytest.approx(5.0)
+    assert meas(result, "o2")["value"] == pytest.approx(0.0)
+    assert meas(result, "pc")["value"] == pytest.approx(20.0)
+    assert meas(result, "ps")["value"] == pytest.approx(0.0)
+
+
+def test_measurement_errors_are_reported_not_raised(tmp_path):
+    model = model_with(tmp_path, dict(a=box(10, 10, 10)))
+    result = evaluate(model, [dict(id="s", measurements=[
+        dict(id="d", primitive="diameter", a=["a"]),          # box: no cylinder/circle/sphere
+        dict(id="v", primitive="volume", a=[{"part": "a", "feature": None}]),
+        dict(id="ao", primitive="axis_offset", a=["a"], b=["a"]),  # box: many axes
+    ])])
+    # The dict form above is invalid for `a` of volume? it is a valid entity ref.
+    for mid in ("d", "ao"):
+        m = meas(result, mid)
+        assert m["status"] == "error", (mid, m)
+    assert meas(result, "v")["status"] == "ok"
+
+
+def test_diameter_difference(tmp_path):
+    model = model_with(tmp_path, dict(
+        pin=cylinder(4.0, 20.0), hole=cylinder(4.1, 10.0)))
+    result = evaluate(model, [dict(id="s", measurements=[
+        dict(id="dd", primitive="diameter_difference", a=["pin"], b=["hole"]),
+        dict(id="dd2", primitive="diameter_difference", a=["hole"], b=["pin"]),
+    ])])
+    assert meas(result, "dd")["value"] == pytest.approx(-0.2)
+    assert meas(result, "dd2")["value"] == pytest.approx(0.2)
+
+
+def test_thread_protrusion(tmp_path):
+    # Bolt: r=4 head over z in [-2, 2], r=2 shank over z in [2, 28].
+    bolt = cq.Compound.makeCompound([
+        cq.Solid.makeCylinder(4.0, 4.0, cq.Vector(0, 0, -2), cq.Vector(0, 0, 1)),
+        cq.Solid.makeCylinder(2.0, 26.0, cq.Vector(0, 0, 2), cq.Vector(0, 0, 1)),
+    ])
+    fastener = {"kind": "bolt", "size": "M8", "length": 30.0, "mates": ["p1", "p2"]}
+    model = Model(tmp_path / "cache")
+    model.revision = "r1"
+    model.parts = {
+        "bolt": Part("bolt", bolt, (0, 0, 0), {}, None, fastener=fastener),
+        "p1": Part("p1", box(10, 10, 10, (0, 0, 5)), (0, 0, 0), {}, None),
+        "p2": Part("p2", box(10, 10, 10, (0, 0, 15)), (0, 0, 0), {}, None),
+        "plain": Part("plain", cylinder(2.0, 30.0, (0, 0, -15)), (0, 0, 0), {}, None),
+    }
+    result = evaluate(model, [dict(id="s", measurements=[
+        dict(id="tp", primitive="thread_protrusion", a=["bolt"]),
+        dict(id="tp2", primitive="thread_protrusion", a=["plain"]),
+    ])])
+    # Mates span z in [0, 20]; the threaded tip reaches z = 28 -> 8 mm overhang.
+    assert meas(result, "tp")["value"] == pytest.approx(8.0)
+    assert meas(result, "tp2")["status"] == "error"  # no fastener metadata

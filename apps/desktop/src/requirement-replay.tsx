@@ -7,7 +7,9 @@ import './requirements.css';
 type Move={op:'rotate'|'translate';parts:string[];axis?:'x'|'y'|'z'|[number,number,number];origin?:[number,number,number];angle_deg?:number;vector?:[number,number,number]};
 export type RequirementReplay={
   requirement_id:string;primitive_id:string;state_index:number;model:{entry:string;builder:string};
-  state:unknown;mode:'rest'|'rigid'|'parameter';moves:Move[];stateLabel?:string;pairLabel?:string;
+  state:unknown;mode:'rest'|'rigid'|'parameter'|'simulation';moves:Move[];
+  simulation_poses?:Record<string,{position:[number,number,number];quaternion:[number,number,number,number]}>;
+  stateLabel?:string;pairLabel?:string;
   view:{workspace:string;revision:string;temporary:boolean}|null;
 };
 type ReplayProject={workspace_id:string;revision:string;model:SceneModel};
@@ -35,7 +37,9 @@ export function RequirementReplayPanel({replay,onClose}:{replay:RequirementRepla
       workspace:project.workspace_id,revision:project.revision,handle,
     }),project.workspace_id).then(()=>{
       if(!active)return;
-      viewport!.applyRequirementMoves(replay.moves);setLoading(false);
+      if(replay.mode==='simulation')viewport!.applyRequirementPoses(replay.simulation_poses??{});
+      else viewport!.applyRequirementMoves(replay.moves);
+      setLoading(false);
     }).catch(value=>{if(active){setError(value instanceof Error?value.message:String(value));setLoading(false);}});
     return()=>{active=false;viewport?.dispose();};
   },[project,replay.moves]);
@@ -53,7 +57,7 @@ export function RequirementReplayPanel({replay,onClose}:{replay:RequirementRepla
   },[replay.requirement_id,replay.primitive_id,replay.state_index]);
   return createPortal(<div className="rq-replay-backdrop" role="presentation" onMouseDown={event=>{if(event.target===event.currentTarget)onClose();}}>
     <section className="rq-replay" role="dialog" aria-modal="true" aria-label="Worst-state replay">
-      <header><div><strong>Worst-state replay</strong><span className="muted">{replay.stateLabel|| (replay.mode==='parameter'?'Rebuilt parameter state':replay.mode==='rigid'?'Rigid movement':'As built')}{replay.pairLabel?` · ${replay.pairLabel}`:''}</span></div><button ref={closeButton} type="button" onClick={onClose} aria-label="Close replay">Close</button></header>
+      <header><div><strong>Worst-state replay</strong><span className="muted">{replay.stateLabel|| (replay.mode==='parameter'?'Rebuilt parameter state':replay.mode==='simulation'?'Simulation sample':replay.mode==='rigid'?'Rigid movement':'As built')}{replay.pairLabel?` · ${replay.pairLabel}`:''}</span></div><button ref={closeButton} type="button" onClick={onClose} aria-label="Close replay">Close</button></header>
       <div ref={canvas} className="rq-replay-canvas" aria-label="Temporary replay viewer"/>
       {loading&&<p className="rq-replay-status" role="status">Preparing replay…</p>}
       {error&&<p className="rq-replay-error" role="alert">{error}</p>}

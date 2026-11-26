@@ -1,6 +1,8 @@
 """Projects written before VTK removal remain usable on the headless runtime."""
 import struct
+import hashlib
 
+import cadquery as cq
 import pytest
 
 from cadpad_worker.model import Model, DomainError
@@ -29,6 +31,30 @@ def test_existing_project_builds_and_exports(tmp_path, expected):
         else:
             count, = struct.unpack_from("<I", data, 80)
             assert count > 0 and len(data) == 84 + count * 50
+
+
+def test_named_step_import_records_asset_path_and_hash_on_published_occurrences(tmp_path):
+    root = source(tmp_path)
+    assets = root / "assets"
+    assets.mkdir()
+    step_path = assets / "housing.step"
+    cq.exporters.export(cq.Workplane().box(2, 3, 4), str(step_path), exportType="STEP")
+    (root / "model.py").write_text(
+        "show(import_step_named('housing.step', name='Housing'), name='Housing')\n"
+    )
+
+    result = Model(tmp_path / "cache").build(
+        {"source_root": str(root), "expected_dependencies": CURRENT}, "step-source"
+    )
+
+    assert result["parts"]
+    assert all(
+        part["source_assets"] == [{
+            "path": "assets/housing.step",
+            "sha256": hashlib.sha256(step_path.read_bytes()).hexdigest(),
+        }]
+        for part in result["parts"]
+    )
 
 
 @pytest.mark.parametrize("expected", [

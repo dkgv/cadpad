@@ -90,6 +90,11 @@ fn states<'a>(s: &'a StateSpace, at: &str, claim: Option<usize>, f: Sink<'a, '_>
             claim,
             reference: Ref::Joint(joint),
         }),
+        StateSpace::Simulate { model, .. } => f(Site {
+            at: format!("{at}.model"),
+            claim,
+            reference: Ref::Model(model),
+        }),
         StateSpace::Product { factors } => {
             for (i, x) in factors.iter().enumerate() {
                 states(x, &format!("{at}.factors[{i}]"), claim, f);

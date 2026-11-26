@@ -164,7 +164,7 @@ export type Finding={
 export type Worst={state:number;state_label:string;pair:{a:string[];b:string[]};witness?:string[]|null;value?:Quantity|null;margin?:Quantity|null};
 export type SlowPair={state:number;state_label:string;pair:{a:string[];b:string[]};reason?:string|null};
 export type PrimitiveResult={
-  id:string;claim:string;primitive:string;quantifier?:string;status:string;met?:boolean|null;margin?:Quantity|null;worst?:Worst|null;witness?:Worst|null;
+  id:string;claim:string;primitive:string;accuracy?:'exact'|'sampled'|'proxy';quantifier?:string;status:string;met?:boolean|null;margin?:Quantity|null;worst?:Worst|null;witness?:Worst|null;
   states:number;jobs?:number;failing_states:number[];failing_state_count?:number;inconclusive:SlowPair[];inconclusive_count?:number;errors:string[];error_count?:number;
 };
 export type Change={kind?:string;effect?:string;at?:string;message:string};

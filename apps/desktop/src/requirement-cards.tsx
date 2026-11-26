@@ -257,9 +257,11 @@ function ResultBody({info,result,previous,actions}:{info:RequirementInfo;result:
   const slow=result.primitives.flatMap(item=>item.inconclusive);
   const issues=result.primitives.flatMap(item=>item.errors);
   const changes=result.changes.filter(change=>change.effect==='run_changed');
+  const proxy=result.primitives.some(item=>item.accuracy==='proxy');
   const shown=result.status;
   return <div className={previous?'rq-previous':''}>
     {previous&&<p className="rq-prev-label">Previous result</p>}
+    {proxy&&<p className="rq-hint">Proxy simulation result. Joint and contact checks use approximate collision proxies.</p>}
     {!previous&&changes.length>0&&<details className="rq-fine"><summary>Changed since approval</summary><ul>{changes.map((change,index)=><li key={index}>{change.message}</li>)}</ul></details>}
     {(shown==='met'||shown==='met_partial')&&<><div className="rq-meter"><span className="big">{margin?formatQuantity(margin):'Met'}</span><span className="muted">{margin?'spare at the tightest point':'every check passed'}</span></div>
       {worst&&<p className="rq-kv">Tightest at <b>{worst.state_label}</b>, {pairText(worst.pair)}{primitive?` · ${primitive.states} ${primitive.states===1?'state':'states'} checked`:''}</p>}

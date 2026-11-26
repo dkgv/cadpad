@@ -9,7 +9,7 @@
 //! prefixed back on the way in. The live executor adds the build `revision`
 //! to the request params.
 use super::bind::{model_key, part_ref_key};
-use super::ir::{AxisRef, ParamRef, Target};
+use super::ir::{Arg, AxisRef, ParamRef, Target};
 use super::manifest::Manifest;
 use super::plan::Plan;
 use super::quantity::Unit;
@@ -163,12 +163,147 @@ fn axis_vector(claim: &str, a: &AxisRef) -> Result<[f64; 3], EvalError> {
     }
 }
 
+/// Feature descriptor the worker resolves against a state's part geometry.
+fn feature_json(f: &super::ir::FeatureRef) -> Value {
+    use super::ir::FeatureRef;
+    match f {
+        FeatureRef::Explicit { name, .. } => json!({"kind": "explicit", "name": name}),
+        FeatureRef::History { name, .. } => json!({"kind": "history", "name": name}),
+        FeatureRef::Geometric { entity, hash, .. } => {
+            json!({"kind": "geometric", "entity": entity, "hash": hash})
+        }
+    }
+}
+
+/// `{"feature": desc, "on": part}` marker the worker expands per state.
+fn feature_axis_json(f: &super::ir::FeatureRef) -> Value {
+    json!({"feature": feature_json(f), "on": feature_owner(f)})
+}
+
+/// Entity list for the worker: part names, or `{"part": name, "feature":
+/// desc}` objects when the job carries feature descriptors. `None` when the
+/// job has no feature entities (the plain part names are used instead).
+fn entity_refs_json(entities: &[super::plan::EntityArg]) -> Option<Value> {
+    if entities.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(entities.len());
+    for e in entities {
+        let (_, name) = split_part_key(&e.part)?;
+        match &e.feature {
+            Some(f) => {
+                let mut o = json!({"part": name});
+                o["feature"] = feature_json(f);
+                out.push(o);
+            }
+            None => out.push(json!(name)),
+        }
+    }
+    Some(json!(out))
+}
+
+/// `"+x"`/`"-y"`/… direction keywords to worker axis JSON.
+fn direction_text_json(text: &str) -> Option<Value> {
+    Some(match text {
+        "+x" => json!("x"),
+        "-x" => json!([-1.0, 0.0, 0.0]),
+        "+y" => json!("y"),
+        "-y" => json!([0.0, -1.0, 0.0]),
+        "+z" => json!("z"),
+        "-z" => json!([0.0, 0.0, -1.0]),
+        _ => return None,
+    })
+}
+
+fn unsupported_axis(claim: &str, name: &str) -> EvalError {
+    EvalError::UnsupportedState {
+        claim: claim.to_string(),
+        reason: format!("{name} is missing or not an axis, direction or feature"),
+    }
+}
+
+/// A single axis argument: `Arg::Axis`, a direction word, a feature ref, or
+/// one published part whose own axis is used.
+fn axis_arg_json(
+    claim: &str,
+    args: &std::collections::BTreeMap<String, Arg>,
+    name: &str,
+    manifest: &Manifest,
+) -> Result<Value, EvalError> {
+    match args.get(name) {
+        Some(Arg::Axis(a)) => axis_json(claim, a),
+        Some(Arg::Text(t)) => direction_text_json(t).ok_or_else(|| unsupported_axis(claim, name)),
+        Some(Arg::Feature(f)) => Ok(feature_axis_json(f)),
+        Some(Arg::Part(p)) => {
+            let mut names = std::collections::BTreeSet::new();
+            for key in manifest
+                .parts
+                .get(&part_ref_key(p))
+                .into_iter()
+                .flatten()
+                .map(|l| l.key.as_str())
+            {
+                if let Some((_, n)) = split_part_key(key) {
+                    names.insert(n.to_string());
+                }
+            }
+            if names.len() == 1 {
+                Ok(json!({"part": names.iter().next().unwrap(), "feature": Value::Null}))
+            } else {
+                Err(EvalError::UnsupportedState {
+                    claim: claim.to_string(),
+                    reason: format!("{name} axis needs exactly one published part"),
+                })
+            }
+        }
+        _ => Err(unsupported_axis(claim, name)),
+    }
+}
+
+/// A `directions` argument: one axis/direction word or a list of them.
+fn axes_arg_json(
+    claim: &str,
+    args: &std::collections::BTreeMap<String, Arg>,
+    name: &str,
+) -> Result<Value, EvalError> {
+    let one = |a: &Arg| -> Result<Value, EvalError> {
+        match a {
+            Arg::Axis(x) => axis_json(claim, x),
+            Arg::Text(t) => direction_text_json(t).ok_or_else(|| unsupported_axis(claim, name)),
+            _ => Err(unsupported_axis(claim, name)),
+        }
+    };
+    match args.get(name) {
+        Some(a @ (Arg::Axis(_) | Arg::Text(_))) => Ok(json!([one(a)?])),
+        Some(Arg::List(items)) if !items.is_empty() => items
+            .iter()
+            .map(one)
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| json!(v)),
+        _ => Err(unsupported_axis(claim, name)),
+    }
+}
+
+fn feature_owner(f: &super::ir::FeatureRef) -> String {
+    use super::ir::FeatureRef;
+    let part = match f {
+        FeatureRef::Explicit { part, .. }
+        | FeatureRef::History { part, .. }
+        | FeatureRef::Geometric { part, .. } => part,
+    };
+    match &part.part {
+        super::ir::PartName::Name(name) => name.clone(),
+        super::ir::PartName::Glob(pattern) => pattern.clone(),
+    }
+}
+
 fn axis_json(claim: &str, a: &AxisRef) -> Result<Value, EvalError> {
     Ok(match a {
         AxisRef::X => json!("x"),
         AxisRef::Y => json!("y"),
         AxisRef::Z => json!("z"),
-        other => json!(axis_vector(claim, other)?),
+        AxisRef::Vector(_) => json!(axis_vector(claim, a)?),
+        AxisRef::Feature(f) => feature_axis_json(f),
     })
 }
 
@@ -206,6 +341,11 @@ pub(super) fn worker_state(
     };
     for v in &state.values {
         match v {
+            StateValue::Simulate { .. } => {
+                return Err(unsupported(
+                    "simulation states run in the Rust proxy evaluator".into(),
+                ));
+            }
             StateValue::Param { param, value } => {
                 let key = param_key(param, manifest);
                 if let Some((m, _)) = key.as_deref().and_then(|k| k.rsplit_once(':'))
@@ -261,15 +401,27 @@ pub(super) fn worker_state(
                         .convert_to(Unit::Mm)
                         .map_err(|e| unsupported(e.to_string()))?
                 };
-                let d = axis_vector(claim, direction)?;
-                let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                if n == 0.0 || !n.is_finite() {
-                    return Err(unsupported("translation direction is zero".into()));
-                }
                 let names = names_of(claim, &target_keys(moving, manifest), model)?;
+                let vector = match direction {
+                    AxisRef::Feature(f) => json!({
+                        "feature": feature_json(f), "on": feature_owner(f),
+                        "distance": mm.value,
+                    }),
+                    _ => {
+                        let d = axis_vector(claim, direction)?;
+                        let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                        if n == 0.0 || !n.is_finite() {
+                            return Err(unsupported("translation direction is zero".into()));
+                        }
+                        json!([
+                            d[0] / n * mm.value,
+                            d[1] / n * mm.value,
+                            d[2] / n * mm.value
+                        ])
+                    }
+                };
                 out.moves.push(json!({
-                    "op": "translate", "parts": names,
-                    "vector": [d[0] / n * mm.value, d[1] / n * mm.value, d[2] / n * mm.value],
+                    "op": "translate", "parts": names, "vector": vector,
                 }));
             }
             StateValue::Joint { joint, .. } => {
@@ -302,6 +454,12 @@ pub fn build_requests(
     let mut by_model: BTreeMap<String, Vec<PendingState>> = BTreeMap::new();
     let mut next_m = 0usize;
     for (ci, claim) in plan.claims.iter().enumerate() {
+        if super::library::library()
+            .primitive(&claim.primitive)
+            .is_some_and(|d| d.accuracy == super::library::Accuracy::Proxy)
+        {
+            continue;
+        }
         let states = manifest.states.get(&claim.id);
         for (ji, job) in claim.jobs.iter().enumerate() {
             let mut model: Option<String> = None;
@@ -313,6 +471,8 @@ pub fn build_requests(
                 .unwrap_or_default();
             let ws = worker_state(&claim.id, &state, manifest, &mut model)?;
             let model = model.unwrap_or_default();
+            let entity_a = entity_refs_json(&job.a_entities);
+            let entity_b = entity_refs_json(&job.b_entities);
             let mut spec = json!({"primitive": claim.primitive, "a": a});
             match claim.primitive.as_str() {
                 "outside_volume" => spec["env"] = json!(b),
@@ -324,9 +484,51 @@ pub fn build_requests(
                             claim: claim.id.clone(),
                             reason: "extent without an axis".into(),
                         })?;
+                    if !matches!(
+                        axis,
+                        super::ir::AxisRef::X | super::ir::AxisRef::Y | super::ir::AxisRef::Z
+                    ) {
+                        return Err(EvalError::UnsupportedState {
+                            claim: claim.id.clone(),
+                            reason: "extent axis must be x, y or z".into(),
+                        });
+                    }
                     spec["axis"] = axis_json(&claim.id, axis)?;
                 }
                 "valid_solid_count" => {}
+                "min_clearance" => {
+                    spec["a"] = entity_a.unwrap_or(json!(a));
+                    spec["b"] = entity_b.unwrap_or(json!(b));
+                }
+                "diameter" | "radius" | "length" | "area" | "volume" | "thread_protrusion" => {
+                    spec["a"] = entity_a.unwrap_or(json!(a));
+                }
+                "gap" => {
+                    spec["a"] = entity_a.unwrap_or(json!(a));
+                    spec["b"] = entity_b.unwrap_or(json!(b));
+                    if let Some(Arg::Quantity(l)) = claim.args.get("spacing") {
+                        spec["spacing"] = json!(l.quantity().internal_value());
+                    }
+                }
+                "clearance_along" => {
+                    spec["a"] = entity_a.unwrap_or(json!(a));
+                    spec["b"] = entity_b.unwrap_or(json!(b));
+                    spec["dirs"] = axes_arg_json(&claim.id, &claim.args, "directions")?;
+                }
+                "overlap_depth" => {
+                    spec["a"] = entity_a.unwrap_or(json!(a));
+                    spec["b"] = entity_b.unwrap_or(json!(b));
+                    spec["along"] = axis_arg_json(&claim.id, &claim.args, "along", manifest)?;
+                }
+                "axis_offset" | "axis_angle" | "diameter_difference" => {
+                    spec["a"] = entity_a.unwrap_or(json!(a));
+                    spec["b"] = entity_b.unwrap_or(json!(b));
+                }
+                "profile_centre" | "profile_size" => {
+                    spec["a"] = entity_a.unwrap_or(json!(a));
+                    spec["b"] = entity_b.unwrap_or(json!(b));
+                    spec["axis"] = axis_arg_json(&claim.id, &claim.args, "axis", manifest)?;
+                }
                 _ => spec["b"] = json!(b),
             }
             let key = serde_json::to_string(&json!({"p": ws.params, "m": ws.moves}))
@@ -584,6 +786,9 @@ pub struct JobOutcome {
     pub status: MeasStatus,
     /// In the primitive's internal unit.
     pub value: Option<f64>,
+    /// Second reported number when a primitive returns a pair (`gap` reports
+    /// the sampled maximum here); `value` stays the primary number.
+    pub max: Option<f64>,
     pub witness: Option<Vec<String>>,
     /// Error text, or `pair_time_limit`.
     pub reason: Option<String>,
@@ -628,6 +833,11 @@ pub fn collect_results(plan: &Plan, chunks: &[(&ChunkRequest, RawChunk)]) -> Raw
                     } else {
                         None
                     },
+                    max: if m.status == MeasStatus::Ok {
+                        m.max
+                    } else {
+                        None
+                    },
                     witness: m.witness.clone(),
                     reason: m.reason.clone(),
                     slow: m
@@ -646,6 +856,7 @@ pub fn collect_results(plan: &Plan, chunks: &[(&ChunkRequest, RawChunk)]) -> Raw
                     JobOutcome {
                         status: MeasStatus::Error,
                         value: None,
+                        max: None,
                         witness: None,
                         reason: Some(msg),
                         slow: vec![],

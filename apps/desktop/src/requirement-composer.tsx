@@ -1,6 +1,9 @@
 import React,{useEffect,useId,useLayoutEffect,useRef,useState} from 'react';
+import {createPortal} from 'react-dom';
 import type {RequirementModel} from './motion-tests';
 import {parseTokens,tokenFor} from './requirement-tokens';
+import {MentionList,clampIndex,filterMentions,matchesMention,mentionPopupPosition,orderMentions,useMentionSelection,type MentionChoice} from './mention-list';
+import {PART_FORMAT_ORDER,parsePartFile,partFileKey} from './part-files';
 
 type Props={
   id?:string;
@@ -8,6 +11,10 @@ type Props={
   value:string;
   onChange:(value:string)=>void;
   models:RequirementModel[];
+  /** Published part names from the current built project, keyed to their model. */
+  parts?:RequirementPart[];
+  /** Models open in tabs; they list first until the user types a filter. */
+  openModels?:RequirementModel['model'][];
   label:string;
   placeholder?:string;
   autoFocus?:boolean;
@@ -15,6 +22,40 @@ type Props={
   onSubmit?:()=>void;
 };
 type Mention={node:Text;start:number;end:number;query:string};
+export type RequirementPart={model:RequirementModel['model'];modelLabel:string;name:string;detail?:string};
+type PickItem={kind:'model';item:RequirementModel}|{kind:'part';item:RequirementPart};
+type ModelRow={model:RequirementModel;label?:string;detail?:string;members?:RequirementModel['model'][]};
+const exactRank=(path:string)=>{const parsed=parsePartFile(path);return parsed?.extension==='stl'?1:0;};
+
+/**
+ * Fold STL and STEP model entries for one part into a single suggestion row.
+ * The requirement still targets one model, preferring exact STEP over mesh STL.
+ */
+function groupModelRows(models:RequirementModel[]):ModelRow[]{
+  const groups=new Map<string,{models:RequirementModel[];formats:string[]}>();
+  for(const item of models){
+    const parsed=parsePartFile(item.model.entry),key=partFileKey(item.model.entry);
+    if(!parsed||!key)continue;
+    const group=groups.get(key)??{models:[],formats:[]};
+    if(!group.models.some(existing=>existing.model.entry===item.model.entry&&existing.model.builder===item.model.builder))group.models.push(item);
+    if(!group.formats.includes(parsed.format))group.formats.push(parsed.format);
+    groups.set(key,group);
+  }
+  const seen=new Set<string>(),rows:ModelRow[]=[];
+  for(const item of models){
+    const parsed=parsePartFile(item.model.entry),key=partFileKey(item.model.entry);
+    if(!parsed||!key){rows.push({model:item});continue;}
+    if(seen.has(key))continue;
+    seen.add(key);
+    const group=groups.get(key)!;
+    if(group.models.length===1){rows.push({model:item});continue;}
+    const preferred=[...group.models].sort((a,b)=>exactRank(a.model.entry)-exactRank(b.model.entry))[0];
+    const preferredFile=parsePartFile(preferred.model.entry)!;
+    const formats=[...group.formats].sort((a,b)=>PART_FORMAT_ORDER.indexOf(a)-PART_FORMAT_ORDER.indexOf(b));
+    rows.push({model:preferred,label:`${preferredFile.directory}${preferredFile.stem}`,detail:formats.join(' + '),members:group.models.map(item=>item.model)});
+  }
+  return rows;
+}
 
 const keyOf=(entry:string,builder:string)=>JSON.stringify([entry,builder]);
 const isChip=(node:Node|null|undefined):node is HTMLElement=>node?.nodeType===1&&(node as HTMLElement).classList.contains('req-chip');
@@ -32,13 +73,17 @@ function makeChip(seg:{label:string;entry:string;builder:string;part?:string},mo
 /** Resolved chips show the model's current label; a model that left the project turns into a warning. */
 function paintChip(chip:HTMLElement,models:RequirementModel[]){
   const found=models.find(item=>item.model.entry===chip.dataset.entry&&item.model.builder===chip.dataset.builder);
-  if(found)chip.dataset.label=found.label;
+  const part=chip.dataset.part;
+  if(found)chip.dataset.label=part?`${found.label} / ${part}`:found.label;
   const label=chip.dataset.label??'';
   chip.classList.toggle('unresolved',!found);
   chip.dataset.state=found?'ok':'missing';
-  chip.title=found?(found.detail??chip.dataset.entry??''):`${label} is no longer in this project`;
-  chip.setAttribute('aria-label',found?`Model ${label}`:`Missing model ${label}`);
-  chip.textContent=found?label:`${label} (missing)`;
+  chip.title=found?(part?`Part ${part} in ${found.label}`:(found.detail??chip.dataset.entry??'')):`${label} is no longer in this project`;
+  chip.setAttribute('aria-label',found?(part?`Part ${part} in ${found.label}`:`Model ${label}`):`Missing model ${label}`);
+  // Inline chips cannot use CSS ellipsis, so keep very long labels from spilling
+  // out of the editor; serialization still uses the full dataset label.
+  const text=found?label:`${label} (missing)`;
+  chip.textContent=text.length>48?`${text.slice(0,47)}…`:text;
 }
 
 /** Text becomes text nodes with a <br> per newline, so every line break is explicit. */
@@ -67,21 +112,45 @@ function serialize(root:Node):string{
   return out;
 }
 
-export function RequirementComposer({id,value,onChange,models,label,placeholder,autoFocus,onSubmit}:Props){
+export function RequirementComposer({id,value,onChange,models,parts=[],openModels=[],label,placeholder,autoFocus,onSubmit}:Props){
   const base=useId().replace(/:/g,'');
   const inputId=id??`composer-${base}`,listId=`${inputId}-list`,hintId=`${inputId}-hint`;
   const editor=useRef<HTMLDivElement>(null);
   const lastValue=useRef<string|null>(null);
   const dismissed=useRef<{node:Node;start:number}|null>(null);
   const [mention,setMention]=useState<Mention|null>(null);
-  const [active,setActive]=useState(0);
   const [empty,setEmpty]=useState(!value);
+  const [position,setPosition]=useState<React.CSSProperties>({});
 
-  const query=mention?.query.toLowerCase()??'';
-  const items=mention?models.filter(item=>!query||item.label.toLowerCase().includes(query)||(item.detail??'').toLowerCase().includes(query)):[];
+  const query=mention?.query??'';
+  const openRank=(model:RequirementModel['model']) => {
+    let best=Number.MAX_SAFE_INTEGER;
+    openModels.forEach((open,index)=>{if(keyOf(open.entry,open.builder)===keyOf(model.entry,model.builder))best=Math.min(best,index);});
+    return best;
+  };
+  const modelRows=groupModelRows(models);
+  const modelChoice=(row:ModelRow):MentionChoice=>({key:`${keyOf(row.model.model.entry,row.model.model.builder)}:model`,label:row.label??row.model.label,detail:row.detail??row.model.detail});
+  const partChoice=(item:RequirementPart):MentionChoice=>({key:`${keyOf(item.model.entry,item.model.builder)}:part:${item.name}`,label:`${item.modelLabel} / ${item.name}`,detail:`Part in ${item.modelLabel}${item.detail?` · ${item.detail}`:''}`});
+  // Each row keeps its source item so the list can render labels while selection
+  // still yields the model or part that produced it. Open tabs rank first until
+  // the user types; then orderMentions puts the closest match on top.
+  const sources:{choice:MentionChoice;item:PickItem}[]=mention?[
+    ...modelRows.map(row=>({choice:{...modelChoice(row),rank:Math.min(...(row.members??[row.model.model]).map(openRank))},item:{kind:'model' as const,item:row.model}})),
+    ...parts.map(item=>({choice:{...partChoice(item),rank:openRank(item.model)},item:{kind:'part' as const,item}})),
+  ]:[];
+  const filtered=filterMentions(sources.map(source=>source.choice),query);
+  const choices=orderMentions(filtered,query);
+  const {active,selected,move,hover,reset}=useMentionSelection(choices.length);
+  const byKey=new Map(sources.map(source=>[source.choice.key,source.item]));
   const open=!!mention;
-  const activeIndex=Math.min(active,Math.max(items.length-1,0));
+  const activeIndex=clampIndex(active,choices.length);
   const optionId=(index:number)=>`${inputId}-option-${index}`;
+  const pick=(choice:MentionChoice)=>byKey.get(choice.key);
+  function chooseChoice(choice:MentionChoice){const item=pick(choice);if(item)chooseMany([item]);}
+  function chooseChoices(list:MentionChoice[]){chooseMany(list.map(pick).filter((item):item is PickItem=>!!item));}
+  function mentionMatches(query:string){
+    return modelRows.some(row=>matchesMention(modelChoice(row),query))||parts.some(item=>matchesMention(partChoice(item),query));
+  }
 
   /** Keep a spare <br> after a trailing newline: browsers do not draw an empty last line otherwise. */
   function padTrailing(root:HTMLElement){
@@ -105,6 +174,19 @@ export function RequirementComposer({id,value,onChange,models,label,placeholder,
   },[models]);
   useEffect(()=>{if(autoFocus)editor.current?.focus();},[]);
 
+  function place(){
+    const root=editor.current;if(!root)return;
+    setPosition(mentionPopupPosition(root.getBoundingClientRect(),{minWidth:420}));
+  }
+  useEffect(()=>{
+    if(!open)return;
+    place();
+    const reposition=()=>place();
+    window.addEventListener('resize',reposition);
+    window.addEventListener('scroll',reposition,true);
+    return()=>{window.removeEventListener('resize',reposition);window.removeEventListener('scroll',reposition,true);};
+  },[open]);
+
   function emit(){
     const root=editor.current;if(!root)return;
     if(!root.querySelector('.req-chip,br:not([data-pad])')&&!(root.textContent??''))root.replaceChildren();
@@ -121,12 +203,16 @@ export function RequirementComposer({id,value,onChange,models,label,placeholder,
     if(!node||node.nodeType!==Node.TEXT_NODE){setMention(null);dismissed.current=null;return;}
     const offset=selection.anchorOffset;
     const text=(node.textContent??'').slice(0,offset);
-    const match=/(^|[\s ])@([^\s@\[\]()]*)$/.exec(text);
+    const match=/(^|[\s ])@([^@\[\]()\r\n]*)$/.exec(text);
     if(!match){setMention(null);dismissed.current=null;return;}
-    const start=text.length-match[2].length-1;
+    const start=text.length-match[2].length-1,nextQuery=match[2],trimmed=nextQuery.trim();
+    // Spaces are part of the query ("@v5 fra"), but a multi-word query that no
+    // longer matches anything ends the mention instead of lingering forever.
+    const closes=!trimmed?nextQuery.length>0:trimmed.includes(' ')&&!mentionMatches(trimmed);
+    if(closes){setMention(null);dismissed.current=null;return;}
     if(dismissed.current&&dismissed.current.node===node&&dismissed.current.start===start){setMention(null);return;}
-    setMention(current=>current&&current.node===node&&current.start===start&&current.end===offset?current:{node:node as Text,start,end:offset,query:match[2]});
-    setActive(0);
+    setMention(current=>current&&current.node===node&&current.start===start&&current.end===offset?current:{node:node as Text,start,end:offset,query:nextQuery});
+    reset();
   }
   useEffect(()=>{
     document.addEventListener('selectionchange',detect);
@@ -146,12 +232,18 @@ export function RequirementComposer({id,value,onChange,models,label,placeholder,
     }
   }
 
-  function choose(item:RequirementModel){
-    const current=mention;if(!current)return;
+  function chooseMany(picks:PickItem[]){
+    const current=mention;if(!current||!picks.length)return;
     const range=document.createRange();
     range.setStart(current.node,current.start);range.setEnd(current.node,current.end);
-    // The space after the chip gives the caret a text position to rest in.
-    insertAt(range,[makeChip({label:item.label,entry:item.model.entry,builder:item.model.builder},models),document.createTextNode(' ')]);
+    // The space after each chip gives the caret a text position to rest in.
+    const nodes=picks.flatMap(choice=>{
+      const target=choice.kind==='part'
+        ?{label:`${choice.item.modelLabel} / ${choice.item.name}`,entry:choice.item.model.entry,builder:choice.item.model.builder,part:choice.item.name}
+        :{label:choice.item.label,entry:choice.item.model.entry,builder:choice.item.model.builder};
+      return [makeChip(target,models),document.createTextNode(' ')];
+    });
+    insertAt(range,nodes);
     setMention(null);dismissed.current=null;emit();
   }
 
@@ -177,10 +269,15 @@ export function RequirementComposer({id,value,onChange,models,label,placeholder,
   function onKeyDown(event:React.KeyboardEvent<HTMLDivElement>){
     if(event.nativeEvent.isComposing)return;
     const submit=event.key==='Enter'&&(event.metaKey||event.ctrlKey);
-    if(open&&items.length&&!submit){
-      if(event.key==='ArrowDown'){event.preventDefault();setActive((activeIndex+1)%items.length);return;}
-      if(event.key==='ArrowUp'){event.preventDefault();setActive((activeIndex-1+items.length)%items.length);return;}
-      if(event.key==='Enter'||event.key==='Tab'){event.preventDefault();choose(items[activeIndex]);return;}
+    if(open&&choices.length&&!submit){
+      if(event.key==='ArrowDown'){event.preventDefault();move(1,event.shiftKey);return;}
+      if(event.key==='ArrowUp'){event.preventDefault();move(-1,event.shiftKey);return;}
+      if((event.key==='Enter'||event.key==='Tab')&&activeIndex>=0){
+        event.preventDefault();
+        const picks=[...selected].sort((a,b)=>a-b).map(index=>choices[index]).filter((choice):choice is MentionChoice=>!!choice);
+        if(picks.length)chooseChoices(picks);
+        return;
+      }
     }
     if(open&&event.key==='Escape'){
       event.preventDefault();event.stopPropagation();
@@ -231,16 +328,15 @@ export function RequirementComposer({id,value,onChange,models,label,placeholder,
     <div className="req-editor-wrap">
       <div ref={editor} id={inputId} className="req-editor" role="textbox" aria-multiline="true" aria-labelledby={`${inputId}-label`} aria-describedby={hintId}
         aria-haspopup="listbox" aria-expanded={open} aria-controls={open?listId:undefined} aria-autocomplete="list"
-        aria-activedescendant={open&&items.length?optionId(activeIndex):undefined}
+        aria-activedescendant={open&&choices.length&&activeIndex>=0?optionId(activeIndex):undefined}
         contentEditable suppressContentEditableWarning spellCheck data-empty={empty||undefined} data-placeholder={placeholder}
         tabIndex={0} onInput={()=>{emit();detect();}} onKeyDown={onKeyDown} onPaste={onPaste} onCopy={onCopy} onCut={onCut}
         onBlur={()=>{setMention(null);dismissed.current=null;}}/>
-      {open&&<div className="req-picker" id={listId} role="listbox" aria-label="Models in this project" onMouseDown={event=>event.preventDefault()}>
-        {items.length?items.map((item,index)=><div key={keyOf(item.model.entry,item.model.builder)} id={optionId(index)} role="option" aria-selected={index===activeIndex} className={index===activeIndex?'req-option on':'req-option'} onMouseEnter={()=>setActive(index)} onClick={()=>choose(item)}>
-          <span>{item.label}</span>{item.detail&&<small>{item.detail}</small>}
-        </div>):<div className="req-picker-empty" role="status">{models.length?'No matching model':'No models in this project'}</div>}
-      </div>}
+      {open&&createPortal(<MentionList id={listId} label="Models and parts in this project" choices={choices} activeIndex={activeIndex} optionId={optionId}
+        className="req-picker" optionClass="req-option" activeClass="on" onMouseDown={event=>event.preventDefault()}
+        style={position} selected={selected} onHover={hover} onChoose={chooseChoice}
+        empty={<div className="req-picker-empty" role="status">{models.length||parts.length?'No matching model or part':'No models in this project'}</div>}/>,document.body)}
     </div>
-    <p id={hintId} className="muted">Type @ to mention a model. Enter adds a line; Cmd/Ctrl+Enter prepares.</p>
+    <p id={hintId} className="muted">Type @ to mention a model or its published part. Enter adds a line; Cmd/Ctrl+Enter prepares.</p>
   </div>;
 }

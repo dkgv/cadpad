@@ -6,7 +6,7 @@
 //! Needs the project virtualenv (`.venv`). Run with
 //! `cargo test -p cadpad-core --test requirements_runs`.
 use cadpad_core::{
-    Core, portable,
+    Core, JobState, kinematics, portable,
     requirements::{
         run::RunOptions,
         storage::{ApproveRequest, StoredHashes},
@@ -22,6 +22,8 @@ const R2: &str = include_str!("fixtures/requirements/R2.json");
 const R4: &str = include_str!("fixtures/requirements/R4.json");
 const E3: &str = include_str!("fixtures/requirements/E3.json");
 const E5: &str = include_str!("fixtures/requirements/E5.json");
+const E6: &str = include_str!("fixtures/requirements/E6.json");
+const PROXY1: &str = include_str!("fixtures/requirements/PROXY1.json");
 
 fn repository() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -83,6 +85,50 @@ fn agent() -> tools::ToolContext {
 }
 
 impl Project {
+    async fn wait_for_job(&self, workspace: &str, job_id: &str) -> cadpad_core::Job {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let current = self.core.get_job(workspace, job_id).await.unwrap();
+                if !matches!(current.state, JobState::Queued | JobState::Running) {
+                    break current;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("proxy fixture build timed out")
+    }
+
+    async fn install_mechanism(&self, workspace: &str, definition: Value) {
+        let base = self.core.get_project(workspace).await.unwrap()["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let draft = self
+            .core
+            .stage_mechanism(
+                workspace,
+                &base,
+                None,
+                kinematics::decode(&definition).unwrap(),
+                "user",
+            )
+            .await
+            .unwrap();
+        let job = self
+            .core
+            .build(workspace, &base, &draft.id, "user")
+            .await
+            .unwrap();
+        let finished = self.wait_for_job(workspace, &job.id).await;
+        assert_eq!(
+            finished.state,
+            JobState::Succeeded,
+            "{}",
+            finished.diagnostics
+        );
+    }
+
     async fn call(&self, expected: Option<&str>, command: Value) -> cadpad_core::Result<Value> {
         self.core
             .dispatch(
@@ -184,6 +230,27 @@ fn finding_labels(result: &Value) -> Vec<String> {
         .iter()
         .map(|f| f["label"].as_str().unwrap().to_owned())
         .collect()
+}
+
+/// Stage `source` as `path`, build it on `view`, and return the build job's
+/// P2.23 auto-edit guard.
+async fn rebuild_source(p: &Project, view: &str, path: &str, source: &str) -> Value {
+    let model = p.core.get_project(view).await.unwrap();
+    let revision = model["revision"].as_str().unwrap().to_owned();
+    let changes = [(path.to_owned(), source.to_owned())].into_iter().collect();
+    let draft = p
+        .core
+        .update_source(view, &revision, None, changes, "user")
+        .await
+        .unwrap();
+    let job = p
+        .core
+        .build(view, &revision, &draft.id, "user")
+        .await
+        .unwrap();
+    let job = p.wait_for_job(view, &job.id).await;
+    assert_eq!(job.state, JobState::Succeeded, "{}", job.diagnostics);
+    job.diagnostics["auto_edit"].clone()
 }
 
 fn entry(listed: &Value, id: &str) -> Value {
@@ -317,6 +384,281 @@ async fn e5_bracket_fits_the_bed_and_is_one_solid() {
     assert_eq!(result["body"]["claims"][0]["rule"], "fits_bed");
     assert_eq!(result["body"]["claims"][1]["rule"], "single_solid");
     assert_eq!(result["body"]["claims"][1]["status"], "met");
+}
+
+#[tokio::test]
+async fn e6_h7_fit_checks_the_compiled_feature_on_the_worker() {
+    let p = open("housing").await;
+    let id = p.approve(E6).await;
+    let result = p.run(&id).await;
+
+    assert_eq!(result["status"], "met", "{result}");
+    assert_eq!(result["body"]["claims"][0]["rule"], "fit");
+    assert_eq!(result["body"]["primitives"][0]["primitive"], "diameter");
+    let worst = &result["body"]["primitives"][0]["worst"];
+    approx(worst["value"]["value"].as_f64().unwrap(), 8.007);
+    approx(worst["margin"]["value"].as_f64().unwrap(), 0.007);
+    assert_eq!(worst["pair"]["a"][0], "housing.py#housing/housing");
+}
+
+#[tokio::test]
+async fn proxy_joint_measurement_runs_through_approved_simulation_trace() {
+    let p = open("proxy").await;
+    let parent = p.core.get_project(&p.workspace).await.unwrap();
+    let (view, initial_build) = p
+        .core
+        .open_project_model(
+            &p.workspace,
+            parent["revision"].as_str().unwrap(),
+            "slider.py",
+            "slider",
+            "user",
+        )
+        .await
+        .unwrap();
+    let initial = p.wait_for_job(&view, &initial_build.id).await;
+    assert_eq!(
+        initial.state,
+        JobState::Succeeded,
+        "{}",
+        initial.diagnostics
+    );
+
+    p.install_mechanism(
+        &view,
+        json!({
+            "joints": [{
+                "id": "slide",
+                "parent": null,
+                "child": "slider",
+                "kind": {"type": "prismatic", "axis": [1.0, 0.0, 0.0]},
+                "initial": 0.01,
+                "limits": [0.0, 0.05]
+            }],
+            "collision": {
+                "bodies": {"slider": [{"shape": {"type": "bounds"}}]},
+                "clearance_m": 0.0,
+                "backoff_m": 0.000001,
+                "ignored_pairs": []
+            }
+        }),
+    )
+    .await;
+
+    // Requirement actions from a model tab use the model view, which owns the
+    // staged mechanism and its pinned build revision.
+    let mut p = p;
+    p.workspace = view;
+    let id = p.approve(PROXY1).await;
+    let result = p.run(&id).await;
+    assert_eq!(result["status"], "met", "{result}");
+    let primitive = &result["body"]["primitives"][0];
+    assert_eq!(primitive["primitive"], "joint");
+    assert_eq!(primitive["accuracy"], "proxy", "{primitive}");
+    assert_eq!(primitive["worst"]["value"]["unit"], "mm", "{primitive}");
+    approx(primitive["worst"]["value"]["value"].as_f64().unwrap(), 10.0);
+    approx(
+        primitive["worst"]["margin"]["value"].as_f64().unwrap(),
+        0.001,
+    );
+
+    let repeated = p.run(&id).await;
+    assert_eq!(repeated["status"], "met", "{repeated}");
+    assert_eq!(
+        repeated["body"], result["body"],
+        "proxy result must be deterministic"
+    );
+}
+
+const CONTACT_IMPULSE: &str = r#"{
+  "ir_version": 1,
+  "id": "drop-impulse",
+  "name": "Ball registers a contact impulse on the plate",
+  "text": "the ball must hit the plate hard enough to register a contact impulse",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "measure",
+      "span": [0, 69],
+      "args": {
+        "fn": { "text": "contact_impulse" },
+        "a": { "part": { "model": { "entry": "drop.py", "builder": "drop" }, "part": { "name": "ball" } } },
+        "b": { "part": { "model": { "entry": "drop.py", "builder": "drop" }, "part": { "name": "plate" } } },
+        "direction": { "axis": { "vector": [0.0, 0.0, -1.0] } },
+        "cmp": {
+          "compare": {
+            "op": ">=",
+            "value": { "value": 0.0001, "unit": "N_s", "source": "inferred", "note": "any real contact" }
+          }
+        },
+        "at": {
+          "states": {
+            "kind": "simulate",
+            "model": { "entry": "drop.py", "builder": "drop" },
+            "simulation": {
+              "initial_coordinates": {},
+              "simulation": {
+                "gravity_m_s2": [0.0, 0.0, -9.81],
+                "bodies": {
+                  "ball": {
+                    "type": "dynamic",
+                    "mass": { "type": "kilograms", "mass_kg": 0.05 },
+                    "friction": 0.0,
+                    "restitution": 0.0
+                  },
+                  "plate": { "type": "fixed", "friction": 0.0, "restitution": 0.0 }
+                }
+              },
+              "actions": [ { "ticks": 120, "motors": [], "loads": {} } ]
+            },
+            "when": { "kind": "eventually" }
+          }
+        }
+      }
+    }
+  ]
+}"#;
+
+#[tokio::test]
+async fn contact_impulse_of_a_falling_body_is_sampled_from_the_proxy_trace() {
+    let p = open("proxy").await;
+    let parent = p.core.get_project(&p.workspace).await.unwrap();
+    let (view, initial_build) = p
+        .core
+        .open_project_model(
+            &p.workspace,
+            parent["revision"].as_str().unwrap(),
+            "drop.py",
+            "drop",
+            "user",
+        )
+        .await
+        .unwrap();
+    let initial = p.wait_for_job(&view, &initial_build.id).await;
+    assert_eq!(
+        initial.state,
+        JobState::Succeeded,
+        "{}",
+        initial.diagnostics
+    );
+
+    // A free dynamic body: no joints, so gravity alone moves the ball down.
+    p.install_mechanism(
+        &view,
+        json!({
+            "joints": [],
+            "collision": {
+                "bodies": {
+                    "ball": [{"shape": {"type": "bounds"}}],
+                    "plate": [{"shape": {"type": "bounds"}}]
+                },
+                "clearance_m": 0.0,
+                "backoff_m": 0.000001,
+                "ignored_pairs": []
+            }
+        }),
+    )
+    .await;
+
+    let mut p = p;
+    p.workspace = view;
+    let id = p.approve(CONTACT_IMPULSE).await;
+    let result = p.run(&id).await;
+    assert_eq!(result["status"], "met", "{result}");
+    let primitive = &result["body"]["primitives"][0];
+    assert_eq!(primitive["primitive"], "contact_impulse");
+    assert_eq!(primitive["accuracy"], "proxy", "{primitive}");
+    assert_eq!(primitive["quantifier"], "exists", "{primitive}");
+    let witness = &primitive["witness"];
+    assert_eq!(witness["value"]["unit"], "N_s", "{primitive}");
+    // Peak support impulse while the ball rests on the plate (~m g dt).
+    let impulse = witness["value"]["value"].as_f64().unwrap();
+    assert!((0.003..0.02).contains(&impulse), "{primitive}");
+    // `exists` + eventually reports the impact tick, not the resting state.
+    let tick = witness["state"].as_u64().unwrap();
+    assert!((3..20).contains(&tick), "{primitive}");
+    // `worst` is for `for_all` claims only; a witness replaces it.
+    assert!(primitive["worst"].is_null(), "{primitive}");
+}
+
+#[tokio::test]
+async fn feature_axis_rotation_compiles_and_runs_on_the_worker() {
+    let p = open("turntable").await;
+    // Publish the rotor's cylindrical face as a named axis.
+    p.edit(
+        "machine.py",
+        "context.show(rotor, name=\"rotor\")",
+        "context.show(rotor, name=\"rotor\", features={\"rotor_axis\": rotor.faces(\"%CYLINDER\")})",
+    );
+    let mut ir: Value = serde_json::from_str(R1).unwrap();
+    ir["id"] = json!("r1-axis");
+    ir["claims"][0]["span"] = Value::Null;
+    ir["claims"][0]["args"]["over"]["states"]["axis"] = json!({
+        "feature": {
+            "kind": "explicit",
+            "part": {
+                "model": { "entry": "machine.py", "builder": "machine" },
+                "part": { "name": "rotor" }
+            },
+            "name": "rotor_axis"
+        }
+    });
+    ir["claims"][0]["args"]["over"]["states"]["range"]["step"]["value"] = json!(45.0);
+    if let Some(answers) = ir.get_mut("answers") {
+        *answers = json!([]);
+    }
+    let id = p.approve(&ir.to_string()).await;
+    let result = p.run(&id).await;
+    assert_eq!(result["status"], "met", "{result}");
+    let primitive = &result["body"]["primitives"][0];
+    assert_eq!(primitive["states"], 9, "{primitive}");
+    // Exact accuracy is omitted from the body (it is the default).
+    assert!(primitive.get("accuracy").is_none(), "{primitive}");
+    approx(
+        primitive["worst"]["margin"]["value"].as_f64().unwrap(),
+        0.001,
+    );
+    assert!(
+        primitive["worst"]["state_label"]
+            .as_str()
+            .is_some_and(|label| label.contains("feature axis")),
+        "{primitive}"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_feature_axis_blocks_compilation_instead_of_passing() {
+    let p = open("turntable").await;
+    let mut ir: Value = serde_json::from_str(R1).unwrap();
+    ir["id"] = json!("r1-axis-missing");
+    ir["claims"][0]["span"] = Value::Null;
+    ir["claims"][0]["args"]["over"]["states"]["axis"] = json!({
+        "feature": {
+            "kind": "explicit",
+            "part": {
+                "model": { "entry": "machine.py", "builder": "machine" },
+                "part": { "name": "rotor" }
+            },
+            "name": "no_such_axis"
+        }
+    });
+    ir["claims"][0]["args"]["over"]["states"]["range"]["step"]["value"] = json!(45.0);
+    if let Some(answers) = ir.get_mut("answers") {
+        *answers = json!([]);
+    }
+    // The snapshot's published features are the symbol table: a missing axis
+    // is a binding error, never a silent pass.
+    let compiled = p
+        .call(None, json!({"action": "compile", "ir": ir}))
+        .await
+        .unwrap();
+    assert_eq!(compiled["compiled"]["ok"], false, "{compiled}");
+    let diagnostics = compiled["compiled"]["diagnostics"].as_array().unwrap();
+    assert!(
+        diagnostics.iter().any(|d| d["code"] == "E_BIND_FEATURE_MISSING"
+            && d["at"] == "claims[0].args.over.axis"),
+        "{compiled}"
+    );
 }
 
 #[tokio::test]
@@ -830,6 +1172,52 @@ async fn successful_model_build_checks_the_new_revision_before_save() {
     assert_eq!(
         std::fs::read_to_string(p.root.join("bracket.py")).unwrap(),
         source
+    );
+}
+
+#[tokio::test]
+async fn model_builds_record_whether_an_edit_was_naming_or_metadata_only() {
+    let p = open("turntable").await;
+    let parent = p.core.get_project(&p.workspace).await.unwrap();
+    let (view, first) = p
+        .core
+        .open_project_model(
+            &p.workspace,
+            parent["revision"].as_str().unwrap(),
+            "machine.py",
+            "machine",
+            "user",
+        )
+        .await
+        .unwrap();
+    let job = p.wait_for_job(&view, &first.id).await;
+    assert_eq!(job.state, JobState::Succeeded, "{}", job.diagnostics);
+    // The first build of a view has no earlier geometry to compare against.
+    assert_eq!(
+        job.diagnostics["auto_edit"]["decision"], "needs_review",
+        "{}",
+        job.diagnostics
+    );
+
+    let source = std::fs::read_to_string(p.root.join("machine.py")).unwrap();
+    // Naming/metadata only: publish a face name. Every part's geometry hash
+    // is unchanged, so the edit may be applied without review.
+    let named = source.replace(
+        "context.show(base, name=\"base\")",
+        "context.show(base, name=\"base\", features={\"base_top\": base.faces(\">Z\")})",
+    );
+    let guard = rebuild_source(&p, &view, "machine.py", &named).await;
+    assert_eq!(guard["decision"], "apply", "{guard}");
+
+    // A geometry change is a normal code change, with the part named.
+    let moved = source.replace("circle(50).extrude(6)", "circle(52).extrude(6)");
+    let guard = rebuild_source(&p, &view, "machine.py", &moved).await;
+    assert_eq!(guard["decision"], "needs_review", "{guard}");
+    assert!(
+        guard["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("rotor")),
+        "{guard}"
     );
 }
 

@@ -90,6 +90,36 @@
           }
         }
       }
+    },
+    {
+      "id": "c2",
+      "rule": "no_overlap",
+      "source": "inferred",
+      "note": "crush ribs: the stub nut is meant to interfere with the far upright",
+      "args": {
+        "a": {
+          "part": {
+            "model": {
+              "entry": "frame.py",
+              "builder": "frame"
+            },
+            "part": {
+              "glob": "stub_nut_*"
+            }
+          }
+        },
+        "b": {
+          "part": {
+            "model": {
+              "entry": "frame.py",
+              "builder": "frame"
+            },
+            "part": {
+              "name": "upright_far"
+            }
+          }
+        }
+      }
     }
   ],
   "allow": [

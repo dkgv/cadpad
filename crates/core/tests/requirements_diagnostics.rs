@@ -1,7 +1,8 @@
 //! Emitted diagnostics at the compiler boundary. Runtime-only diagnostics
-//! (`W_SLOW`) are covered by requirements_evaluate.rs. The enum-only codes
-//! `E_BIND_FASTENER_MISSING`, `E_BIND_CHIP_MISMATCH`,
-//! `W_PLACEMENT_UNVERIFIED`, and `W_POSITIONAL_NAME` have no emission site yet.
+//! (`W_SLOW`) are covered by requirements_evaluate.rs. `E_BIND_FASTENER_MISSING`
+//! and `W_POSITIONAL_NAME` are emitted from binding (`bind.rs` tests);
+//! `E_BIND_CHIP_MISMATCH` and `W_PLACEMENT_UNVERIFIED` from the assembly checks
+//! below and in `requirements::assembly`.
 use cadpad_core::requirements::{
     DiagnosticCode, Fix, ProjectSettings, Requirement, WorkspaceSnapshot, compile,
 };
@@ -13,6 +14,8 @@ const E3: &str = include_str!("fixtures/requirements/E3.json");
 const E3_SNAPSHOT: &str = include_str!("fixtures/requirements/snapshots/E3.json");
 const E5: &str = include_str!("fixtures/requirements/E5.json");
 const E5_SNAPSHOT: &str = include_str!("fixtures/requirements/snapshots/E5.json");
+const E2: &str = include_str!("fixtures/requirements/E2.json");
+const E2_SNAPSHOT: &str = include_str!("fixtures/requirements/snapshots/E2.json");
 
 fn compile_json(
     req: &Value,
@@ -154,10 +157,68 @@ fn binding_schema_and_coverage_diagnostics_have_stable_locations_and_fixes() {
         "text",
         Some("ask_user"),
     );
+}
 
-    // Listed but not emitted by the P1 compiler: no stable name-relation
-    // validation currently emits E_BIND_CHIP_MISMATCH; it remains assigned to
-    // the build/snapshot integration phase when that check is implemented.
+#[test]
+fn assembled_models_verify_chip_mappings_and_placement_coverage() {
+    let req: Value = serde_json::from_str(E2).unwrap();
+    let snap: Value = serde_json::from_str(E2_SNAPSHOT).unwrap();
+    // The shipped E2 fixture is a verified assembly: no diagnostics.
+    let clean = compile_json(&req, &snap, &ProjectSettings::default());
+    assert!(clean.diagnostics.is_empty(), "{:?}", clean.diagnostics);
+
+    // The covered part must record the tagged model as its origin.
+    let mut wrong_origin = snap.clone();
+    wrong_origin["models"][2]["built"]["placements"]["pcb"]["origin"]["builder"] = json!("other");
+    let c = compile_json(&req, &wrong_origin, &ProjectSettings::default());
+    assert_diagnostic(
+        &c,
+        DiagnosticCode::EBindChipMismatch,
+        "covers[0].part",
+        Some("edit_source"),
+    );
+    let d = c
+        .diagnostics
+        .iter()
+        .find(|d| d.code == DiagnosticCode::EBindChipMismatch)
+        .unwrap();
+    assert!(d.message.contains("pcb.py#other"), "{}", d.message);
+
+    // A covered part with no recorded origin cannot be verified either.
+    let mut no_origin = snap.clone();
+    no_origin["models"][2]["built"]["placements"]["pcb"]
+        .as_object_mut()
+        .unwrap()
+        .remove("origin");
+    assert_diagnostic(
+        &compile_json(&req, &no_origin, &ProjectSettings::default()),
+        DiagnosticCode::EBindChipMismatch,
+        "covers[0].part",
+        Some("edit_source"),
+    );
+
+    // A referenced part positioned by a raw transform with no contact claim
+    // warns instead of being trusted.
+    let mut raw = snap;
+    raw["models"][2]["built"]["placements"]["pcb"] = json!({
+        "method": "position",
+        "origin": {"entry": "pcb.py", "builder": "pcb"}
+    });
+    let mut req = req;
+    // Drop the no_overlap(pcb, case) claim and check `pcb` without asserting
+    // contact, so the placement really is unverified.
+    req["claims"].as_array_mut().unwrap().remove(0);
+    req["claims"][0]["args"]["a"] = json!({"part": {
+        "model": {"entry": "device.py", "builder": "device"},
+        "part": {"name": "pcb"}
+    }});
+    let c = compile_json(&req, &raw, &ProjectSettings::default());
+    assert_diagnostic(
+        &c,
+        DiagnosticCode::WPlacementUnverified,
+        "claims[0].args.a",
+        None,
+    );
 }
 
 #[test]

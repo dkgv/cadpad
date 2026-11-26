@@ -25,6 +25,8 @@ const fixture=()=>({workspace_id:'workspace-1',revision:'r1',name:'Rail assembly
   motion:{workspace_id:'workspace-1',revision:'r1',pose_version:0,actor:'local-user',mode:'manipulate',joints:[{id:'slide',kind:'prismatic',unit:'m',coordinate:.05,limits:[0,.15],drivable:true}],poses:{},collision:{clearance_m:.001,ignored_pairs:[]},collision_checked:true}});
 const active=element=>!element.closest('[hidden],dialog:not([open])')&&!element.closest('details:not([open])');
 const button=text=>[...document.querySelectorAll('button')].find(b=>(b.querySelector('.explorer-part-caption>span')?.textContent||b.textContent).trim()===text&&active(b));
+const modelOption=value=>[...document.querySelectorAll('.searchable-select-option')].find(option=>option.dataset.value===value);
+async function chooseModel(trigger,value){await click(trigger);const option=modelOption(value);assert.ok(option,`Expected model option ${value}`);await click(option);}
 async function click(element){assert.ok(element,'Expected control to exist');await act(async()=>{element.click();await new Promise(resolve=>setTimeout(resolve,5));});}
 async function expandModelFolders(...names){
   let parent=document.querySelector('[aria-label="Indexed models"]');
@@ -109,7 +111,7 @@ beforeEach(async()=>{
     if(command==='agent_conversation')return {messages:[],turn:null};
     if(command==='agent_settings')return {provider:'fixture',model:'test-model',configured:true,credential_storage:'fixture'};
     if(command==='mcp_settings')return {config:{},bridge_installed:true,sessions:[]};
-    if(command==='motion_tests')return {catalog:'fixture-catalog',tests:[],accuracy:'Synthetic test fixture',snapshot:null};
+    if(command==='requirements')return {catalog:'fixture-catalog',requirements:[],run:null};
     if(command==='motion')return structuredClone(project.motion);
     if(command==='inspect')return {revision:'r1',pose_version:0,entities:[{reference:args.args.entities[0],kind:'part',volume:6000,area:1000,bounds:{size:[200,30,10]}}]};
     if(command==='joint_coordinate')return {snapshot:{...project.motion,pose_version:1,joints:[{...project.motion.joints[0],coordinate:args.request.coordinate}]}};
@@ -309,96 +311,13 @@ test('new motion test accepts free text and sends the user requirement to the ag
   await click(button('Prepare requirement'));
   assert.equal(document.getElementById('panel-assistant').hidden,false);
   const prompt=harness.calls.findLast(([name])=>name==='agent_start')[1].prompt;
-  assert.match(prompt,/saved CAD requirement/);
+  assert.match(prompt,/Create a requirement/);
   assert.match(prompt,/The cam must lift the follower at least 8 mm without losing contact\./);
-  assert.match(prompt,/do not invent acceptance criteria/);
-  assert.match(prompt,/do not run them/);
-  assert.equal(harness.calls.some(([name,args])=>name==='motion_tests'&&args.request.command.action==='start_run'),false);
+  assert.match(prompt,/control_requirements/);
+  assert.match(prompt,/Never invent numbers/);
+  assert.match(prompt,/Do not run it and do not approve it/);
+  assert.equal(harness.calls.some(([name,args])=>name==='requirements'&&args.request?.command?.action==='start_run'),false);
 });
-test('free text motion tests expose actual criteria and simulation assumptions before running',async()=>{
-  const definition={name:'Lever pushes shoe',intent:'Make sure the lever reaches the shoe and pushes it.',
-    initial_coordinates:{slide:0,hinge:0},
-    simulation:{gravity_m_s2:[0,0,-9.81],bodies:{lever:{type:'dynamic',mass:{type:'kilograms',mass_kg:.2},friction:.3,restitution:0},shoe:{type:'dynamic',mass:{type:'density',density_kg_m3:7800},friction:.4,restitution:.1},rail:{type:'fixed',friction:.5,restitution:0}}},
-    actions:[{ticks:60,motors:[{joint_id:'slide',target:.01,unit:'m',max_force:2,stiffness:100,damping:10},{joint_id:'hinge',target:Math.PI/2,unit:'rad',max_force:.3,stiffness:5,damping:1}],loads:{shoe:{force_n:[-.5,0,0],torque_nm:[0,0,.1]}}},{ticks:120,motors:[],loads:{}}],
-    checks:[{type:'push',pusher:'lever',receiver:'shoe',driver_joint:'hinge',direction:[1,0,0],minimum_mm:5,minimum_additional_mm:4,minimum_sampled_impulse_ns:.000001},{type:'coordinate',joint_id:'slide',target:.01,unit:'m',tolerance:.0005},{type:'coordinate',joint_id:'hinge',target:Math.PI/2,unit:'rad',tolerance:Math.PI/180},{type:'displacement',body:'shoe',direction:[0,-1,0],minimum_mm:2}]};
-  const invoke=harness.invoke.bind(harness);
-  harness.invoke=async(command,args)=>command==='motion_tests'?{catalog:'review-catalog',tests:[{id:'push',definition,outcome:null,stale:true,frame_count:0,duration_s:0}],accuracy:'Approximate proxy simulation',snapshot:null}:invoke(command,args);
-  await flush(2300);await openMotion();await chooseMotionTask('Requirements');
-  const review=document.querySelector('.test-definition');assert.ok(review);
-  const criteria=review.querySelector('.test-criteria').textContent;
-  assert.match(criteria,/lever pushes shoe/);
-  assert.match(criteria,/at least 5 mm.*world \+X/);
-  assert.match(criteria,/at least 4 mm farther.*hinge motor disabled/);
-  assert.match(criteria,/normal impulse of at least 0.000001 N s/);
-  assert.match(criteria,/slide finishes at 10 mm, within ±0.5 mm/);
-  assert.match(criteria,/hinge finishes at 90°, within ±1°/);
-  assert.match(criteria,/shoe finishes at least 2 mm.*world −Y/);
-  assert.ok(!review.querySelector('.test-criteria').closest('details'),'checks must be visible before Check requirement');
-  assert.match(review.textContent,/0–0.5 s/);assert.match(review.textContent,/0.5–1.5 s/);
-  assert.match(review.textContent,/Drive slide toward 10 mm, limited to 2 N/);
-  assert.match(review.textContent,/Drive hinge toward 90°, limited to 0.3 N m/);
-  assert.match(review.textContent,/world force \(-0.5, 0, 0\) N at its centre of mass/);
-  assert.match(review.textContent,/Spring stiffness 100 N\/m, damping 10 N s\/m/);
-  assert.match(review.textContent,/Spring stiffness 5 N m\/rad, damping 1 N m s\/rad/);
-  assert.match(review.textContent,/Keep previous motor targets/);assert.match(review.textContent,/No external loads/);
-  assert.match(review.textContent,/World gravity \(0, 0, -9.81\) m\/s²/);
-  assert.match(review.textContent,/lever: 0.2 kg; friction 0.3, restitution 0/);
-  assert.match(review.textContent,/shoe: density 7800 kg\/m³/);
-  assert.match(review.textContent,/rail: fixed/);
-  const technical=[...review.querySelectorAll('summary')].find(item=>item.textContent==='Technical definition');
-  assert.equal(technical.parentElement.open,false);
-  assert.equal(technical.parentElement.querySelector('pre'),null);
-  await click([...review.querySelectorAll('summary')].find(item=>item.textContent==='Setup and steps'));
-  await click(technical);await flush();
-  assert.equal(technical.parentElement.open,true);
-  assert.equal(JSON.parse(technical.parentElement.querySelector('pre').textContent).checks[0].minimum_additional_mm,4);
-  assert.ok(button('Check requirement'));assert.ok(document.querySelector('[aria-label="Delete requirement Lever pushes shoe"]'));
-  assert.match(document.querySelector('.test-status').textContent,/Ready to check/);
-  await click(document.querySelector('[aria-label="Edit requirement Lever pushes shoe"]'));
-  assert.equal(document.getElementById('test-intent').textContent,definition.intent);
-  await act(async()=>document.getElementById('test-intent').replaceChildren());
-  await setValue(document.getElementById('test-intent'),'Push the shoe at least 7 mm.');
-  await click(button('Update checks'));
-  const edit=harness.calls.findLast(([name])=>name==='agent_start')[1].prompt;
-  assert.match(edit,/ID push/);assert.match(edit,/at least 7 mm/);assert.match(edit,/do not run them/);
-});
-test('saved motion test renders measured failures and reruns through the catalog CAS',async()=>{
-  const invoke=harness.invoke.bind(harness);let calls=0;
-  const definition={name:'Lever reaches shoe',intent:'Push the shoe by 5 mm',actions:[],checks:[{type:'displacement',body:'shoe',direction:[1,0,0],minimum_mm:5}]};
-  const outcome={passed:false,measurements:[{label:'shoe: displacement',actual:2,expected:5,unit:'mm',passed:false}]};
-  harness.invoke=async(command,args)=>{
-    if(command==='motion_tests'){
-      calls++;harness.calls.push([command,args]);
-      const action=args.request.command;
-      const snapshot=action.action==='replay'?{...harness.project.motion,pose_version:action.expected_pose_version+1,playback:{recording_id:'motion-test:push',name:definition.name,frame_index:action.frame_index,frame_count:121,time_s:action.frame_index/120,duration_s:1,source_mode:'simulate'}}:null;
-      return {catalog:'catalog-2',tests:[{id:'push',definition,outcome,stale:false,frame_count:121,duration_s:1}],accuracy:'Approximate proxy contacts',snapshot};
-    }
-    return invoke(command,args);
-  };
-  // The background catalog refresh also notices tests created by external agents.
-  await flush(2300);await openMotion();await chooseMotionTask('Requirements');
-  assert.match(document.querySelector('.motion-test').textContent,/Not met/);
-  assert.match(document.querySelector('.test-intent').textContent,/Push the shoe by 5 mm/);
-  const criterion=document.querySelector('.test-criterion.failed');
-  assert.ok(criterion);
-  assert.match(criterion.textContent,/shoe finishes at least 5 mm.*world \+X/);
-  assert.match(criterion.textContent,/Not met/);
-  assert.match(criterion.querySelector('.test-measurements').textContent,/Measured 2 mm · minimum 5 mm/);
-  assert.match(document.querySelector('.test-definition').textContent,/Results against requirements/);
-  assert.match(document.querySelector('.test-definition').textContent,/0 of 1 requirements met/);
-  await click(button('Check again'));
-  const request=harness.calls.findLast(([name,args])=>name==='motion_tests'&&args.request.command.action==='start_run')[1].request;
-  assert.deepEqual(request,{workspace_id:'workspace-1',revision:'r1',expected_catalog:'catalog-2',command:{action:'start_run',id:'push'},model_views:[]});
-  assert.ok(calls>=2);
-  await click(button('Inspect replay'));
-  assert.ok(document.querySelector('[aria-label="Requirement replay time"]'));
-  assert.equal(document.querySelector('[aria-label="Recorded frame"]'),null,'test traces must use the test replay endpoint');
-  assert.ok(button('Play replay'));
-  assert.ok(button('Leave playback'));
-  const replay=harness.calls.findLast(([name,args])=>name==='motion_tests'&&args.request.command.action==='replay')[1].request;
-  assert.equal(replay.command.id,'push');assert.equal(replay.command.frame_index,0);assert.equal(replay.command.expected_pose_version,0);
-});
-
 test('finishing a recording refreshes the document edited state for portable Save',async()=>{
   harness.project.dirty=false;
   await act(async()=>{harness.menu.onmessage('save');await new Promise(resolve=>setTimeout(resolve,10));});
@@ -495,7 +414,7 @@ test('native menus dispatch advanced tools, document actions and independent pan
 test('settings and Assistant composer retain agent configuration and sending',async()=>{
   await act(async()=>harness.menu.onmessage('settings'));assert.equal(document.querySelector('dialog').open,true);
   await setValue(document.querySelector('.provider-settings select'),'anthropic_api','change');
-  assert.equal(document.querySelector('.provider-settings input').value,'test-model');
+  assert.equal(document.querySelector('.provider-settings input').value,'');
   await click(document.querySelector('[aria-label="Close settings"]'));assert.equal(document.querySelector('dialog').open,false);
   await click(document.getElementById('tab-assistant'));
   const prompt=document.getElementById('model-prompt');await act(async()=>prompt.focus());
@@ -516,26 +435,27 @@ test('agent settings lists provider models and saves the selected one',async()=>
   };
   await act(async()=>harness.menu.onmessage('settings'));await flush(30);
   const model=document.querySelector('[aria-label="Model"]');
-  assert.deepEqual([...model.options].map(option=>option.value),['','gpt-5.6-sol-high','composer-2.5','__custom__']);
-  await setValue(model,'composer-2.5','change');
+  await click(model);
+  assert.deepEqual([...document.querySelectorAll('.searchable-select-option')].map(option=>option.dataset.value),['','gpt-5.6-sol-high','composer-2.5','__custom__']);
+  await click(modelOption('composer-2.5'));
   await click(button('Save settings'));await flush();
   const saved=harness.calls.findLast(([name])=>name==='configure_agent');
   assert.equal(saved[1].backend,'cursor_cli');
   assert.equal(saved[1].model,'composer-2.5');
   await flush();
   const picker=document.querySelector('[aria-label="Assistant model"]');
-  assert.equal(picker.value,'composer-2.5');
+  assert.equal(picker.dataset.value,'composer-2.5');
   assert.equal(picker.closest('.composer-options').querySelector('button').textContent,'Settings');
-  await setValue(picker,'gpt-5.6-sol-high','change');await flush();
-  assert.equal(picker.value,'gpt-5.6-sol-high');
+  await chooseModel(picker,'gpt-5.6-sol-high');await flush();
+  assert.equal(picker.dataset.value,'gpt-5.6-sol-high');
   assert.deepEqual(harness.calls.findLast(([name])=>name==='configure_agent')[1],{backend:'cursor_cli',model:'gpt-5.6-sol-high',apiKey:null});
   await act(async()=>harness.menu.onmessage('settings'));await flush(30);
-  assert.equal(document.querySelector('[aria-label="Model"]').value,'gpt-5.6-sol-high');
-  await setValue(document.querySelector('[aria-label="Model"]'),'__custom__','change');
+  assert.equal(document.querySelector('[aria-label="Model"]').dataset.value,'gpt-5.6-sol-high');
+  await chooseModel(document.querySelector('[aria-label="Model"]'),'__custom__');
   await setValue(document.querySelector('[aria-label="Model ID"]'),'gpt-5.6-sol-xhigh');
   await click(button('Save settings'));await flush();
   assert.equal(harness.calls.findLast(([name])=>name==='configure_agent')[1].model,'gpt-5.6-sol-xhigh');
-  assert.equal(picker.value,'gpt-5.6-sol-xhigh');
+  assert.equal(picker.dataset.value,'gpt-5.6-sol-xhigh');
 });
 
 test('OpenCode settings discovers models and saves a custom variant',async()=>{
@@ -549,8 +469,10 @@ test('OpenCode settings discovers models and saves a custom variant',async()=>{
   await act(async()=>harness.menu.onmessage('settings'));await flush(30);
   assert.equal(document.querySelector('.provider-settings select').value,'opencode_cli');
   assert.ok(harness.calls.some(([name,args])=>name==='agent_models'&&args.backend==='opencode_cli'));
-  assert.deepEqual([...document.querySelector('[aria-label="Model"]').options].map(option=>option.value),['','openrouter/openai/test','__custom__']);
-  await setValue(document.querySelector('[aria-label="Model"]'),'__custom__','change');
+  const model=document.querySelector('[aria-label="Model"]');
+  await click(model);
+  assert.deepEqual([...document.querySelectorAll('.searchable-select-option')].map(option=>option.dataset.value),['','openrouter/openai/test','__custom__']);
+  await click(modelOption('__custom__'));
   await setValue(document.querySelector('[aria-label="Model ID"]'),'openrouter/openai/test#high');
   await click(button('Save settings'));await flush();
   const saved=harness.calls.findLast(([name])=>name==='configure_agent')[1];
@@ -558,85 +480,62 @@ test('OpenCode settings discovers models and saves a custom variant',async()=>{
   assert.equal(saved.model,'openrouter/openai/test#high');
 });
 
+test('model search filters OpenRouter catalogs and selects by label or id',async()=>{
+  const original=harness.invoke.bind(harness);
+  const models=[
+    {id:'anthropic/claude-sonnet',label:'Anthropic: Claude Sonnet'},
+    {id:'openai/gpt-5',label:'OpenAI: GPT-5'},
+    {id:'google/gemini',label:'Google: Gemini'},
+  ];
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_models')return models;
+    if(command==='agent_settings')return {provider:'openrouter_api',backend:'openrouter_api',model:'',configured:false,credential_storage:'system_keychain',bridge_available:true};
+    return original(command,args);
+  };
+  await act(async()=>harness.menu.onmessage('settings'));await flush(30);
+  const trigger=document.querySelector('[aria-label="Model"]');
+  await click(trigger);
+  assert.deepEqual([...document.querySelectorAll('.searchable-select-option')].map(option=>option.dataset.value),
+    ['anthropic/claude-sonnet','openai/gpt-5','google/gemini','__custom__']);
+  const search=document.querySelector('.searchable-select-search input');
+  await setValue(search,'claude');
+  assert.deepEqual([...document.querySelectorAll('.searchable-select-option')].map(option=>option.dataset.value),['anthropic/claude-sonnet']);
+  await setValue(search,'gpt-5');
+  assert.deepEqual([...document.querySelectorAll('.searchable-select-option')].map(option=>option.dataset.value),['openai/gpt-5']);
+  await click(modelOption('openai/gpt-5'));
+  assert.equal(trigger.dataset.value,'openai/gpt-5');
+  assert.equal(trigger.textContent,'OpenAI: GPT-5');
+  assert.equal(document.querySelector('.searchable-select-panel'),null);
+});
+
+test('settings sections open as tabs and only External agents starts the live MCP feed',async()=>{
+  await act(async()=>harness.menu.onmessage('settings'));await flush(30);
+  const tabs=()=>[...document.querySelectorAll('.settings-tabs [role="tab"]')];
+  const panel=id=>document.getElementById(`settings-panel-${id}`);
+  assert.deepEqual(tabs().map(tab=>tab.textContent),['Agent','Cloud','Storage','External agents']);
+  assert.equal(tabs()[0].getAttribute('aria-selected'),'true');
+  assert.equal(panel('agent').hidden,false);assert.equal(panel('storage').hidden,true);
+  await click(tabs()[2]);
+  assert.equal(tabs()[2].getAttribute('aria-selected'),'true');assert.equal(tabs()[0].getAttribute('aria-selected'),'false');
+  assert.equal(panel('storage').hidden,false);assert.equal(panel('agent').hidden,true);
+  const mcpCalls=harness.calls.filter(([name])=>name==='mcp_settings').length;
+  await click(tabs()[3]);await flush(30);
+  assert.equal(panel('external').hidden,false);assert.equal(panel('storage').hidden,true);
+  assert.ok(harness.calls.filter(([name])=>name==='mcp_settings').length>mcpCalls,'Selecting External agents starts the live MCP feed');
+  assert.equal(document.querySelector('[aria-label="MCP client configuration"]').value,'{}');
+  await act(async()=>{tabs()[3].dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}));});
+  assert.equal(tabs()[2].getAttribute('aria-selected'),'true','Arrow keys move the active tab');
+  await click(document.querySelector('[aria-label="Close settings"]'));
+  await act(async()=>harness.menu.onmessage('settings'));await flush(30);
+  assert.equal(tabs()[0].getAttribute('aria-selected'),'true','Reopening starts on the primary tab');
+  await click(document.querySelector('[aria-label="Close settings"]'));
+});
+
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 const agentTurn=(id,workspace_id,state='running')=>({id,workspace_id,state,text:'',activity:'Connecting to the model',error:null,artifacts:[]});
 async function submitPrompt(text){if(document.getElementById('panel-assistant').hidden)await click(document.getElementById('tab-assistant'));await setValue(document.getElementById('model-prompt'),text);await act(async()=>{document.querySelector('.prompt-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));});}
 const status=()=>document.querySelector('[data-agent-chrome-status]')?.textContent??'';
 const stopAssistant=()=>document.querySelector('[aria-label="Stop assistant"]');
-
-const testRun=(workspace,state='queued')=>({id:`run-${workspace}`,workspace_id:workspace,revision:'r1',test_id:'push',actor:'local-user',state,error:null});
-const motionTestReply=(run=null)=>({catalog:'test-catalog',tests:[{id:'push',definition:{name:'Push check',intent:'Push at least 5 mm',actions:[],checks:[]},outcome:{passed:true,measurements:[{label:'Previous displacement',actual:6,expected:5,unit:'mm',passed:true}]},stale:false,frame_count:121,duration_s:1}],accuracy:'Fixture simulation',snapshot:null,run});
-test('motion test Stop during pending start stays bound to the original document while another test starts',async()=>{
-  const start=deferred(),invoke=harness.invoke.bind(harness),runs={};
-  const other=fixture();other.workspace_id='workspace-2';other.name='Second document';other.motion={...other.motion,workspace_id:other.workspace_id};
-  harness.invoke=async(command,args)=>{
-    if(command==='new_scratchpad')return structuredClone(other);
-    if(command!=='motion_tests')return invoke(command,args);
-    harness.calls.push([command,args]);const request=args.request;
-    if(request.command.action==='start_run'){
-      if(request.workspace_id==='workspace-1')return start.promise;
-      runs[request.workspace_id]=testRun(request.workspace_id);
-    }
-    if(request.command.action==='cancel_run')runs[request.workspace_id]=testRun(request.workspace_id,'cancelled');
-    return motionTestReply(runs[request.workspace_id]??null);
-  };
-  await flush(2300);await openMotion();await chooseMotionTask('Requirements');
-  await click(button('Check again'));
-  assert.match(document.querySelector('.test-run-status').textContent,/Starting check/);
-  await click(button('Stop check'));
-  assert.match(document.querySelector('.test-run-status').textContent,/Stopping check/);
-  assert.equal(harness.calls.some(([name,args])=>name==='motion_tests'&&args.request.command.action==='cancel_run'),false);
-  await act(async()=>{harness.menu.onmessage('new');await new Promise(resolve=>setTimeout(resolve,20));});
-  await openMotion();await chooseMotionTask('Requirements');await click(button('Check again'));
-  assert.match(document.querySelector('.test-run-status').textContent,/Check queued/);
-  runs['workspace-1']=testRun('workspace-1');
-  await act(async()=>{start.resolve(motionTestReply(runs['workspace-1']));await new Promise(resolve=>setTimeout(resolve,15));});
-  const stops=harness.calls.filter(([name,args])=>name==='motion_tests'&&args.request.command.action==='cancel_run').map(([,args])=>args.request);
-  assert.deepEqual(stops,[{workspace_id:'workspace-1',revision:'',expected_catalog:null,command:{action:'cancel_run',run_id:'run-workspace-1'},model_views:[]}]);
-  assert.match(document.querySelector('.test-run-status').textContent,/Check queued/);
-  assert.equal(button('Stop check').disabled,false);
-  assert.equal(document.querySelector('.document-name').textContent,'Second document');
-});
-test('active motion test Stop remains available and previous measurements survive cancellation',async()=>{
-  const invoke=harness.invoke.bind(harness);let run=null;
-  harness.invoke=async(command,args)=>{
-    if(command!=='motion_tests')return invoke(command,args);
-    harness.calls.push([command,args]);
-    if(args.request.command.action==='start_run')run=testRun('workspace-1','running');
-    if(args.request.command.action==='cancel_run')run={...run,state:'cancelling'};
-    return motionTestReply(run);
-  };
-  await flush(2300);await openMotion();await chooseMotionTask('Requirements');await click(button('Check again'));
-  assert.match(document.querySelector('.test-run-status').textContent,/Checking requirement/);
-  assert.equal(button('Check again').disabled,true);
-  assert.match(document.querySelector('.test-measurements').textContent,/Previous displacement/);
-  await click(button('Stop check'));
-  assert.equal(button('Stop check').disabled,true);
-  assert.match(document.querySelector('.test-run-status').textContent,/Stopping check/);
-  run={...run,state:'cancelled'};await flush(350);
-  assert.equal(button('Stop check'),undefined);assert.equal(button('Check again').disabled,false);
-  assert.match(document.querySelector('.motion-tests').textContent,/Check stopped. Previous results preserved/);
-  assert.match(document.querySelector('.test-measurements').textContent,/Measured 6 mm/);
-});
-test('slow motion-test status reads do not pile up or suppress the terminal response',async()=>{
-  const invoke=harness.invoke.bind(harness),read=deferred();let run=null,hold=false,reads=0;
-  harness.invoke=async(command,args)=>{
-    if(command!=='motion_tests')return invoke(command,args);
-    if(args.request.command.action==='start_run'){run=testRun('workspace-1','running');hold=true;return motionTestReply(run);}
-    if(hold&&args.request.command.action==='list'){reads++;return read.promise;}
-    return motionTestReply(run);
-  };
-  await flush(2300);await openMotion();await chooseMotionTask('Requirements');await click(button('Check again'));
-  await flush(700);assert.equal(reads,1);
-  assert.ok(button('Stop check'));
-  hold=false;run={...run,state:'completed'};
-  await act(async()=>{read.resolve(motionTestReply(run));await new Promise(resolve=>setTimeout(resolve,15));});
-  assert.equal(button('Stop check'),undefined);
-  assert.equal(button('Check again').disabled,false);
-  assert.match(document.querySelector('.test-status').textContent,/Met/);
-  assert.equal(document.querySelector('.test-run-status'),null);
-});
-
 test('agent submission acknowledges before IPC replies and queues one Stop for its accepted turn',async()=>{
   const start=deferred(),invoke=harness.invoke.bind(harness);let turn=null;
   harness.invoke=async(command,args)=>{
@@ -1019,7 +918,7 @@ test('renderer startup retry loads the focused document and rejects stale callba
 
 test('cache cleanup explains display eviction and retains a matching presented scene on refresh',async()=>{
   const invoke=harness.invoke.bind(harness);harness.invoke=async(command,args)=>{if(command==='clean_cache'){harness.calls.push([command,args]);return {bytes_removed:1048576,already_running:false,retained_unmanaged:0,errors:[],evicted_display_revisions:2,display_budget_exceeded:true};}return invoke(command,args);};
-  await act(async()=>harness.menu.onmessage('settings'));const storage=[...document.querySelectorAll('.settings-dialog details')].find(detail=>detail.querySelector('summary')?.textContent==='Storage');await act(async()=>{storage.open=true;});await click(button('Clean cache'));await click(document.querySelector('[aria-label="Close settings"]'));
+  await act(async()=>harness.menu.onmessage('settings'));await click(document.querySelector('[data-settings-tab="storage"]'));await click(button('Clean cache'));await click(document.querySelector('[aria-label="Close settings"]'));
   assert.match(document.querySelector('.notice').textContent,/Display data for 2 workspace/);assert.match(document.querySelector('.notice').textContent,/above the cache target/);
   const loads=harness.viewer.filter(([name])=>name==='load').length;harness.project.display_error={code:'DISPLAY_CACHE_MISSING',message:'Restore display data'};harness.project.display_generation='evicted';
   await act(async()=>harness.activity.onmessage({workspace_id:'workspace-1',kind:'refresh'}));await flush();assert.equal(harness.viewer.filter(([name])=>name==='load').length,loads);assert.ok(button('Restore display'));assert.equal(harness.calls.some(([name])=>name==='rebuild'||name==='repair_display'),false);
@@ -1075,6 +974,34 @@ test('viewport selection becomes lettered reference chips sent with the prompt',
   assert.deepEqual(chips(),['railtop · parts/rail.py']);
   await act(async()=>{harness.select(null);});
   assert.equal(document.querySelector('.composer-references'),null);
+});
+
+test('Assistant @ mentions list project files and folders and attach a folder to the message',async()=>{
+  const prompt=document.getElementById('model-prompt');
+  await act(async()=>{prompt.focus();});
+  await setValue(prompt,'Tidy @parts');
+  await act(async()=>{prompt.setSelectionRange(prompt.value.length,prompt.value.length);prompt.dispatchEvent(new dom.window.Event('keyup',{bubbles:true}));await new Promise(resolve=>setTimeout(resolve,10));});
+  const picker=document.querySelector('.mention-picker');
+  assert.ok(picker,'Typing @ opens the file and folder picker');
+  const options=[...picker.querySelectorAll('.mention-option')].map(option=>option.textContent);
+  assert.ok(options.some(option=>option.startsWith('parts')&&option.endsWith('folder')),'The project folder is offered');
+  assert.ok(options.some(option=>option.includes('parts/rail.py')),'Files inside the folder are offered too');
+  await click(picker.querySelector('.mention-option'));
+  assert.equal(prompt.value,'Tidy @parts ');
+  assert.equal(document.querySelector('.mention-picker'),null,'Choosing a path closes the picker');
+  const chip=document.querySelector('.composer-folder-references .reference-chip');
+  assert.ok(chip,'The chosen folder is attached to the next message');
+  assert.match(chip.textContent,/parts/);
+  await submitPrompt(prompt.value);await flush();
+  const start=harness.calls.find(([name])=>name==='agent_start')?.[1];
+  assert.deepEqual(start.folders,['parts']);
+  await setValue(prompt,'Inspect @rail');
+  await act(async()=>{prompt.setSelectionRange(prompt.value.length,prompt.value.length);prompt.dispatchEvent(new dom.window.Event('keyup',{bubbles:true}));await new Promise(resolve=>setTimeout(resolve,10));});
+  const fileOption=[...document.querySelectorAll('.mention-picker .mention-option')].find(option=>option.textContent.includes('parts/rail.py'));
+  assert.ok(fileOption,'Files inside the folder are selectable');
+  await click(fileOption);
+  assert.equal(prompt.value,'Inspect @parts/rail.py ');
+  assert.match(document.querySelector('.composer-folder-references .reference-chip').textContent,/parts/,'A file attaches its containing folder');
 });
 
 test('chat history searches date groups and supports keyboard selection and dismissal',async()=>{
@@ -1610,14 +1537,6 @@ test('sidebar defaults match and legacy default widths migrate without changing 
   assert.deepEqual(JSON.parse(localStorage.getItem('cadpad.panel-sizes.v2')),{model:320,assistant:320,motion:420});
 });
 
-
-test('coordinate test results show position error in display units against the permitted tolerance',async()=>{
-  const original=harness.invoke.bind(harness);
-  harness.invoke=async(command,args)=>command==='motion_tests'?{catalog:'coordinate-result',tests:[{id:'position',definition:{name:'Slide position',intent:'Reach 10 mm within 0.5 mm',actions:[],checks:[{type:'coordinate',joint_id:'slide',target:.01,unit:'m',tolerance:.0005}]},outcome:{passed:false,measurements:[{label:'slide: remaining tolerance',actual:-.0005,expected:0,unit:'m',passed:false}]},stale:false,frame_count:0,duration_s:1}],accuracy:'Approximate',snapshot:null}:original(command,args);
-  await flush(2300);await openMotion();await chooseMotionTask('Requirements');
-  assert.match(document.querySelector('.test-measurements').textContent,/Position errorMeasured 1 mm · maximum 0.5 mm/);
-  assert.equal(button('Inspect replay'),undefined,'Unavailable replay does not create a disabled action');
-});
 
 test('entry chooser lists relative Python paths, filters and opens the selected file',async()=>{
   const original=harness.invoke.bind(harness);
@@ -2445,10 +2364,10 @@ test('activity rail and assistant stay mounted when switching model canvas tabs'
   };
   await mountWorkbench();await flush(20);
   await expandModelFolders('cad');
-  const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent===name));await flush(25);};
+  const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('.library-model-name')?.textContent===name));await flush(25);};
   const explorer=document.getElementById('panel-model');
   const models=document.querySelector('[aria-label="Indexed models"]');
-  const modelRow=[...models.querySelectorAll('.library-part-link')].find(row=>row.textContent==='Wheel');
+  const modelRow=[...models.querySelectorAll('.library-part-link')].find(row=>row.querySelector('.library-model-name')?.textContent==='Wheel');
   const sections=()=>[...explorer.querySelectorAll('.sidebar-content-sections>.sidebar-section')];
   const filesSection=sections().find(section=>section.querySelector('.sidebar-section-heading button').textContent==='Files');
   await click(filesSection.querySelector('.sidebar-section-heading button'));
@@ -2460,7 +2379,7 @@ test('activity rail and assistant stay mounted when switching model canvas tabs'
   await choose('Wheel');await choose('Pin');
   assert.equal(document.getElementById('panel-model'),explorer);
   assert.equal(document.querySelector('[aria-label="Indexed models"]'),models,'project catalog stays mounted when new model tabs open');
-  assert.equal([...models.querySelectorAll('.library-part-link')].find(row=>row.textContent==='Wheel'),modelRow,'catalog rows are reused');
+  assert.equal([...models.querySelectorAll('.library-part-link')].find(row=>row.querySelector('.library-model-name')?.textContent==='Wheel'),modelRow,'catalog rows are reused');
   assert.equal(filesSection.querySelector(':scope > div[id]').hidden,false,'Files expansion is global');
   assert.equal(sections()[0].style.getPropertyValue('--section-weight'),weight,'section sizes are global');
   assert.equal(models.closest('.explorer-section-host').scrollTop,29,'project scroll position survives model opening');
@@ -2488,7 +2407,7 @@ test('activity rail and assistant stay mounted when switching model canvas tabs'
   assert.equal(document.getElementById('model-prompt'),prompt,'closing the root canvas retains the project composer');
   await click(canvasTabs().find(tab=>tab.textContent==='Wheel'));await flush(25);
   assert.equal(document.querySelector('[aria-label="Indexed models"]'),models);
-  assert.equal(document.querySelector('[aria-label="Indexed models"] [aria-current="true"]')?.textContent,'Wheel');
+  assert.equal(document.querySelector('[aria-label="Indexed models"] [aria-current="true"] .library-model-name')?.textContent,'Wheel');
   await choose('Axle');
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Axle','global Explorer can open another model after the root canvas closes');
   assert.equal(document.querySelector('[aria-label="Indexed models"]'),models);
@@ -2511,7 +2430,7 @@ test('focused canvas selections attach to the shared Assistant and send the mode
   };
   await mountWorkbench();await flush(20);
   await expandModelFolders('cad');
-  const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent===name));await flush(25);};
+  const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('.library-model-name')?.textContent===name));await flush(25);};
   const chips=()=>[...document.querySelectorAll('.composer-references .reference-chip')];
   await choose('Wheel');const wheel=harness.viewports.at(-1);
   const face={revision:'wheel-r',instance_id:'wheel',entity_id:'face:2'};
@@ -2629,7 +2548,7 @@ test('sidebar models open independent project tabs and clicking again focuses th
   };
   await mountWorkbench();await flush(20);
   await expandModelFolders('cad');
-  const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent===name));await flush(25);};
+  const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('.library-model-name')?.textContent===name));await flush(25);};
   const rootView=harness.viewports.at(-1);
   await choose('Wheel');
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Wheel']);
@@ -2680,7 +2599,7 @@ test('sidebar models open independent project tabs and clicking again focuses th
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Rail assembly','Wheel','Pin','Stringer'],'model tabs restore within the project');
   await choose('Pin');
   assert.equal(harness.calls.filter(([name])=>name==='open_project_model').length,3);
-  assert.equal(document.querySelector('[aria-label="Indexed models"] [aria-current="true"]')?.textContent,'Pin','restored focus selects the Explorer entry');
+  assert.equal(document.querySelector('[aria-label="Indexed models"] [aria-current="true"] .library-model-name')?.textContent,'Pin','restored focus selects the Explorer entry');
   assert.ok(document.querySelector('[aria-label="Indexed models"] [aria-current="true"]')?.closest('details')?.open,'restored focus expands the model folder');
   const newProject=fixture();newProject.workspace_id='new-project';newProject.name='Other project';newProject.motion={...newProject.motion,workspace_id:'new-project'};
   const previous=harness.invoke.bind(harness);
@@ -2718,14 +2637,14 @@ test('boot resolves a focused model-view workspace back to the project and resto
   };
   await mountWorkbench();await flush(20);
   await expandModelFolders('alpha','hook_rack');
-  await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent==='Axle carrier'));await flush(25);
+  await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('.library-model-name')?.textContent==='Axle carrier'));await flush(25);
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Axle carrier']);
   await flush(500);
   await mountWorkbench();await flush(40);
   assert.deepEqual(canvasTabs().map(tab=>tab.textContent),['Axle carrier'],'model tabs survive a relaunch that resumes from the focused view workspace');
   assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Axle carrier');
   assert.equal(document.querySelector('.document-name')?.textContent,'stringer');
-  assert.equal(document.querySelector('[aria-label="Indexed models"] [aria-current="true"]')?.textContent,'Axle carrier');
+  assert.equal(document.querySelector('[aria-label="Indexed models"] [aria-current="true"] .library-model-name')?.textContent,'Axle carrier');
   assert.ok(document.querySelector('[aria-label="Indexed models"] [aria-current="true"]')?.closest('details')?.open);
   await click(document.querySelector('[aria-label="Close Axle carrier tab"]'));
   assert.match(document.querySelector('[aria-label="Project canvas"]').textContent,/No model open/);
@@ -2778,7 +2697,7 @@ test('opening an Explorer model shows progress until its geometry finishes build
   };
   await mountWorkbench();await flush(20);
   await expandModelFolders('cad');
-  const row=[...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent==='Stringer');
+  const row=[...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('.library-model-name')?.textContent==='Stringer');
   await click(row);
   assert.equal(row.disabled,false,'the Explorer row stays clickable while the model opens');
   assert.equal(row.getAttribute('aria-busy'),'true');
@@ -2820,7 +2739,7 @@ test('opening an Explorer model shows progress until its geometry finishes build
   assert.ok(!canvasTabs().some(tab=>tab.textContent==='Stringer'));
   assert.equal(harness.viewer.filter(([name])=>name==='dispose').length,disposed+1,'closing the model releases its viewport');
   for(let cycle=0;cycle<12;cycle++){
-    await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.textContent==='Stringer'));await flush(15);
+    await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('.library-model-name')?.textContent==='Stringer'));await flush(15);
     assert.equal(selectedTab().textContent,'Stringer');
     await act(async()=>harness.menu.onmessage('close-tab'));await flush(15);
   }

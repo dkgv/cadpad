@@ -78,6 +78,9 @@ def detect(trees):
                 return True
             if target.startswith('cadquery.') and target.split('.')[1] in _CONSTRUCTORS:
                 return True
+            # The injected `place()` assembly helper returns positioned geometry.
+            if target == 'place' or target.endswith('.place'):
+                return True
             if isinstance(node.func, ast.Attribute) and node.func.attr in _GEOMETRY_METHODS:
                 return shape(node.func.value, env, variables)
             return False

@@ -333,9 +333,12 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
         .unwrap();
     assert_eq!(invalid_job.is_error, Some(true));
     assert!(job_validator.is_valid(invalid_job.structured_content.as_ref().unwrap()));
-    assert!(live_tools.tools.iter().all(|tool| {
-        tool.name != "read_source_lines" && tool.name != "capture_view"
-    }));
+    assert!(
+        live_tools
+            .tools
+            .iter()
+            .all(|tool| { tool.name != "read_source_lines" && tool.name != "capture_view" })
+    );
     let base = project["revision"].as_str().unwrap();
     let draft=sdk(mcp.peer(),"update_source",json!({"workspace_id":ws,"expected_base_revision":base,"changes":{"model.py":"import cadquery as cq\nwidth=parameter('width',50,minimum=1,maximum=100)\nshow(cq.Workplane().box(width,20,6),name='plate')","z_helpers.py":"from cadquery import Workplane as show\ndef show(): pass\nraise RuntimeError('symbol search must not execute Python source')"}})).await;
     let source = sdk(
@@ -359,7 +362,10 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
         json!({"workspace_id":ws,"version":draft["id"],"path":"model.py","start_line":hits["matches"][0]["line"]}),
     )
     .await;
-    assert_eq!(page["source"], "show(cq.Workplane().box(width,20,6),name='plate')");
+    assert_eq!(
+        page["source"],
+        "show(cq.Workplane().box(width,20,6),name='plate')"
+    );
     assert_eq!(page["hash"], source["hash"]);
     let legacy_page = sdk(
         mcp.peer(),
@@ -372,9 +378,12 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
         "workspace_id": ws, "version": draft["id"], "symbol": "show", "max_matches": 1
     });
     let symbols = sdk(mcp.peer(), "find_symbol", symbol_args.clone()).await;
-    assert_eq!(symbols["matches"][0], json!({
-        "path": "model.py", "line": 3, "byte_column": 0, "kind": "call"
-    }));
+    assert_eq!(
+        symbols["matches"][0],
+        json!({
+            "path": "model.py", "line": 3, "byte_column": 0, "kind": "call"
+        })
+    );
     symbol_args["cursor"] = symbols["next_cursor"].clone();
     symbol_args["max_matches"] = json!(2);
     let more = sdk(mcp.peer(), "find_symbol", symbol_args).await;
@@ -449,9 +458,22 @@ async fn real_stdio_mcp_negotiates_schemas_and_returns_actionable_tool_errors() 
         json!({"workspace_id":ws,"revision":revision,"instance_id":"plate"}),
     )
     .await;
-    assert_eq!(publication["publication"], json!({"file":"model.py","line":3}));
-    assert!(live_tools.tools.iter().any(|tool| tool.name == "trace_mesh_edges"));
-    assert!(live_tools.tools.iter().any(|tool| tool.name == "match_mesh_edge"));
+    assert_eq!(
+        publication["publication"],
+        json!({"file":"model.py","line":3})
+    );
+    assert!(
+        live_tools
+            .tools
+            .iter()
+            .any(|tool| tool.name == "trace_mesh_edges")
+    );
+    assert!(
+        live_tools
+            .tools
+            .iter()
+            .any(|tool| tool.name == "match_mesh_edge")
+    );
     let cad_trace = sdk(
         mcp.peer(),
         "trace_cad_edge",

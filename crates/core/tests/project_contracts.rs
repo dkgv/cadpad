@@ -95,7 +95,8 @@ async fn listing_and_empty_scratchpad_are_typed_without_inventing_portable_defau
         .unwrap();
     assert!(schema.is_valid(&listing));
     assert_eq!(listing["workspace_ids"], json!([ws]));
-    assert_eq!(listing["tools"].as_array().unwrap().len(), 33);
+    // 33 tools minus the retired `control_motion_tests` (P4.6).
+    assert_eq!(listing["tools"].as_array().unwrap().len(), 32);
     let project = context(&core, &ws).await;
     assert_eq!(project["model"], json!({"parts":[]}));
     assert_eq!(project["mechanism"], json!({}));

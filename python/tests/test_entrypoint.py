@@ -85,6 +85,20 @@ def assembly():
     assert all(builder['inference'] == 'source' for builder in files['cad/brake.py']['builders'])
 
 
+def test_place_helper_counts_as_geometry_for_builder_detection():
+    index = index_sources(dict(sources={'asm.py': '''import cadquery as cq
+def lid(): return cq.Workplane().box(1, 1, 1)
+def enclosure(context):
+    return place(lid(), on="box#top")
+def publish(context):
+    context.show(place(lid(), on=lid().faces(">Z")), name="lid")
+'''}))
+    kinds = {b['id']: b['kind'] for b in index['files'][0]['builders']}
+    assert kinds['lid'] == 'geometry_candidate'
+    assert kinds['enclosure'] == 'geometry_candidate'
+    assert kinds['publish'] == 'geometry_candidate'
+
+
 def test_group_adapter_publishes_all_detected_factories_and_rejects_required_arguments(tmp_path):
     source = '''import cadquery as cq
 def wheel(): return cq.Workplane().circle(2).extrude(3)

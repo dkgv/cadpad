@@ -1,0 +1,115 @@
+[
+  {
+    "args": {
+      "a": {
+        "feature": {
+          "kind": "explicit",
+          "name": "rim_inner",
+          "part": {
+            "model": {
+              "builder": "enclosure",
+              "entry": "enclosure.py"
+            },
+            "part": {
+              "name": "lid"
+            }
+          }
+        }
+      },
+      "b": {
+        "feature": {
+          "kind": "explicit",
+          "name": "lip_outer",
+          "part": {
+            "model": {
+              "builder": "enclosure",
+              "entry": "enclosure.py"
+            },
+            "part": {
+              "name": "box"
+            }
+          }
+        }
+      }
+    },
+    "cmp": {
+      "hi": {
+        "unit": "mm",
+        "value": 0.4
+      },
+      "lo": {
+        "unit": "mm",
+        "value": 0.2
+      },
+      "op": "in"
+    },
+    "id": "c1.1",
+    "origin": {
+      "claim": "c1",
+      "library_version": "33e5a9f2126b4bba814c1f007cbec3eb504f9ab8c9096f82b90a97ee0e5ee4d8",
+      "rule": "measure"
+    },
+    "pairing": "each_pair",
+    "primitive": "gap",
+    "quantifier": "for_all",
+    "span": [
+      52,
+      82
+    ],
+    "states": {
+      "kind": "rest"
+    }
+  },
+  {
+    "args": {
+      "a": {
+        "part": {
+          "model": {
+            "builder": "enclosure",
+            "entry": "enclosure.py"
+          },
+          "part": {
+            "name": "lid"
+          }
+        }
+      },
+      "b": {
+        "part": {
+          "model": {
+            "builder": "enclosure",
+            "entry": "enclosure.py"
+          },
+          "part": {
+            "name": "box"
+          }
+        }
+      }
+    },
+    "cmp": {
+      "op": "<=",
+      "value": {
+        "note": "overlap tolerance ε (project setting)",
+        "source": "library",
+        "unit": "mm3",
+        "value": 0.001
+      }
+    },
+    "id": "c2.1",
+    "origin": {
+      "claim": "c2",
+      "library_version": "33e5a9f2126b4bba814c1f007cbec3eb504f9ab8c9096f82b90a97ee0e5ee4d8",
+      "rule": "no_overlap"
+    },
+    "pairing": "each_pair",
+    "primitive": "interference",
+    "quantifier": "for_all",
+    "source": "inferred",
+    "span": [
+      19,
+      32
+    ],
+    "states": {
+      "kind": "rest"
+    }
+  }
+]

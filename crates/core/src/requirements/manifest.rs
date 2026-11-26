@@ -6,8 +6,9 @@ use super::expand::PrimitiveClaim;
 use super::ir::{ModelRef, Requirement};
 use super::quantity::Quantity;
 use super::settings::ProjectSettings;
-use super::snapshot::WorkspaceSnapshot;
+use super::snapshot::{FeatureSource, SourceAssetInfo, WorkspaceSnapshot};
 use super::states::{ConcreteState, expand_states};
+use super::suggestions::ShapeSignature;
 use crate::portable;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -60,6 +61,90 @@ pub struct FeatureLink {
     pub entity: super::ir::EntityKind,
     pub count: u64,
     pub hash: String,
+    #[serde(default, skip_serializing_if = "is_explicit_source")]
+    pub source: FeatureSource,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub positional: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub key_size: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_explicit_source(value: &FeatureSource) -> bool {
+    *value == FeatureSource::Explicit
+}
+
+/// The recorded placement of one published part (spec §6.3 "placement method
+/// per placed pair"): `method` for readable diffs, `hash` the canonical hash
+/// of the whole [`PlacementInfo`] so any change to `on`/`align`/`offset`/
+/// `mate`/`origin` is detected, not only a method swap.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementLink {
+    pub method: String,
+    pub hash: String,
+}
+
+/// Placement records of a snapshot as manifest links, keyed
+/// `entry#builder/part`.
+pub fn placement_links(snap: &WorkspaceSnapshot) -> BTreeMap<String, PlacementLink> {
+    let mut out = BTreeMap::new();
+    for m in &snap.models {
+        let Some(built) = &m.built else { continue };
+        let mk = model_key(&m.model);
+        for (name, info) in &built.placements {
+            out.insert(
+                format!("{mk}/{name}"),
+                PlacementLink {
+                    method: info.method.clone(),
+                    hash: canonical_hash(info),
+                },
+            );
+        }
+    }
+    out
+}
+
+/// Source STEP inputs of every published part, keyed `entry#builder/part`.
+pub fn source_asset_links(snap: &WorkspaceSnapshot) -> BTreeMap<String, Vec<SourceAssetInfo>> {
+    let mut out = BTreeMap::new();
+    for model in &snap.models {
+        let Some(built) = &model.built else { continue };
+        let mk = model_key(&model.model);
+        for part in &built.parts {
+            if !part.source_assets.is_empty() {
+                let mut assets = part.source_assets.clone();
+                assets.sort_by(|a, b| a.path.cmp(&b.path));
+                out.insert(format!("{mk}/{}", part.name), assets);
+            }
+        }
+    }
+    out
+}
+
+/// Part and feature shape signatures of a snapshot as manifest signature
+/// maps, keyed `entry#builder/name` and `entry#builder/part#suffix`.
+pub fn signature_links(
+    snap: &WorkspaceSnapshot,
+) -> (
+    BTreeMap<String, ShapeSignature>,
+    BTreeMap<String, ShapeSignature>,
+) {
+    let mut parts = BTreeMap::new();
+    let mut features = BTreeMap::new();
+    for m in &snap.models {
+        let Some(built) = &m.built else { continue };
+        let mk = model_key(&m.model);
+        for (name, sig) in &built.part_signatures {
+            parts.insert(format!("{mk}/{name}"), sig.clone());
+        }
+        for (key, sig) in &built.feature_signatures {
+            features.insert(format!("{mk}/{key}"), sig.clone());
+        }
+    }
+    (parts, features)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -82,8 +167,21 @@ pub struct Manifest {
     pub params: BTreeMap<String, ParamLink>,
     /// Expanded states of every primitive claim, by primitive claim id.
     pub states: BTreeMap<String, Vec<ConcreteState>>,
-    // TODO(placement): per placed pair placement method; needs `place(...)`
-    // helpers in source (spec §3.2), not part of the v1 library.
+    /// Shape signatures of every published part (`entry#builder/name`),
+    /// recorded so a later run can rank relink candidates when a reference
+    /// breaks (spec §3.1/§6.3). Suggestion data only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub part_signatures: BTreeMap<String, ShapeSignature>,
+    /// Shape signatures of every published feature
+    /// (`entry#builder/part#suffix`, the [`FeatureLink`] key format).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub feature_signatures: BTreeMap<String, ShapeSignature>,
+    /// Placement method per placed part (`entry#builder/part`), spec §6.3.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub placements: BTreeMap<String, PlacementLink>,
+    /// Exact managed STEP inputs for each referenced published part.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub part_source_assets: BTreeMap<String, Vec<SourceAssetInfo>>,
 }
 
 fn links(parts: &[BoundPart]) -> Vec<MemberLink> {
@@ -129,6 +227,20 @@ pub fn link(
                 .map(|cv| part_ref_key(&cv.part)),
         })
         .collect();
+    let (part_signatures, feature_signatures) = signature_links(snap);
+    let all_source_assets = source_asset_links(snap);
+    let referenced_parts: std::collections::BTreeSet<String> = bindings
+        .parts
+        .values()
+        .chain(bindings.sets.values())
+        .chain(bindings.others.values())
+        .flatten()
+        .map(BoundPart::key)
+        .collect();
+    let part_source_assets = all_source_assets
+        .into_iter()
+        .filter(|(key, _)| referenced_parts.contains(key))
+        .collect();
     Manifest {
         requirement_hash: req.content_hash(),
         library_version: super::library::library_version().to_string(),
@@ -160,6 +272,9 @@ pub fn link(
                         entity: f.entity,
                         count: f.count,
                         hash: f.hash.clone(),
+                        source: f.source,
+                        positional: f.positional,
+                        key_size: k.len() as u64,
                     },
                 )
             })
@@ -182,6 +297,23 @@ pub fn link(
             .iter()
             .map(|p| (p.id.clone(), expand_states(&p.states)))
             .collect(),
+        placements: placement_links(snap),
+        part_source_assets,
+        part_signatures,
+        feature_signatures,
+    }
+}
+
+impl Manifest {
+    /// Every recorded shape signature under one map (`entry#builder/...`
+    /// keys), for attaching to a fresh [`WorkspaceSnapshot`] as suggestion
+    /// queries (see [`WorkspaceSnapshot::attach_reference_signatures`]).
+    pub fn signature_map(&self) -> BTreeMap<String, ShapeSignature> {
+        self.part_signatures
+            .iter()
+            .chain(self.feature_signatures.iter())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
 }
 

@@ -18,6 +18,7 @@ use super::diagnostics::{Diagnostic, DiagnosticCode};
 use super::expand::Pairing;
 use super::findings::{Finding, FindingState};
 use super::ir::{AxisRef, Comparator, Literal, Quantifier, Target};
+use super::library::Accuracy;
 use super::library::library;
 use super::manifest::{Manifest, canonical_hash};
 use super::plan::{ClaimPlan, Job, Plan};
@@ -35,6 +36,10 @@ pub const RESULT_FORMAT: &str = "requirements-result-v1";
 pub const MAX_FAILING_STATES: usize = 64;
 /// Inconclusive pairs and error messages listed per primitive claim.
 pub const MAX_LISTED: usize = 20;
+
+fn accuracy_is_exact(accuracy: &Accuracy) -> bool {
+    *accuracy == Accuracy::Exact
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +119,8 @@ pub struct PrimitiveResult {
     pub id: String,
     pub claim: String,
     pub primitive: String,
+    #[serde(default, skip_serializing_if = "accuracy_is_exact")]
+    pub accuracy: Accuracy,
     pub quantifier: Quantifier,
     pub status: CheckStatus,
     pub met: Option<bool>,
@@ -247,6 +254,26 @@ fn judge(c: &Comparator, strict: bool, v: f64) -> (bool, Option<f64>) {
     (if strict { m > 0.0 } else { m >= 0.0 }, Some(m))
 }
 
+/// Comparator for `gap`: `v` is the exact minimum gap, `max` the sampled
+/// maximum. `Le` and the upper half of `In` judge the maximum; everything
+/// else judges the minimum.
+fn gap_judge(c: &Comparator, strict: bool, v: f64, max: Option<f64>) -> (bool, Option<f64>) {
+    let lim = |l: &Literal| l.quantity().internal_value();
+    let pass = |m: f64| if strict { m > 0.0 } else { m >= 0.0 };
+    match c {
+        Comparator::Le { value } => {
+            let m = lim(value) - max.unwrap_or(v);
+            (pass(m), Some(m))
+        }
+        Comparator::In { lo, hi } => {
+            let m1 = v - lim(lo);
+            let m2 = lim(hi) - max.unwrap_or(v);
+            (pass(m1) && pass(m2), Some(m1.min(m2)))
+        }
+        other => judge(other, strict, v),
+    }
+}
+
 struct JobEval {
     status: CheckStatus,
     /// Margin in `unit`.
@@ -295,7 +322,14 @@ fn eval_job(
         }
         None => (claim.cmp.clone(), claim.strict),
     };
-    let (met, margin) = judge(&cmp, strict, v);
+    // `gap` reports the exact minimum as `value` and the sampled maximum as
+    // `max`: `>=` bounds the minimum, `<=` bounds the maximum, and `in
+    // [lo, hi]` requires both (spec §4.2, decision 4).
+    let (met, margin) = if claim.primitive == "gap" {
+        gap_judge(&cmp, strict, v, o.max.filter(|m| m.is_finite()))
+    } else {
+        judge(&cmp, strict, v)
+    };
     let unit = cmp_unit(&cmp).unwrap_or(result_unit);
     JobEval {
         status: if met {
@@ -343,6 +377,13 @@ pub fn state_label(s: &ConcreteState) -> String {
     s.values
         .iter()
         .map(|v| match v {
+            StateValue::Simulate {
+                model, simulation, ..
+            } => format!(
+                "simulate {} ({} ticks)",
+                model.entry,
+                simulation.actions.iter().map(|a| a.ticks).sum::<u32>()
+            ),
             StateValue::Param { param, value } => format!("{} = {value}", param.name),
             StateValue::Rotate {
                 moving,
@@ -654,6 +695,10 @@ fn eval_primitive(
             id: claim.id.clone(),
             claim: claim.origin.claim.clone(),
             primitive: claim.primitive.clone(),
+            accuracy: library()
+                .primitive(&claim.primitive)
+                .map(|primitive| primitive.accuracy)
+                .unwrap_or(Accuracy::Exact),
             quantifier: claim.quantifier,
             status,
             met: match status {

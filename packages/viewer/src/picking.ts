@@ -162,6 +162,7 @@ class PickResources {
   }
   release(){if(--this.users===0){this.released=true;this.surface.dispose();this.lines.dispose();this.onRelease();}}
 }
+interface DerivedOverlay {fill?:THREE.BufferGeometry|null;outline?:THREE.BufferGeometry|null;center?:THREE.Vector3|null}
 export class PickGeometry {
   readonly faces:PrimitiveSpans;
   readonly edges:PrimitiveSpans;
@@ -171,6 +172,10 @@ export class PickGeometry {
   readonly faceIds:readonly (string|null)[];
   readonly edgeIds:readonly (string|null)[];
   private disposed=false;
+  // Hovering walks many entities. Deriving an outline is far more expensive
+  // than picking, so keep a small LRU of part-local overlays. They are owned
+  // here and survive per-highlight disposal.
+  private derived=new Map<string,DerivedOverlay>();
   /** The third argument is internal to the scoped pool; callers keep buffer bytes immutable. */
   private resources:PickResources;
   constructor(buffers:MeshBuffers,topology?:PickTopology,resources=new PickResources(buffers,topology)){
@@ -183,29 +188,122 @@ export class PickGeometry {
     if(this.buffers.triangles?.length>=384)this.surface.raycast=(raycaster,hits)=>resources.surfaceTree.raycastObject3D(this.surface,raycaster,hits);
     if(this.buffers.edges?.length>=768)this.lines.raycast=(raycaster,hits)=>resources.lineTree.raycastObject3D(this.lines,raycaster,hits);
   }
+  /** Published identities are normally ordinal; keep sparse mappings correct. */
+  private faceAt(index:number){const id=`face:${index}`;return this.faceIds[index]===id?index:this.faceIds.indexOf(id);}
+  private edgeAt(index:number){const id=`edge:${index}`;return this.edgeIds[index]===id?index:this.edgeIds.indexOf(id);}
   /** Face ids sharing the drawn-edge-bounded region of `entity_id`, seed first. */
   fillRegion(entity_id:string):string[]{
-    const face=this.faceIds.indexOf(entity_id);
+    const ordinal=Number(entity_id.slice(5));
+    const face=Number.isSafeInteger(ordinal)&&this.faceIds[ordinal]===entity_id?ordinal:this.faceIds.indexOf(entity_id);
     if(this.disposed||face<0||!this.buffers.triangles?.length)return face<0?[]:[entity_id];
     return this.resources.fill.region(face,this.faces).flatMap(index=>this.faceIds[index]?[this.faceIds[index]!]:[]);
+  }
+  private derivedEntry(kind:SelectionMode,index:number){
+    const key=`${kind}:${index}`;
+    const existing=this.derived.get(key);
+    if(existing){this.derived.delete(key);this.derived.set(key,existing);return existing;}
+    const entry:DerivedOverlay={};
+    if(this.derived.size>=256){
+      const oldest=this.derived.keys().next().value!;
+      const evicted=this.derived.get(oldest)!;
+      this.derived.delete(oldest);
+      evicted.fill?.dispose();evicted.outline?.dispose();
+    }
+    this.derived.set(key,entry);
+    return entry;
+  }
+  /** Fill geometry for hover/selection overlays; this instance owns it. */
+  overlay(kind:SelectionMode,index:number):THREE.BufferGeometry|null{
+    const entry=this.derivedEntry(kind,index);
+    if(entry.fill!==undefined)return entry.fill;
+    if(kind==='face'&&this.buffers.triangles?.length&&this.buffers.vertices?.length){
+      // A face overlay must not wrap the part-wide vertex attribute: every new
+      // face would re-upload the entire model, which stalls large STL/STEP
+      // scenes. Copy only the triangles this face draws.
+      const range=this.faces.range(this.faceAt(index));
+      entry.fill=range&&range[0]!==range[1]?faceOverlay(this.buffers.vertices as Float32Array,this.buffers.triangles as Uint32Array,range):null;
+      return entry.fill;
+    }
+    entry.fill=this.highlight(kind,index);
+    return entry.fill;
+  }
+  /** Number of vertices `copyOverlay` will write for this entity. */
+  overlayVertexCount(kind:SelectionMode,index:number):number{
+    if(this.disposed)return 0;
+    if(kind==='face'&&this.buffers.triangles?.length&&this.buffers.vertices?.length){
+      const range=this.faces.range(this.faceAt(index));
+      return range?(range[1]-range[0])*3:0;
+    }
+    if(kind==='part')return this.buffers.triangles?.length?(this.buffers.vertices?.length??0)/3:(this.buffers.edges?.length??0)/3;
+    if(kind==='edge'){const range=this.edges.range(this.edgeAt(index));return range?(range[1]-range[0])*2:0;}
+    return 0;
+  }
+  /** Writes part-local overlay positions into a reusable buffer. */
+  copyOverlay(kind:SelectionMode,index:number,target:Float32Array):number{
+    if(this.disposed)return 0;
+    if(kind==='face'&&this.buffers.triangles?.length&&this.buffers.vertices?.length){
+      const range=this.faces.range(this.faceAt(index));if(!range)return 0;
+      const triangles=this.buffers.triangles as Uint32Array,vertices=this.buffers.vertices;
+      let written=0;
+      for(let source=range[0]*3;source<range[1]*3;source++){
+        const vertex=triangles[source]*3;target[written++]=vertices[vertex];target[written++]=vertices[vertex+1];target[written++]=vertices[vertex+2];
+      }
+      return (range[1]-range[0])*3;
+    }
+    if(kind==='part'&&!this.buffers.triangles?.length){
+      const edges=this.buffers.edges??new Float32Array();target.set(edges.subarray(0,edges.length));return edges.length/3;
+    }
+    if(kind==='part'){
+      const vertices=this.buffers.vertices??new Float32Array();target.set(vertices.subarray(0,vertices.length));return vertices.length/3;
+    }
+    const range=this.edges.range(this.edgeAt(index));if(!range)return 0;
+    const edges=this.buffers.edges??new Float32Array();target.set(edges.subarray(range[0]*6,range[1]*6));return (range[1]-range[0])*2;
+  }
+  /** Part-local overlay center, derived once from the cached fill geometry. */
+  center(kind:SelectionMode,index:number):THREE.Vector3|null{
+    const entry=this.derivedEntry(kind,index);
+    if(entry.center===undefined){const fill=this.overlay(kind,index);entry.center=fill?geometryCenter(fill):null;}
+    return entry.center;
+  }
+  /** Cached stroke geometry for an entity; built from the indexed subset. */
+  outline(kind:SelectionMode,index:number,create:(fill:THREE.BufferGeometry|null)=>THREE.BufferGeometry|null):THREE.BufferGeometry|null{
+    const entry=this.derivedEntry(kind,index);
+    if(entry.outline===undefined){
+      // The cached fill maps faces to compact triangle soup, so boundary
+      // traversal needs the original indexed view instead.
+      const source=this.highlight(kind,index);
+      try{entry.outline=create(source);}finally{source?.dispose();}
+    }
+    return entry.outline;
   }
   /** New index views share immutable vertex bytes; dispose only the overlay. */
   highlight(kind:SelectionMode,index:number):THREE.BufferGeometry|null{
     if(this.disposed)return null;
     if(kind==='edge'){
-      const range=this.edges.range(this.edgeIds.indexOf(`edge:${index}`));if(!range||range[0]===range[1])return null;
+      const range=this.edges.range(this.edgeAt(index));if(!range||range[0]===range[1])return null;
       return new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(this.buffers.edges.subarray(range[0]*6,range[1]*6),3));
     }
     if(kind==='part'&&!this.buffers.triangles?.length)return new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(this.buffers.edges,3));
-    const range=kind==='part'?[0,this.buffers.triangles?.length/3||0]:this.faces.range(this.faceIds.indexOf(`face:${index}`));
+    const range=kind==='part'?[0,this.buffers.triangles?.length/3||0]:this.faces.range(this.faceAt(index));
     if(!range||range[0]===range[1])return null;
     return new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(this.buffers.vertices,3))
       .setIndex(new THREE.BufferAttribute(this.buffers.triangles.subarray(range[0]*3,range[1]*3),1));
   }
-  dispose(){if(this.disposed)return;this.disposed=true;this.resources.release();for(const object of [this.lines,this.surface])(object.material as THREE.Material).dispose();}
+  dispose(){if(this.disposed)return;this.disposed=true;
+    for(const entry of this.derived.values()){entry.fill?.dispose();entry.outline?.dispose();}
+    this.derived.clear();
+    this.resources.release();for(const object of [this.lines,this.surface])(object.material as THREE.Material).dispose();}
 }
-/** Center of the primitives this geometry draws. Face overlays share the part
- * vertex buffer and only subset the index, so attribute bounds are the whole part. */
+/** Center of the primitives this geometry draws. Indexed face views subset the
+ * part index, while compact face overlays contain only their own vertices. */
+function faceOverlay(vertices:Float32Array|Uint32Array,triangles:Uint32Array,range:[number,number]){
+  const start=range[0]*3,end=range[1]*3,positions=new Float32Array((end-start)*3);
+  for(let source=start,target=0;source<end;source++,target+=3){
+    const vertex=triangles[source]*3;
+    positions[target]=vertices[vertex];positions[target+1]=vertices[vertex+1];positions[target+2]=vertices[vertex+2];
+  }
+  return new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(positions,3));
+}
 export function geometryCenter(geometry:THREE.BufferGeometry){
   const position=geometry.getAttribute('position');
   const index=geometry.getIndex();

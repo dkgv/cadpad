@@ -53,3 +53,7 @@ Wrong-translation rate uses saved translations that were manually reviewed;
 clarification-only cases are reported separately and excluded from that
 denominator. Keep raw responses and evaluation notes local under
 `docs/requirements-eval/`; compare the rate with the previous release.
+For a reproducible like-for-like release comparison, record provider/model and
+corpus metadata and use the `--compare` workflow in
+`docs/requirements-eval/release-comparison.md`. The JSONL currently records
+backend but not the resolved model ID, so include that in the release report.

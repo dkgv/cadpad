@@ -78,6 +78,8 @@ def main():
                     result = model.build(args, revision)
                 elif method == "inspect":
                     result = model.inspect(args)
+                elif method == "resolve_features":
+                    result = model.resolve_features(args)
                 elif method == "trace_cad_edge":
                     from .edge_trace import trace_native_edges
                     result = trace_native_edges(model, args)

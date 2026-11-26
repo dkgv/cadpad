@@ -1,0 +1,18 @@
+{
+  "ir_version": 1,
+  "id": "se1",
+  "name": "Cover seating",
+  "text": "Cover is seated on base with at least 10 mm2 contact area",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "seated",
+      "span": [0, 57],
+      "args": {
+        "a": { "part": { "model": { "entry": "fit.py", "builder": "fit" }, "part": { "name": "cover" } } },
+        "on": { "part": { "model": { "entry": "fit.py", "builder": "fit" }, "part": { "name": "base" } } },
+        "area": { "quantity": { "value": 10.0, "unit": "mm2", "source": "text" } }
+      }
+    }
+  ]
+}

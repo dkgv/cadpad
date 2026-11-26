@@ -1,0 +1,53 @@
+[
+  {
+    "args": {
+      "a": {
+        "feature": {
+          "kind": "explicit",
+          "name": "shaft_bore",
+          "part": {
+            "model": {
+              "builder": "housing",
+              "entry": "housing.py"
+            },
+            "part": {
+              "name": "housing"
+            }
+          }
+        }
+      }
+    },
+    "cmp": {
+      "hi": {
+        "note": "ISO 286-2 H7 at Ø8 mm",
+        "source": "library",
+        "unit": "mm",
+        "value": 8.015
+      },
+      "lo": {
+        "note": "ISO 286-2 H7 at Ø8 mm",
+        "source": "library",
+        "unit": "mm",
+        "value": 8.0
+      },
+      "op": "in"
+    },
+    "id": "c1.1",
+    "note": "ISO 286-2 H7 at Ø8 mm",
+    "origin": {
+      "claim": "c1",
+      "library_version": "33e5a9f2126b4bba814c1f007cbec3eb504f9ab8c9096f82b90a97ee0e5ee4d8",
+      "rule": "fit"
+    },
+    "pairing": "each",
+    "primitive": "diameter",
+    "quantifier": "for_all",
+    "span": [
+      0,
+      55
+    ],
+    "states": {
+      "kind": "rest"
+    }
+  }
+]

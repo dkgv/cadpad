@@ -505,7 +505,7 @@ impl Core {
             .draft
             .clone();
         let settings = settings_in(&catalog);
-        let snapshot = snapshot_for(self, &request.workspace_id, USER).await?;
+        let snapshot = snapshot_for(self, &request.workspace_id, USER, &draft).await?;
         let compiled = compile(&draft, &snapshot, &settings);
         if compiled.has_errors() {
             let errors: Vec<&Diagnostic> = compiled

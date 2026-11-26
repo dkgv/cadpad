@@ -1,13 +1,15 @@
 //! Typecheck (spec §3.4): argument kinds against library signatures, units,
 //! comparator and state ranges, state-count limit, parameter bounds, and one
 //! subject model per claim.
-use super::bind::{Bindings, model_key};
+use super::bind::{Bindings, feature_ref_key, model_key};
 use super::diagnostics::{Diagnostic, DiagnosticCode};
-use super::expand::check_claim;
+use super::expand::{check_claim, expand_claim};
 use super::ir::{Arg, Literal, ModelRef, ParamValues, Requirement, StateSpace};
+use super::library::{ArgKind, library};
 use super::quantity::{Dimension, Quantity};
 use super::refs::claim_models;
 use super::settings::ProjectSettings;
+use super::snapshot::WorkspaceSnapshot;
 
 fn state_spaces(arg: &Arg) -> Vec<&StateSpace> {
     match arg {
@@ -124,7 +126,10 @@ fn check_bounds(
                 check_bounds(f, &format!("{at}.factors[{i}]"), subject, b, out);
             }
         }
-        StateSpace::Rest {} | StateSpace::Rotate { .. } | StateSpace::Translate { .. } => {}
+        StateSpace::Rest {}
+        | StateSpace::Simulate { .. }
+        | StateSpace::Rotate { .. }
+        | StateSpace::Translate { .. } => {}
     }
 }
 
@@ -156,22 +161,83 @@ fn check_state_args(
 }
 
 /// All type errors, in a stable order, without duplicates.
-pub fn typecheck(req: &Requirement, b: &Bindings, settings: &ProjectSettings) -> Vec<Diagnostic> {
+pub fn typecheck(
+    req: &Requirement,
+    b: &Bindings,
+    snap: &WorkspaceSnapshot,
+    settings: &ProjectSettings,
+) -> Vec<Diagnostic> {
     let mut out = req.validate();
     for (i, claim) in req.claims.iter().enumerate() {
         let at = format!("claims[{i}]");
         out.extend(check_claim(claim, &at));
+        if let Ok(expanded) = expand_claim(claim, &at, settings) {
+            for primitive in expanded {
+                let Some(signature) = library().primitive(&primitive.primitive) else {
+                    continue;
+                };
+                for spec in &signature.args {
+                    if !matches!(spec.kind, ArgKind::Entities { single: true }) {
+                        continue;
+                    }
+                    let Some(Arg::Feature(feature)) = primitive.args.get(spec.name) else {
+                        continue;
+                    };
+                    let Some(key) = feature_ref_key(feature) else {
+                        continue;
+                    };
+                    if let Some(bound) = b.features.get(&key)
+                        && bound.count != 1
+                    {
+                        out.push(Diagnostic::new(
+                            DiagnosticCode::ETypeKind,
+                            format!("{at}.args.{}", spec.name),
+                            format!(
+                                "{} selects {} entities but this argument needs exactly one",
+                                bound.name, bound.count
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        if claim.rule == "measure"
+            && matches!(claim.args.get("fn"), Some(Arg::Text(name)) if name == "joint")
+            && let (Some(Arg::Joint(joint)), Some(Arg::Compare(cmp))) =
+                (claim.args.get("j"), claim.args.get("cmp"))
+            && let Some(bound) =
+                b.joints
+                    .get(&format!("{}:{}", model_key(&joint.model), joint.name))
+            && let (Some(unit), Some(found)) = (&bound.unit, cmp.dimension())
+        {
+            let expected = match unit.as_str() {
+                "m" => Some(Dimension::Length),
+                "rad" => Some(Dimension::Angle),
+                _ => None,
+            };
+            if let Some(expected) = expected
+                && found != expected
+            {
+                out.push(
+                    super::quantity::DimensionMismatch { expected, found }
+                        .diagnostic(format!("{at}.args.cmp")),
+                );
+            }
+        }
         let models = claim_models(req, i);
         if models.len() > 1 {
             let names: Vec<_> = models.iter().map(model_key).collect();
-            out.push(Diagnostic::new(
-                DiagnosticCode::ETypeKind,
-                &at,
-                format!(
-                    "a claim is checked in one model, but this one refers to {}; check them in an assembly model",
-                    names.join(" and ")
-                ),
-            ));
+            out.push(
+                Diagnostic::new(
+                    DiagnosticCode::ETypeKind,
+                    &at,
+                    format!(
+                        "a claim is checked in one model, but this one refers to {}; check them in an assembly model",
+                        names.join(" and ")
+                    ),
+                )
+                .with_fix_opt(super::assembly::cross_model_fix(req, i, snap)),
+            );
         }
         let subject = b.subjects.get(&claim.id);
         for (name, arg) in &claim.args {
@@ -229,6 +295,7 @@ mod tests {
             geometry_hash: "h".into(),
             source: None,
             fastener: None,
+            source_assets: vec![],
         };
         let model = |entry: &str, b: &str| ModelSnapshot {
             model: ModelRef {
@@ -247,6 +314,7 @@ mod tests {
                 }],
                 joints: vec![JointInfo {
                     name: "hinge".into(),
+                    unit: Some("rad".into()),
                     limits: Some([0.0, 2.0]),
                 }],
                 ..Default::default()
@@ -263,7 +331,7 @@ mod tests {
         .unwrap();
         let (b, d) = bind(&req, &snapshot());
         assert!(d.is_empty(), "{d:?}");
-        typecheck(&req, &b, &ProjectSettings::default())
+        typecheck(&req, &b, &snapshot(), &ProjectSettings::default())
     }
 
     fn part(model: &str, name: &str) -> serde_json::Value {
@@ -280,10 +348,76 @@ mod tests {
     fn at(d: &[Diagnostic]) -> Vec<(DiagnosticCode, &str)> {
         d.iter().map(|x| (x.code, x.at.as_str())).collect()
     }
+    fn codes(d: &[Diagnostic]) -> Vec<DiagnosticCode> {
+        d.iter().map(|x| x.code).collect()
+    }
 
     #[test]
     fn a_good_claim_has_no_diagnostics() {
         assert!(check(moves(angle(0.0, 110.0, 2.0))).is_empty());
+    }
+
+    #[test]
+    fn simulated_joint_coordinate_uses_the_bound_revolute_unit() {
+        let claim = |unit: &str| {
+            json!([{
+                "id": "c1", "rule": "measure", "args": {
+                    "fn": {"text": "joint"},
+                    "j": {"joint": {"model": {"entry": "c.py", "builder": "c"}, "name": "hinge"}},
+                    "cmp": {"compare": {"op": ">=", "value": {"value": 1.0, "unit": unit}}}
+                }
+            }])
+        };
+        assert!(check(claim("rad")).is_empty());
+        assert_eq!(codes(&check(claim("mm"))), [DiagnosticCode::ETypeUnit]);
+    }
+
+    #[test]
+    fn simulated_joint_coordinate_uses_the_bound_prismatic_unit() {
+        let req: Requirement = serde_json::from_value(json!({
+            "ir_version": 1, "id": "r", "name": "n", "text": "t", "claims": [{
+                "id": "c1", "rule": "measure", "args": {
+                    "fn": {"text": "joint"},
+                    "j": {"joint": {"model": {"entry": "c.py", "builder": "c"}, "name": "hinge"}},
+                    "cmp": {"compare": {"op": ">=", "value": {"value": 1.0, "unit": "m"}}}
+                }
+            }]
+        }))
+        .unwrap();
+        let mut snap = snapshot();
+        for model in &mut snap.models {
+            if let Some(joint) = model
+                .built
+                .as_mut()
+                .and_then(|built| built.joints.first_mut())
+            {
+                joint.unit = Some("m".into());
+            }
+        }
+        let (bindings, diagnostics) = bind(&req, &snap);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(typecheck(&req, &bindings, &snapshot(), &ProjectSettings::default()).is_empty());
+        let bad: Requirement = serde_json::from_value(json!({
+            "ir_version": 1, "id": "r", "name": "n", "text": "t", "claims": [{
+                "id": "c1", "rule": "measure", "args": {
+                    "fn": {"text": "joint"},
+                    "j": {"joint": {"model": {"entry": "c.py", "builder": "c"}, "name": "hinge"}},
+                    "cmp": {"compare": {"op": ">=", "value": {"value": 1.0, "unit": "rad"}}}
+                }
+            }]
+        }))
+        .unwrap();
+        let (bindings, diagnostics) = bind(&bad, &snap);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            codes(&typecheck(
+                &bad,
+                &bindings,
+                &snapshot(),
+                &ProjectSettings::default()
+            )),
+            [DiagnosticCode::ETypeUnit]
+        );
     }
 
     #[test]

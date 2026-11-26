@@ -1,0 +1,3 @@
+Pin press fit
+  1. Pin is a press fit in hole: diameter difference between 0.02 and 0.05 mm, as built.
+     ▸ details: 2 checks · accuracy exact (axis_offset, diameter_difference)

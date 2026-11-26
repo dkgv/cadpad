@@ -115,6 +115,26 @@ test('face centers follow the indexed face instead of the shared part bounds',()
   assert.ok(geometryCenter(geometry.highlight('part',0)!).distanceTo(new THREE.Vector3(51,1,0))<1e-9);
   geometry.dispose();
 });
+test('derived hover overlays, centers and outlines are reused per entity',()=>{
+  const geometry=plate().geometry;
+  const fill=geometry.overlay('face',0)!;
+  assert.equal(geometry.overlay('face',0),fill);
+  assert.equal(fill.getAttribute('position').count,3);
+  assert.equal(fill.getIndex(),null);
+  const target=new Float32Array(geometry.overlayVertexCount('face',0)*3);
+  assert.equal(geometry.copyOverlay('face',0,target),3);
+  assert.deepEqual(Array.from(target),[-5,-5,0,5,-5,0,5,5,0]);
+  assert.equal(geometry.overlayVertexCount('part',0),4);
+  assert.equal(geometry.copyOverlay('part',0,new Float32Array(12)),4);
+  const center=geometry.center('face',0)!;
+  assert.equal(geometry.center('face',0),center);
+  let builds=0;
+  const outline=geometry.outline('face',0,source=>{builds++;assert.ok(source?.getIndex());return new THREE.BufferGeometry();})!;
+  assert.equal(geometry.outline('face',0,()=>{throw new Error('outline rebuilt');}),outline);
+  assert.equal(builds,1);
+  geometry.dispose();
+});
+
 test('highlight geometry retains the selected topology subset without changing source arrays',()=>{
   const face=plate().geometry,edge=wire().geometry;
   const highlight=face.highlight('face',2)!;

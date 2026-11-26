@@ -1,0 +1,53 @@
+{
+  "ir_version": 1,
+  "id": "proxy1",
+  "name": "Slider coordinate proxy",
+  "text": "The slide remains at 10 mm ±0.001 mm at the end of a one-tick proxy simulation",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "measure",
+      "span": [0, 78],
+      "args": {
+        "fn": { "text": "joint" },
+        "j": {
+          "joint": {
+            "model": { "entry": "slider.py", "builder": "slider" },
+            "name": "slide"
+          }
+        },
+        "cmp": {
+          "compare": {
+            "op": "approx",
+            "target": { "value": 10.0, "unit": "mm", "source": "text" },
+            "tol": { "value": 0.001, "unit": "mm", "source": "text" }
+          }
+        },
+        "at": {
+          "states": {
+            "kind": "simulate",
+            "model": { "entry": "slider.py", "builder": "slider" },
+            "simulation": {
+              "initial_coordinates": { "slide": 0.01 },
+              "simulation": {
+                "gravity_m_s2": [0.0, 0.0, 0.0],
+                "bodies": {
+                  "slider": {
+                    "type": "dynamic",
+                    "mass": { "type": "kilograms", "mass_kg": 1.0 },
+                    "friction": 0.0,
+                    "restitution": 0.0
+                  }
+                }
+              },
+              "actions": [
+                { "ticks": 1, "motors": [], "loads": {} }
+              ]
+            },
+            "when": { "kind": "end" }
+          }
+        }
+      }
+    }
+  ]
+}

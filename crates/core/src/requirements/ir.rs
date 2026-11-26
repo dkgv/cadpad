@@ -167,14 +167,22 @@ pub enum EntityKind {
 /// `@cabinet/door#hinge_hole`. Resolution order on each build: explicit name,
 /// then history name, then exact geometric reference. Each resolves exactly or
 /// fails; there is no closest match.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FeatureRef {
     /// Published by the source: `show(..., features={"hinge_hole": ...})`.
     Explicit { part: PartRef, name: String },
     /// History name: the operation that created the entity, e.g.
     /// `make_door/hole#1/wall`.
-    History { part: PartRef, name: String },
+    History {
+        part: PartRef,
+        name: String,
+        /// Exact group hash returned by opt-in history tracing.
+        hash: String,
+        /// Positional names are diagnostic evidence only, never stable refs.
+        #[serde(default)]
+        positional: bool,
+    },
     /// Exact geometric reference for imported geometry: SHA-256 of the
     /// entity's geometry. Never matched approximately.
     Geometric {
@@ -224,6 +232,16 @@ pub enum ParamValues {
     List { values: Vec<Literal> },
 }
 
+/// Which proxy sample(s) of a simulation trace a primitive checks.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum When {
+    End {},
+    At { time: Literal },
+    Always {},
+    Eventually {},
+}
+
 /// Where the model is when we measure; a claim holds at every state of its
 /// space (spec §3.3). Sampling is always explicit.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -250,6 +268,12 @@ pub enum StateSpace {
     },
     /// Mechanism joint coordinate.
     Joint { joint: JointRef, range: Sweep },
+    /// One trace from the existing proxy dynamics engine, tied to one model.
+    Simulate {
+        model: ModelRef,
+        simulation: crate::motion_tests::SimulationState,
+        when: When,
+    },
     /// Every combination of the factors.
     Product { factors: Vec<StateSpace> },
 }
@@ -293,6 +317,17 @@ impl StateSpace {
             StateSpace::Rotate { range, .. }
             | StateSpace::Translate { range, .. }
             | StateSpace::Joint { range, .. } => sweep_count(&range.from, &range.to, &range.step),
+            StateSpace::Simulate {
+                simulation, when, ..
+            } => Some(match when {
+                When::Always {} | When::Eventually {} => simulation
+                    .actions
+                    .iter()
+                    .map(|a| u64::from(a.ticks))
+                    .sum::<u64>()
+                    .saturating_add(1),
+                _ => 1,
+            }),
             StateSpace::Product { factors } => factors
                 .iter()
                 .try_fold(1u64, |n, f| f.state_count().map(|c| n.saturating_mul(c))),
@@ -378,6 +413,56 @@ impl StateSpace {
                     &format!("{at}.range"),
                     &mut out,
                 );
+            }
+            StateSpace::Simulate {
+                model,
+                simulation,
+                when,
+            } => {
+                if [&model.entry, &model.builder].iter().any(|v| {
+                    v.trim().is_empty() || v.len() > 1024 || v.chars().any(char::is_control)
+                }) {
+                    out.push(Diagnostic::new(
+                        DiagnosticCode::ETypeRange,
+                        format!("{at}.model"),
+                        "simulation needs a valid model reference",
+                    ));
+                }
+                let ticks: u64 = simulation.actions.iter().map(|a| u64::from(a.ticks)).sum();
+                if let When::At { time } = when {
+                    check_dimension(time, Dimension::Time, &format!("{at}.when.time"), &mut out);
+                    check_finite(time, &format!("{at}.when.time"), &mut out);
+                    let requested_tick =
+                        time.quantity().internal_value() / crate::dynamics::TIMESTEP_S;
+                    if requested_tick < 0.0
+                        || requested_tick > ticks as f64
+                        || (requested_tick - requested_tick.round()).abs() > 1e-8
+                    {
+                        out.push(Diagnostic::new(
+                            DiagnosticCode::ETypeRange,
+                            format!("{at}.when.time"),
+                            "sample time must be a simulation tick within the action sequence",
+                        ));
+                    }
+                }
+                if simulation.initial_coordinates.len() > 128
+                    || simulation
+                        .initial_coordinates
+                        .values()
+                        .any(|v| !v.is_finite())
+                    || simulation.actions.is_empty()
+                    || simulation.actions.len() > 16
+                    || simulation
+                        .actions
+                        .iter()
+                        .any(|a| a.ticks == 0 || a.motors.len() > 128 || a.loads.len() > 128)
+                    || ticks > 1200
+                    || simulation.simulation.bodies.is_empty()
+                    || simulation.simulation.bodies.len() > 128
+                    || (ticks + 1) * simulation.simulation.bodies.len() as u64 > 32768
+                {
+                    out.push(Diagnostic::new(DiagnosticCode::ETypeRange, format!("{at}.simulation"), "simulation needs finite initial coordinates, 1–16 positive-tick actions, bodies, and must fit the existing 10-second / 32768 body-frame limits"));
+                }
             }
             StateSpace::Product { factors } => {
                 if factors.is_empty() {

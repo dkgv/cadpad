@@ -593,6 +593,22 @@ def test_inspect_can_opt_into_history_without_changing_the_live_build(tmp_path):
     assert model._publication_result["parts"][0]["geometry_fingerprint"]["sha256"] == part_hash
 
 
+def test_resolve_features_returns_exact_history_and_fails_closed_for_ambiguous_geometry(tmp_path):
+    model, result = build(tmp_path, 'import cadquery as cq\nshow(cq.Workplane().box(10,10,10), name="part")')
+    refs = [dict(revision="r1", instance_id="part", entity_id=f"face:{i}")
+            for i in range(result["parts"][0]["face_count"])]
+    inspected = model.inspect(dict(entities=refs, history_names=True))
+    history = next(ref for item in inspected["entities"] for ref in item["history_references"])
+    model._trace_history_names = lambda: (_ for _ in ()).throw(AssertionError("verified trace should be reused"))
+    resolved = model.resolve_features(dict(references=[dict(kind="history", part="part", name=history["name"])]))
+    assert resolved["references"] == [dict(status="resolved", entity=history["entity_kind"],
+        count=history["count"], hash=history["set_hash"], positional=history["positional"])]
+    assert history["name"] in {entry["name"] for entry in resolved["history_index"]["part"]}
+    exact = model.resolve_features(dict(references=[dict(kind="geometric", part="part",
+        entity="face", hash=history["exact_hash"])]))
+    assert exact["references"][0]["status"] in ("resolved", "ambiguous")
+
+
 def test_inspect_history_opt_in_fails_if_live_brep_changed(tmp_path):
     model, _ = build(tmp_path, 'import cadquery as cq\nshow(cq.Workplane().box(10,10,10), name="part")')
     model.parts["part"].shape = cq.Workplane().box(11, 10, 10).val()

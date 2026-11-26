@@ -1,0 +1,17 @@
+{
+  "models": [
+    {
+      "model": { "entry": "fit.py", "builder": "fit" },
+      "built": {
+        "fingerprint": "fp-fit",
+        "parts": [
+          { "name": "pin", "geometry_hash": "h-pin" },
+          { "name": "hole", "geometry_hash": "h-hole" },
+          { "name": "cover", "geometry_hash": "h-cover" },
+          { "name": "base", "geometry_hash": "h-base" }
+        ],
+        "params": [], "joints": [], "constants": []
+      }
+    }
+  ]
+}

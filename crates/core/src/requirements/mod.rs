@@ -7,6 +7,8 @@
 // build and rare, so returning it by value in `Result` is fine here.
 #![allow(clippy::result_large_err)]
 
+pub mod assembly;
+pub mod auto_edits;
 pub mod bind;
 pub mod compile;
 pub mod coverage;
@@ -14,8 +16,10 @@ pub mod diagnostics;
 pub mod dispatch;
 pub mod evaluate;
 pub mod expand;
+pub mod fasteners;
 pub mod findings;
 pub mod ir;
+pub mod iso286;
 pub mod library;
 pub mod lifecycle;
 pub mod manifest;
@@ -33,6 +37,7 @@ pub mod snapshot;
 pub mod states;
 pub mod status;
 pub mod storage;
+pub mod suggestions;
 pub mod tool;
 pub mod typecheck;
 pub mod worker_plan;

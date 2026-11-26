@@ -3,11 +3,14 @@
 //! symbol table.
 use super::diagnostics::{Diagnostic, DiagnosticCode, Fix};
 use super::ir::{
-    Arg, EntityKind, FeatureRef, ModelRef, ParamRef, PartName, PartRef, Requirement, SetRef, Target,
+    Arg, EntityKind, FeatureRef, ModelRef, ParamRef, PartName, PartRef, Requirement, SetRef,
+    Target, Token,
 };
 use super::quantity::Quantity;
 use super::refs::{self, Ref};
-use super::snapshot::{BuiltModel, WorkspaceSnapshot};
+use super::snapshot::{BuiltModel, FeatureSource, WorkspaceSnapshot};
+use super::suggestions::{self, ShapeSignature};
+use crate::geometry::FastenerMetadata;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -38,6 +41,33 @@ pub fn part_ref_key(p: &PartRef) -> String {
     format!("{}/{n}", model_key(&p.model))
 }
 
+/// The serde name of an [`EntityKind`] (`face`, `edge`, `vertex`): the
+/// spelling `resolve_features` replies and [`FeatureInfo::name`](super::snapshot::FeatureInfo)
+/// use for geometric features, so manifest keys and build keys agree.
+pub fn entity_key(entity: EntityKind) -> &'static str {
+    match entity {
+        EntityKind::Face => "face",
+        EntityKind::Edge => "edge",
+        EntityKind::Vertex => "vertex",
+    }
+}
+
+/// Stable feature manifest key retaining the reference source, so an explicit
+/// semantic name and a same-spelled history name cannot alias each other.
+pub fn feature_ref_key(f: &FeatureRef) -> Option<String> {
+    let (part, suffix) = match f {
+        FeatureRef::Explicit { part, name } => (part, name.clone()),
+        FeatureRef::History { part, name, .. } => (part, format!("history:{name}")),
+        FeatureRef::Geometric { part, entity, hash } => {
+            (part, format!("geometric:{}:{hash}", entity_key(*entity)))
+        }
+    };
+    let PartName::Name(name) = &part.part else {
+        return None;
+    };
+    Some(format!("{}/{name}#{suffix}", model_key(&part.model)))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BoundParam {
     pub model: ModelRef,
@@ -51,6 +81,7 @@ pub struct BoundParam {
 pub struct BoundJoint {
     pub model: ModelRef,
     pub name: String,
+    pub unit: Option<String>,
     pub limits: Option<[f64; 2]>,
 }
 
@@ -61,6 +92,8 @@ pub struct BoundFeature {
     pub entity: EntityKind,
     pub count: u64,
     pub hash: String,
+    pub source: FeatureSource,
+    pub positional: bool,
 }
 
 /// An `@[Label](entry#builder[/part])` token in the prose.
@@ -150,6 +183,107 @@ pub fn suggest(name: &str, candidates: &[String]) -> Vec<String> {
         .collect();
     scored.sort();
     scored.into_iter().take(3).map(|(_, c)| c.clone()).collect()
+}
+
+/// Proposed `fastener.kind` for [`super::auto_edits::fastener_metadata_fix`]:
+/// the longest alphabetic word of the part name (`bolt_1` → `bolt`,
+/// `washer_m6` → `washer`), `bolt` when nothing qualifies. A proposal the
+/// author confirms, never inferred from geometry.
+fn fastener_kind(name: &str) -> String {
+    name.to_lowercase()
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|word| word.len() >= 2)
+        .max_by_key(|word| word.len())
+        .unwrap_or("bolt")
+        .to_string()
+}
+
+/// Merge shape-signature-ranked candidates into name-suggestion options
+/// (spec §3.1): `query` is the signature the approved manifest recorded for
+/// the broken reference, `candidates` this build's `(display name, signature)`
+/// pairs. Suggestions only — a signature never decides a binding.
+fn signature_options(
+    options: &mut Vec<String>,
+    query: Option<&ShapeSignature>,
+    candidates: impl IntoIterator<Item = (String, ShapeSignature)>,
+) {
+    let Some(query) = query else {
+        return;
+    };
+    for suggestion in suggestions::rank(query, candidates, 3) {
+        if !options.contains(&suggestion.key) {
+            options.push(suggestion.key);
+        }
+    }
+}
+
+/// Part candidates of `built` with their signatures, for
+/// [`signature_options`].
+fn part_signature_candidates(built: &BuiltModel) -> Vec<(String, ShapeSignature)> {
+    built
+        .parts
+        .iter()
+        .filter_map(|p| {
+            built
+                .part_signatures
+                .get(&p.name)
+                .map(|sig| (p.name.clone(), sig.clone()))
+        })
+        .collect()
+}
+
+/// Feature candidates of `part_name` with their signatures.
+fn feature_signature_candidates(
+    built: &BuiltModel,
+    part_name: &str,
+) -> Vec<(String, ShapeSignature)> {
+    built
+        .features
+        .iter()
+        .filter(|x| x.part == part_name)
+        .filter_map(|x| {
+            let key = format!("{part_name}#{}", x.link_suffix());
+            built
+                .feature_signatures
+                .get(&key)
+                .map(|sig| (x.name.clone(), sig.clone()))
+        })
+        .collect()
+}
+
+/// The signature a broken feature reference can be ranked by: the approved
+/// manifest's record of this exact reference key, or — for history/geometric
+/// references — the signature of the same-hash feature in this build (a
+/// renamed feature keeps its exact geometry).
+fn feature_query_signature(
+    built: &BuiltModel,
+    f: &FeatureRef,
+    part_name: &str,
+    reference_key: Option<&str>,
+) -> Option<ShapeSignature> {
+    if let Some(sig) = reference_key.and_then(|k| built.reference_signatures.get(k)) {
+        return Some(sig.clone());
+    }
+    let same_geometry = built.features.iter().find(|x| {
+        if x.part != part_name {
+            return false;
+        }
+        match f {
+            FeatureRef::History { hash, .. } => {
+                x.source == FeatureSource::History && x.hash == *hash
+            }
+            FeatureRef::Geometric { entity, hash, .. } => {
+                x.source == FeatureSource::Geometric && x.entity == *entity && x.hash == *hash
+            }
+            FeatureRef::Explicit { .. } => false,
+        }
+    });
+    same_geometry.and_then(|x| {
+        built
+            .feature_signatures
+            .get(&format!("{part_name}#{}", x.link_suffix()))
+            .cloned()
+    })
 }
 
 /// Parse `@[Label](entry#builder)` and `@[Label](entry#builder/part)` tokens.
@@ -279,7 +413,16 @@ pub fn bind_part(
                     model.builder
                 ),
             );
-            let options = suggest(n, &names);
+            let mut options = suggest(n, &names);
+            // Shape-signature candidates: the approved manifest's record of
+            // this part is the query (spec §3.1); a glob has no single
+            // signature to query with.
+            let query_key = format!("{}/{n}", model_key(model));
+            signature_options(
+                &mut options,
+                built.reference_signatures.get(&query_key),
+                part_signature_candidates(built),
+            );
             if !options.is_empty() {
                 d = d.with_fix(Fix::AskUser {
                     options,
@@ -369,6 +512,7 @@ pub fn bind_joint(
         .map(|j| BoundJoint {
             model: model.clone(),
             name: j.name.clone(),
+            unit: j.unit.clone(),
             limits: j.limits,
         })
         .ok_or_else(|| {
@@ -584,6 +728,91 @@ pub fn bind(req: &Requirement, snap: &WorkspaceSnapshot) -> (Bindings, Vec<Diagn
         }
         b.others.insert(claim.id.clone(), others);
     }
+
+    // P3.7: an explicit IR fastener reference requires explicit publication
+    // metadata. Never guess a kind or standard size from the part's geometry.
+    for (i, claim) in req.claims.iter().enumerate() {
+        if claim.rule != "bolted" {
+            continue;
+        }
+        let Some(fasteners) = claim.args.get("fasteners") else {
+            continue;
+        };
+        let Some(members) = members_of_arg(fasteners, &b) else {
+            continue;
+        };
+        let mut checked = std::collections::BTreeSet::new();
+        for member in members {
+            if !checked.insert(member.key()) {
+                continue;
+            }
+            let Some(part) = snap
+                .model(&member.model)
+                .and_then(|model| model.built.as_ref())
+                .and_then(|built| built.part(&member.name))
+            else {
+                continue;
+            };
+            if part.fastener.is_some() {
+                continue;
+            }
+            let source = part.source.as_ref();
+            // P2.23: when the claim already says the thread size, propose the
+            // complete `fastener=` literal (kind guessed from the part name,
+            // mates from the bolted parts) as an auto-editable source fix.
+            let fix = match claim.args.get("size").and_then(|arg| match arg {
+                Arg::Token(Token { text, .. }) | Arg::Text(text) => Some(text.clone()),
+                _ => None,
+            }) {
+                Some(size) => {
+                    let mates: Vec<String> = ["p1", "p2"]
+                        .iter()
+                        .filter_map(|key| claim.args.get(*key))
+                        .filter_map(|arg| members_of_arg(arg, &b))
+                        .flatten()
+                        .map(|p| p.name)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect();
+                    super::auto_edits::fastener_metadata_fix(
+                        source,
+                        &member.name,
+                        &FastenerMetadata {
+                            kind: fastener_kind(&member.name),
+                            size,
+                            length: None,
+                            mates: (!mates.is_empty()).then_some(mates),
+                        },
+                    )
+                }
+                None => {
+                    let location = source
+                        .map(|source| format!("{}:{}", source.file, source.line))
+                        .unwrap_or_else(|| member.key());
+                    Fix::EditSource {
+                        description: format!(
+                            "Publish explicit fastener metadata for {} at {location}; provide its kind and size. Cadpad will not infer fastener metadata from geometry or labels.",
+                            member.name
+                        ),
+                        path: source.map(|source| source.file.clone()),
+                        proposed: None,
+                    }
+                }
+            };
+            out.push(
+                Diagnostic::new(
+                    DiagnosticCode::EBindFastenerMissing,
+                    format!("claims[{i}].args.fasteners"),
+                    format!(
+                        "{} is identified as a fastener but has no published fastener metadata",
+                        member.key()
+                    ),
+                )
+                .with_span(claim.span)
+                .with_fix(fix),
+            );
+        }
+    }
     (b, out)
 }
 
@@ -594,13 +823,13 @@ fn bind_feature(
     b: &mut Bindings,
     out: &mut Vec<Diagnostic>,
 ) {
-    let FeatureRef::Explicit { part, name } = f else {
-        out.push(Diagnostic::new(
-            DiagnosticCode::EBindFeatureMissing,
-            at,
-            "history and geometric feature references can't be bound yet; use a name published with show(..., features=...)",
-        ));
-        return;
+    let (part, requested_name) = match f {
+        FeatureRef::Explicit { part, name } | FeatureRef::History { part, name, .. } => {
+            (part, name.clone())
+        }
+        FeatureRef::Geometric { part, entity, hash } => {
+            (part, format!("geometric:{}:{hash}", entity_key(*entity)))
+        }
     };
     let PartName::Name(part_name) = &part.part else {
         out.push(Diagnostic::new(
@@ -624,20 +853,79 @@ fn bind_feature(
             return;
         }
     };
-    match built
-        .features
-        .iter()
-        .find(|x| &x.part == part_name && &x.name == name)
-    {
+    if let FeatureRef::Geometric { entity, hash, .. } = f {
+        let matches = built
+            .features
+            .iter()
+            .filter(|x| x.part == *part_name && x.entity == *entity && x.hash == *hash)
+            .count();
+        if matches > 1 {
+            out.push(Diagnostic::new(
+                DiagnosticCode::EBindFeatureAmbiguous,
+                at,
+                "exact geometry hash selects more than one entity in this part",
+            ));
+            return;
+        }
+    }
+    let requested = match f {
+        FeatureRef::Explicit { .. } => built.features.iter().find(|x| {
+            x.part == *part_name && x.name == requested_name && x.source == FeatureSource::Explicit
+        }),
+        FeatureRef::History {
+            hash, positional, ..
+        } => {
+            let matches: Vec<_> = built
+                .features
+                .iter()
+                .filter(|x| {
+                    x.part == *part_name
+                        && x.name == requested_name
+                        && x.source == FeatureSource::History
+                        && x.hash == *hash
+                        && x.count > 0
+                })
+                .collect();
+            if matches.len() != 1 {
+                None
+            } else {
+                if *positional || matches[0].positional {
+                    let source = built.part(part_name).and_then(|p| p.source.as_ref());
+                    out.push(
+                        Diagnostic::new(
+                            DiagnosticCode::WPositionalName,
+                            at,
+                            "this positional history name is accepted only while its exact entity-set hash remains unchanged",
+                        )
+                        .with_fix(super::auto_edits::feature_naming_fix(
+                            source,
+                            part_name,
+                            &requested_name,
+                            entity_key(matches[0].entity),
+                        )),
+                    );
+                }
+                Some(matches[0])
+            }
+        }
+        FeatureRef::Geometric { entity, hash, .. } => built.features.iter().find(|x| {
+            x.part == *part_name && x.entity == *entity && x.hash == *hash && x.count == 1
+        }),
+    };
+    match requested {
         Some(x) => {
             b.features.insert(
-                format!("{}/{part_name}#{name}", model_key(&part.model)),
+                feature_ref_key(f).unwrap_or_else(|| {
+                    format!("{}/{part_name}#{requested_name}", model_key(&part.model))
+                }),
                 BoundFeature {
                     part: bound_part,
-                    name: name.clone(),
+                    name: requested_name.clone(),
                     entity: x.entity,
                     count: x.count,
                     hash: x.hash.clone(),
+                    source: x.source,
+                    positional: x.positional,
                 },
             );
         }
@@ -651,13 +939,25 @@ fn bind_feature(
             let mut d = Diagnostic::new(
                 DiagnosticCode::EBindFeatureMissing,
                 at,
-                format!("{part_name} has no feature {name:?}"),
+                format!("{part_name} has no feature {requested_name:?}"),
             );
-            let options = suggest(name, &names);
+            let mut options = suggest(&requested_name, &names);
+            // Shape-signature candidates (spec §3.1): the approved manifest's
+            // record of this reference, or the same-hash feature of this
+            // build, is the query.
+            let reference_key = feature_ref_key(f);
+            let query = feature_query_signature(built, f, part_name, reference_key.as_deref());
+            signature_options(
+                &mut options,
+                query.as_ref(),
+                feature_signature_candidates(built, part_name),
+            );
             if !options.is_empty() {
                 d = d.with_fix(Fix::AskUser {
                     options,
-                    question: Some(format!("{name:?} isn't a feature. Which one did you mean?")),
+                    question: Some(format!(
+                        "{requested_name:?} isn't a feature. Which one did you mean?"
+                    )),
                 });
             }
             out.push(d);
@@ -684,6 +984,7 @@ mod tests {
             geometry_hash: format!("h-{n}"),
             source: None,
             fastener: None,
+            source_assets: vec![],
         };
         WorkspaceSnapshot {
             models: vec![
@@ -704,6 +1005,7 @@ mod tests {
                         }],
                         joints: vec![JointInfo {
                             name: "hinge".into(),
+                            unit: None,
                             limits: None,
                         }],
                         ..Default::default()
@@ -826,6 +1128,66 @@ mod tests {
     }
 
     #[test]
+    fn identified_bolted_fasteners_need_metadata_and_get_a_source_edit_fix() {
+        let mut snap = snapshot();
+        let bolt = PartInfo {
+            name: "bolt_1".into(),
+            geometry_hash: "h-bolt".into(),
+            source: Some(SourceInfo {
+                file: "hardware.py".into(),
+                line: 27,
+                function: Some("assembly".into()),
+            }),
+            fastener: None,
+            source_assets: vec![],
+        };
+        snap.models[0].built.as_mut().unwrap().parts.push(bolt);
+        let req = requirement(json!({
+            "text": "bolt joins base and rotor",
+            "claims": [{"id":"c1","rule":"bolted","span":[0,25],"args":{
+                "p1": part("machine", "base"),
+                "p2": part("machine", "rotor"),
+                "fasteners": part("machine", "bolt_1")
+            }}]
+        }));
+
+        let (_, diagnostics) = bind(&req, &snap);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::EBindFastenerMissing)
+            .expect("missing metadata diagnostic");
+        assert_eq!(diagnostic.at, "claims[0].args.fasteners");
+        assert_eq!(diagnostic.span, Some([0, 25]));
+        assert_eq!(
+            diagnostic.message,
+            "machine.py#machine/bolt_1 is identified as a fastener but has no published fastener metadata"
+        );
+        assert!(matches!(
+            &diagnostic.fix,
+            Some(Fix::EditSource { path, proposed, description })
+                if path.as_deref() == Some("hardware.py")
+                    && proposed.is_none()
+                    && description.contains("hardware.py:27")
+                    && description.contains("provide its kind and size")
+                    && description.contains("will not infer")
+        ));
+
+        snap.models[0].built.as_mut().unwrap().parts[5].fastener =
+            Some(crate::geometry::FastenerMetadata {
+                kind: "bolt".into(),
+                size: "M8".into(),
+                length: Some(20.0),
+                mates: None,
+            });
+        let (_, diagnostics) = bind(&req, &snap);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|d| d.code != DiagnosticCode::EBindFastenerMissing)
+        );
+    }
+
+    #[test]
     fn params_use_the_claims_subject_when_unqualified() {
         let req = requirement(
             json!({"claims": [{"id": "c1", "rule": "no_overlap", "args": {
@@ -894,16 +1256,238 @@ mod tests {
                 entity: EntityKind::Face,
                 count: 2,
                 hash: "fh".into(),
+                source: FeatureSource::Explicit,
+                positional: false,
             });
         let feat = |kind: &str, name: &str| json!({"feature": {"kind": kind, "part": part("machine", "base")["part"], "name": name}});
+        let mut history = feat("history", "make/hole#1/wall");
+        history["feature"]["hash"] = json!("exact-set-hash");
         let req = requirement(json!({"claims": [{"id": "c1", "rule": "x", "args": {
-            "a": feat("explicit", "rim"), "b": feat("explicit", "rin"), "c": feat("history", "make/hole#1/wall")}}]}));
+            "a": feat("explicit", "rim"), "b": feat("explicit", "rin"), "c": history}}]}));
         let (b, d) = bind(&req, &snap);
         assert_eq!(b.features["machine.py#machine/base#rim"].count, 2);
         assert_eq!(d.len(), 2);
         assert!(
             d.iter()
                 .all(|x| x.code == DiagnosticCode::EBindFeatureMissing)
+        );
+    }
+
+    #[test]
+    fn history_feature_binding_requires_exact_hash_and_warns_on_positional_names() {
+        let mut snap = snapshot();
+        snap.models[0]
+            .built
+            .as_mut()
+            .unwrap()
+            .features
+            .push(FeatureInfo {
+                part: "base".into(),
+                name: "make/hole#1/wall".into(),
+                entity: EntityKind::Face,
+                count: 1,
+                hash: "group-hash".into(),
+                source: FeatureSource::History,
+                positional: true,
+            });
+        let part =
+            json!({"model":{"entry":"machine.py","builder":"machine"},"part":{"name":"base"}});
+        let feature = json!({"feature":{"kind":"history","part":part,"name":"make/hole#1/wall","hash":"group-hash","positional":true}});
+        let req =
+            requirement(json!({"claims":[{"id":"c1","rule":"x","args":{"feature":feature}}]}));
+        let (bound, diagnostics) = bind(&req, &snap);
+        assert!(
+            bound
+                .features
+                .contains_key("machine.py#machine/base#history:make/hole#1/wall")
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::WPositionalName)
+        );
+        // P2.23: the positional-name warning carries an edit_source fix.
+        let warning = diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::WPositionalName)
+            .expect("positional warning");
+        assert!(matches!(
+            &warning.fix,
+            Some(Fix::EditSource { proposed, .. }) if proposed.is_none()
+        ));
+
+        let mismatched = requirement(json!({"claims":[{"id":"c1","rule":"x","args":{"feature":{
+            "feature":{"kind":"history","part":part,"name":"make/hole#1/wall","hash":"other","positional":true}}}}]}));
+        let (bound, diagnostics) = bind(&mismatched, &snap);
+        assert!(bound.features.is_empty());
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::EBindFeatureMissing)
+        );
+    }
+
+    #[test]
+    fn geometric_feature_keys_use_the_snake_case_entity_spelling() {
+        // `resolve_features` and `FeatureInfo::name` spell the entity
+        // `face`/`edge` (serde), so the manifest key must too — otherwise
+        // every geometric feature looks gone on each run.
+        let mut snap = snapshot();
+        snap.models[0]
+            .built
+            .as_mut()
+            .unwrap()
+            .features
+            .push(FeatureInfo {
+                part: "base".into(),
+                name: "geometric:face:geo-hash".into(),
+                entity: EntityKind::Face,
+                count: 1,
+                hash: "geo-hash".into(),
+                source: FeatureSource::Geometric,
+                positional: false,
+            });
+        let part =
+            json!({"model":{"entry":"machine.py","builder":"machine"},"part":{"name":"base"}});
+        let feature =
+            json!({"feature":{"kind":"geometric","part":part,"entity":"face","hash":"geo-hash"}});
+        let req =
+            requirement(json!({"claims":[{"id":"c1","rule":"x","args":{"feature":feature}}]}));
+        let (bound, diagnostics) = bind(&req, &snap);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let key = "machine.py#machine/base#geometric:face:geo-hash";
+        assert!(
+            bound.features.contains_key(key),
+            "keys: {:?}",
+            bound.features.keys().collect::<Vec<_>>()
+        );
+        // The relink build index names the same entity identically, so the
+        // manifest key and the build key finally agree.
+        let index = crate::requirements::relink::BuildIndex::from_snapshot(&snap);
+        assert!(index.features.contains_key(key));
+    }
+
+    #[test]
+    fn missing_parts_offer_signature_ranked_candidates() {
+        let mut snap = snapshot();
+        {
+            let built = snap.models[0].built.as_mut().unwrap();
+            built.parts.push(PartInfo {
+                name: "outrigger".into(),
+                geometry_hash: "h-outrigger".into(),
+                source: None,
+                fastener: None,
+                source_assets: vec![],
+            });
+            let approved = ShapeSignature {
+                volume_mm3: Some(1000.0),
+                area_mm2: Some(600.0),
+                extents_mm: Some([10.0, 10.0, 10.0]),
+                face_count: Some(6),
+                ..Default::default()
+            };
+            let current = ShapeSignature {
+                volume_mm3: Some(1050.0),
+                area_mm2: Some(590.0),
+                extents_mm: Some([10.0, 10.0, 10.0]),
+                face_count: Some(6),
+                ..Default::default()
+            };
+            built
+                .reference_signatures
+                .insert("machine.py#machine/arm".into(), approved);
+            built.part_signatures.insert("outrigger".into(), current);
+        }
+        let req = requirement(json!({"claims": [{"id": "c1", "rule": "x", "args": {
+            "a": part("machine", "arm")}}]}));
+        let (_, diagnostics) = bind(&req, &snap);
+        let d = diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::EBindPartMissing)
+            .expect("missing part diagnostic");
+        assert!(
+            matches!(&d.fix, Some(Fix::AskUser { options, .. }) if options.contains(&"outrigger".to_string())),
+            "fix: {:?}",
+            d.fix
+        );
+    }
+
+    #[test]
+    fn missing_history_feature_offers_the_same_geometry_under_its_new_name() {
+        let mut snap = snapshot();
+        {
+            let built = snap.models[0].built.as_mut().unwrap();
+            // The build renamed the feature but kept the exact entity-set
+            // hash: its signature is the query, and it ranks itself first.
+            built.features.push(FeatureInfo {
+                part: "base".into(),
+                name: "make/hole#2/wall".into(),
+                entity: EntityKind::Face,
+                count: 1,
+                hash: "set-hash".into(),
+                source: FeatureSource::History,
+                positional: false,
+            });
+            built.feature_signatures.insert(
+                "base#history:make/hole#2/wall".into(),
+                ShapeSignature {
+                    face_count: Some(1),
+                    ..Default::default()
+                },
+            );
+        }
+        let part =
+            json!({"model":{"entry":"machine.py","builder":"machine"},"part":{"name":"base"}});
+        let feature = json!({"feature":{"kind":"history","part":part,"name":"make/hole#9/wall","hash":"set-hash"}});
+        let req =
+            requirement(json!({"claims":[{"id":"c1","rule":"x","args":{"feature":feature}}]}));
+        let (_, diagnostics) = bind(&req, &snap);
+        let d = diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::EBindFeatureMissing)
+            .expect("missing feature diagnostic");
+        assert!(
+            matches!(&d.fix, Some(Fix::AskUser { options, .. }) if options.iter().any(|o| o.contains("make/hole#2/wall"))),
+            "fix: {:?}",
+            d.fix
+        );
+    }
+
+    #[test]
+    fn bolted_fastener_with_a_size_arg_gets_a_proposed_fastener_literal() {
+        let mut snap = snapshot();
+        let bolt = PartInfo {
+            name: "bolt_1".into(),
+            geometry_hash: "h-bolt".into(),
+            source: Some(SourceInfo {
+                file: "hardware.py".into(),
+                line: 27,
+                function: None,
+            }),
+            fastener: None,
+            source_assets: vec![],
+        };
+        snap.models[0].built.as_mut().unwrap().parts.push(bolt);
+        let req = requirement(json!({
+            "claims": [{"id":"c1","rule":"bolted","args":{
+                "p1": part("machine", "base"),
+                "p2": part("machine", "rotor"),
+                "fasteners": part("machine", "bolt_1"),
+                "size": {"token": {"text": "M8"}}
+            }}]
+        }));
+        let (_, diagnostics) = bind(&req, &snap);
+        let d = diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::EBindFastenerMissing)
+            .expect("missing metadata diagnostic");
+        assert!(
+            matches!(&d.fix, Some(Fix::EditSource { path, proposed, .. })
+                if path.as_deref() == Some("hardware.py")
+                    && proposed.as_deref() == Some("fastener=dict(kind=\"bolt\", size=\"M8\", mates=[\"base\", \"rotor\"])")
+            ),
+            "fix: {:?}",
+            d.fix
         );
     }
 }

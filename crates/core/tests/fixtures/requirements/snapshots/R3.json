@@ -1,0 +1,58 @@
+{
+  "models": [
+    {
+      "model": {
+        "entry": "frame.py",
+        "builder": "frame"
+      },
+      "built": {
+        "fingerprint": "fp-frame-slab",
+        "parts": [
+          {
+            "name": "slab",
+            "geometry_hash": "h-slab"
+          },
+          {
+            "name": "upright_near",
+            "geometry_hash": "h-upright_near"
+          },
+          {
+            "name": "upright_far",
+            "geometry_hash": "h-upright_far"
+          },
+          {
+            "name": "flange_bolt_1",
+            "geometry_hash": "h-flange_bolt_1",
+            "fastener": {
+              "kind": "bolt",
+              "size": "M8",
+              "length": 20.0,
+              "mates": ["slab", "upright_near"]
+            }
+          },
+          {
+            "name": "flange_bolt_2",
+            "geometry_hash": "h-flange_bolt_2",
+            "fastener": {
+              "kind": "bolt",
+              "size": "M8",
+              "length": 20.0,
+              "mates": ["slab", "upright_near"]
+            }
+          },
+          {
+            "name": "stub_nut_1",
+            "geometry_hash": "h-stub_nut_1",
+            "fastener": {
+              "kind": "nut",
+              "size": "M8"
+            }
+          }
+        ],
+        "params": [],
+        "joints": [],
+        "constants": []
+      }
+    }
+  ]
+}

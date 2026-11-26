@@ -1,0 +1,108 @@
+{
+  "models": [
+    {
+      "model": {
+        "entry": "pcb.py",
+        "builder": "pcb"
+      },
+      "built": {
+        "fingerprint": "fp-pcb",
+        "parts": [
+          {
+            "name": "pcb",
+            "geometry_hash": "h-pcb-model"
+          }
+        ],
+        "params": [],
+        "joints": [],
+        "constants": []
+      }
+    },
+    {
+      "model": {
+        "entry": "case.py",
+        "builder": "case"
+      },
+      "built": {
+        "fingerprint": "fp-case",
+        "parts": [
+          {
+            "name": "case",
+            "geometry_hash": "h-case-model"
+          }
+        ],
+        "params": [],
+        "joints": [],
+        "constants": []
+      }
+    },
+    {
+      "model": {
+        "entry": "device.py",
+        "builder": "device"
+      },
+      "built": {
+        "fingerprint": "fp-device",
+        "parts": [
+          {
+            "name": "pcb",
+            "geometry_hash": "h-pcb-placed"
+          },
+          {
+            "name": "pcb/board",
+            "geometry_hash": "h-board"
+          },
+          {
+            "name": "pcb/J1",
+            "geometry_hash": "h-j1"
+          },
+          {
+            "name": "case",
+            "geometry_hash": "h-case-placed"
+          }
+        ],
+        "params": [],
+        "joints": [],
+        "constants": [],
+        "features": [
+          {
+            "part": "case",
+            "name": "inner_walls",
+            "entity": "face",
+            "count": 4,
+            "hash": "h-inner-walls"
+          },
+          {
+            "part": "case",
+            "name": "usb_cutout",
+            "entity": "face",
+            "count": 1,
+            "hash": "h-usb-cutout"
+          }
+        ],
+        "placements": {
+          "pcb": {
+            "method": "place",
+            "on": {
+              "kind": "part",
+              "part": "case"
+            },
+            "align": "center",
+            "offset_mm": 0.0,
+            "origin": {
+              "entry": "pcb.py",
+              "builder": "pcb"
+            }
+          },
+          "case": {
+            "method": "source",
+            "origin": {
+              "entry": "case.py",
+              "builder": "case"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

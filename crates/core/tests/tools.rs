@@ -13,6 +13,17 @@ fn versioned_schema_matches_rust_contract() {
         assert_eq!(tool.input_schema["additionalProperties"], false);
     }
 }
+#[test]
+#[ignore = "writes the locked tool schema"]
+fn regenerate_schema_snapshot() {
+    let locked = json!({"protocol_version":1,"tools":definitions()});
+    let path = format!(
+        "{}/tests/fixtures/tool-schema-v1.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::write(path, serde_json::to_string_pretty(&locked).unwrap() + "\n").unwrap();
+}
+
 #[tokio::test]
 async fn transport_identity_and_explicit_workspace_are_enforced() {
     let dir = tempfile::tempdir().unwrap();
@@ -120,10 +131,7 @@ async fn large_source_can_be_searched_and_read_in_bounded_pages() {
 
     let mut paged = args.clone();
     paged["paged"] = json!(true);
-    let page = core
-        .dispatch(&context, "read_source", paged)
-        .await
-        .unwrap();
+    let page = core.dispatch(&context, "read_source", paged).await.unwrap();
     assert_eq!(page["hash"], hit["hash"]);
     assert_eq!(page["next_line"], 1);
     let prefix = page["source"].as_str().unwrap();

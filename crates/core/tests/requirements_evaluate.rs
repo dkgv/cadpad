@@ -3,8 +3,9 @@
 use cadpad_core::requirements::evaluate::{MAX_FAILING_STATES, RESULT_FORMAT};
 use cadpad_core::requirements::findings::FindingState;
 use cadpad_core::requirements::manifest::{ChipLink, FeatureLink, Manifest};
-use cadpad_core::requirements::plan::{ClaimPlan, Job, Plan, Requires};
+use cadpad_core::requirements::plan::{ClaimPlan, EntityArg, Job, Plan, Requires};
 use cadpad_core::requirements::relink::{ChangeKind, Relink};
+use cadpad_core::requirements::snapshot::FeatureSource;
 use cadpad_core::requirements::worker_plan::{JobOutcome, MeasStatus, collect_results};
 use cadpad_core::requirements::*;
 use serde_json::{Value, json};
@@ -99,6 +100,7 @@ fn synth(
             library_version: "v".into(),
         },
         primitive: primitive.into(),
+        args: BTreeMap::new(),
         pairing,
         quantifier,
         cmp,
@@ -110,6 +112,8 @@ fn synth(
                 state: i,
                 a: vec![DOOR.into()],
                 b: vec![FRAME.into()],
+                a_entities: vec![],
+                b_entities: vec![],
                 allowed: None,
             })
             .collect(),
@@ -130,6 +134,7 @@ fn outcome(status: MeasStatus, value: Option<f64>) -> JobOutcome {
     JobOutcome {
         status,
         value,
+        max: None,
         witness: Some(vec![DOOR.into(), FRAME.into()]),
         reason: (status == MeasStatus::Inconclusive).then(|| "pair_time_limit".to_string()),
         slow: vec![],
@@ -180,6 +185,17 @@ fn met_reports_margin_in_the_comparator_unit_and_the_worst_state() {
     let r = eval(&plan, &m, &vals(&[3.0, 1.5, 2.0, 4.0]), 0);
     assert_eq!(r.body.status, RequirementStatus::Met);
     let p = &r.body.primitives[0];
+    assert_eq!(
+        p.accuracy,
+        cadpad_core::requirements::library::Accuracy::Exact
+    );
+    assert!(serde_json::to_value(p).unwrap().get("accuracy").is_none());
+    assert!(
+        serde_json::to_value(&plan.claims[0])
+            .unwrap()
+            .get("args")
+            .is_none()
+    );
     assert_eq!(p.met, Some(true));
     assert_eq!(p.margin, Some(Quantity::new(0.5, Unit::Mm)));
     let w = p.worst.as_ref().unwrap();
@@ -203,6 +219,27 @@ fn met_reports_margin_in_the_comparator_unit_and_the_worst_state() {
     assert_eq!(
         r.body.primitives[0].margin,
         Some(Quantity::new(0.1, Unit::Cm))
+    );
+}
+
+#[test]
+fn proxy_simulation_results_are_labeled_as_proxy() {
+    let (plan, manifest) = synth(
+        "contact",
+        Pairing::Whole,
+        Quantifier::ForAll,
+        Comparator::IsTrue {},
+        false,
+        1,
+    );
+    let result = eval(&plan, &manifest, &vals(&[1.0]), 0);
+    assert_eq!(
+        result.body.primitives[0].accuracy,
+        cadpad_core::requirements::library::Accuracy::Proxy
+    );
+    assert_eq!(
+        serde_json::to_value(&result.body.primitives[0]).unwrap()["accuracy"],
+        "proxy"
     );
 }
 
@@ -1048,6 +1085,9 @@ fn policy_row_needs_review_for_features_subjects_chips_and_versions() {
         entity,
         count,
         hash: hash.into(),
+        source: FeatureSource::Explicit,
+        positional: false,
+        key_size: 0,
     };
     let key = "cabinet.py#cabinet/door#hinge";
     let mut d = drift();
@@ -1081,6 +1121,13 @@ fn policy_row_needs_review_for_features_subjects_chips_and_versions() {
         (r.decision, kinds(&r)),
         (Effect::NeedsReview, vec![ChangeKind::FeatureKind])
     );
+    let mut positional = feature(EntityKind::Face, 1, "fh");
+    positional.positional = true;
+    let r = with(Some(positional));
+    assert_eq!(
+        (r.decision, kinds(&r)),
+        (Effect::NeedsReview, vec![ChangeKind::FeatureSource])
+    );
     let r = with(None);
     assert_eq!(
         (r.decision, kinds(&r)),
@@ -1106,6 +1153,23 @@ fn policy_row_needs_review_for_features_subjects_chips_and_versions() {
     assert_eq!(
         (r.decision, kinds(&r)),
         (Effect::NeedsReview, vec![ChangeKind::ReferenceAmbiguous])
+    );
+
+    // The history resolver publishes the whole verified index for a requested
+    // part, so an old operation name can relink to a renamed history group.
+    let mut d = drift();
+    let mut old = feature(EntityKind::Face, 1, "history-set-hash");
+    old.source = FeatureSource::History;
+    d.approved.features.insert(key.into(), old);
+    let mut idx = BuildIndex::from_snapshot(&snap);
+    let mut renamed = feature(EntityKind::Face, 1, "history-set-hash");
+    renamed.source = FeatureSource::History;
+    idx.features
+        .insert("cabinet.py#cabinet/door#make/hole#2/wall".into(), renamed);
+    let r = relink(&d.approved, None, &idx, &d.settings);
+    assert_eq!(
+        (r.decision, kinds(&r)),
+        (Effect::Run, vec![ChangeKind::AutoRelink])
     );
 
     // Library and settings versions.
@@ -1326,5 +1390,133 @@ fn status_follows_the_precedence_table() {
         })
         .status,
         RequirementStatus::MetPartial
+    );
+}
+
+// ------------------------------------------------------- P2.9–P2.13 primitives
+
+fn gap_outcome(min: f64, max: f64) -> JobOutcome {
+    JobOutcome {
+        status: MeasStatus::Ok,
+        value: Some(min),
+        max: Some(max),
+        witness: None,
+        reason: None,
+        slow: vec![],
+    }
+}
+
+#[test]
+fn gap_bounds_the_min_with_ge_and_the_max_with_le_and_in() {
+    let in_range = || Comparator::In {
+        lo: mm(1.0),
+        hi: mm(3.0),
+    };
+    // `in [lo, hi]`: min >= lo and sampled max <= hi.
+    let (plan, m) = synth(
+        "gap",
+        Pairing::Whole,
+        Quantifier::ForAll,
+        in_range(),
+        false,
+        1,
+    );
+    let status = |o: JobOutcome| eval(&plan, &m, &raw_of(vec![o]), 0).body.status;
+    assert_eq!(status(gap_outcome(1.0, 3.0)), RequirementStatus::Met);
+    assert_eq!(status(gap_outcome(1.0, 3.5)), RequirementStatus::NotMet);
+    assert_eq!(status(gap_outcome(0.5, 2.0)), RequirementStatus::NotMet);
+    // `>=` bounds only the exact minimum; the sampled max is ignored.
+    let (plan, m) = synth("gap", Pairing::Whole, Quantifier::ForAll, ge(1.0), false, 1);
+    assert_eq!(
+        eval(&plan, &m, &raw_of(vec![gap_outcome(1.0, 99.0)]), 0)
+            .body
+            .status,
+        RequirementStatus::Met
+    );
+    // `<=` bounds only the sampled maximum.
+    let (plan, m) = synth(
+        "gap",
+        Pairing::Whole,
+        Quantifier::ForAll,
+        Comparator::Le { value: mm(3.0) },
+        false,
+        1,
+    );
+    let status = |o: JobOutcome| eval(&plan, &m, &raw_of(vec![o]), 0).body.status;
+    assert_eq!(status(gap_outcome(0.0, 3.0)), RequirementStatus::Met);
+    assert_eq!(status(gap_outcome(0.0, 4.0)), RequirementStatus::NotMet);
+}
+
+fn feature_ref(name: &str) -> FeatureRef {
+    FeatureRef::Explicit {
+        part: PartRef {
+            model: ModelRef {
+                entry: "cabinet.py".into(),
+                builder: "cabinet".into(),
+            },
+            part: PartName::Name("door".into()),
+        },
+        name: name.into(),
+    }
+}
+
+#[test]
+fn feature_entities_and_axis_args_reach_the_worker_spec() {
+    let (mut plan, m) = synth("gap", Pairing::Whole, Quantifier::ForAll, ge(1.0), false, 1);
+    plan.claims[0].jobs[0].a_entities = vec![EntityArg {
+        part: DOOR.into(),
+        feature: Some(feature_ref("hinge")),
+    }];
+    plan.claims[0].jobs[0].b_entities = vec![EntityArg {
+        part: FRAME.into(),
+        feature: None,
+    }];
+    let reqs = build_requests(&plan, &m, &ChunkOptions::default()).unwrap();
+    let spec = &reqs[0].params["states"][0]["measurements"][0];
+    assert_eq!(
+        spec["a"],
+        json!([{"part": "door", "feature": {"kind": "explicit", "name": "hinge"}}])
+    );
+    assert_eq!(spec["b"], json!(["frame"]));
+
+    // overlap_depth with a feature `along` and clearance_along with direction
+    // words exercise the axis argument paths.
+    let (mut plan, m) = synth(
+        "overlap_depth",
+        Pairing::Whole,
+        Quantifier::ForAll,
+        ge(1.0),
+        false,
+        1,
+    );
+    plan.claims[0]
+        .args
+        .insert("along".into(), Arg::Feature(feature_ref("axis")));
+    let reqs = build_requests(&plan, &m, &ChunkOptions::default()).unwrap();
+    assert_eq!(
+        reqs[0].params["states"][0]["measurements"][0]["along"],
+        json!({"feature": {"kind": "explicit", "name": "axis"}, "on": "door"})
+    );
+
+    let (mut plan, m) = synth(
+        "clearance_along",
+        Pairing::Whole,
+        Quantifier::ForAll,
+        ge(1.0),
+        false,
+        1,
+    );
+    plan.claims[0].args.insert(
+        "directions".into(),
+        Arg::List(vec![
+            Arg::Text("+x".into()),
+            Arg::Text("-y".into()),
+            Arg::Axis(AxisRef::Z),
+        ]),
+    );
+    let reqs = build_requests(&plan, &m, &ChunkOptions::default()).unwrap();
+    assert_eq!(
+        reqs[0].params["states"][0]["measurements"][0]["dirs"],
+        json!(["x", [0.0, -1.0, 0.0], "z"])
     );
 }

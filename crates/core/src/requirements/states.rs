@@ -1,7 +1,9 @@
 //! Concrete states: a [`StateSpace`] expanded into the exact states a plan
 //! runs, in a fixed order. Sampling is explicit: `a, a+s, ..., b` with `b`
 //! always included.
-use super::ir::{AxisRef, JointRef, Literal, ParamRef, ParamValues, StateSpace, Sweep, Target};
+use super::ir::{
+    AxisRef, JointRef, Literal, ParamRef, ParamValues, StateSpace, Sweep, Target, When,
+};
 use super::quantity::Quantity;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -10,6 +12,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StateValue {
+    Simulate {
+        model: super::ir::ModelRef,
+        simulation: crate::motion_tests::SimulationState,
+        sample_index: usize,
+        when: When,
+    },
     Param {
         param: ParamRef,
         value: Quantity,
@@ -134,6 +142,31 @@ pub fn expand_states(space: &StateSpace) -> Vec<ConcreteState> {
                 })
             })
             .collect(),
+        StateSpace::Simulate {
+            model,
+            simulation,
+            when,
+        } => {
+            let ticks: usize = simulation.actions.iter().map(|a| a.ticks as usize).sum();
+            let indices: Box<dyn Iterator<Item = usize>> = match when {
+                When::Always {} | When::Eventually {} => Box::new(0..=ticks),
+                When::End {} => Box::new(std::iter::once(ticks)),
+                When::At { time } => Box::new(std::iter::once(
+                    (time.quantity().internal_value() / crate::dynamics::TIMESTEP_S).round()
+                        as usize,
+                )),
+            };
+            indices
+                .map(|sample_index| {
+                    one(StateValue::Simulate {
+                        model: model.clone(),
+                        simulation: simulation.clone(),
+                        sample_index,
+                        when: when.clone(),
+                    })
+                })
+                .collect()
+        }
         StateSpace::Product { factors } => {
             let mut acc = vec![ConcreteState::default()];
             for f in factors {
@@ -176,6 +209,7 @@ impl ConcreteState {
 mod tests {
     use super::*;
     use crate::requirements::Unit;
+    use std::collections::BTreeMap;
 
     fn lit(v: f64, u: Unit) -> Literal {
         Literal::new(v, u)
@@ -218,6 +252,54 @@ mod tests {
             assert_eq!(expand_states(&s).len() as u64, s.state_count().unwrap());
         }
         assert!(vals(&range(0.0, 1.0, 0.0)).is_empty());
+    }
+
+    #[test]
+    fn simulation_temporal_selection_expands_to_fixed_tick_samples() {
+        let space = |when| StateSpace::Simulate {
+            model: super::super::ir::ModelRef {
+                entry: "assembly".into(),
+                builder: "cad".into(),
+            },
+            simulation: crate::motion_tests::SimulationState {
+                initial_coordinates: BTreeMap::new(),
+                simulation: crate::dynamics::Definition {
+                    gravity_m_s2: [0.0, 0.0, 0.0],
+                    bodies: BTreeMap::new(),
+                },
+                actions: vec![
+                    crate::motion_tests::Action {
+                        ticks: 2,
+                        motors: vec![],
+                        loads: BTreeMap::new(),
+                    },
+                    crate::motion_tests::Action {
+                        ticks: 1,
+                        motors: vec![],
+                        loads: BTreeMap::new(),
+                    },
+                ],
+            },
+            when,
+        };
+        let samples = |s: StateSpace| {
+            expand_states(&s)
+                .iter()
+                .map(|state| match &state.values[0] {
+                    StateValue::Simulate { sample_index, .. } => *sample_index,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(samples(space(When::End {})), [3]);
+        assert_eq!(samples(space(When::Always {})), [0, 1, 2, 3]);
+        assert_eq!(samples(space(When::Eventually {})), [0, 1, 2, 3]);
+        assert_eq!(
+            samples(space(When::At {
+                time: Literal::new(crate::dynamics::TIMESTEP_S, Unit::S)
+            })),
+            [1]
+        );
     }
 
     #[test]

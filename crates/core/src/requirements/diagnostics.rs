@@ -231,6 +231,10 @@ impl Diagnostic {
         self.fix = Some(fix);
         self
     }
+    pub fn with_fix_opt(mut self, fix: Option<Fix>) -> Self {
+        self.fix = fix;
+        self
+    }
     pub fn is_error(&self) -> bool {
         self.severity == Severity::Error
     }

@@ -23,6 +23,7 @@ import {ExternalChangesPanel} from './external-changes';
 import {AppAlert} from './app-alert';
 import {ProjectExplorer} from './explorer';
 import {FOLDER_DRAG_TYPE} from './source-catalog';
+import {MentionTextarea,projectFileMentions,projectFiles,projectFolders,type MentionItem} from './mention-textarea';
 import {resetSourceCatalogCache} from './source-catalog';
 import {QuickModelSelector} from './quick-model';
 import {LiveReply,FinishedReply,Markdown,type AgentStep} from './agent-steps';
@@ -31,6 +32,7 @@ import {ViewCube,type ViewCubeDirection} from './view-cube';
 import {AccountBadge,type CloudAccount} from './account-badge';
 import {ImageToModel,readModelImage,type ModelImage} from './image-to-model';
 import {SettingsDialog,type AgentSettings,type CloudSettings,type McpSettings,type ModelChoice} from './settings-dialog';
+import {SearchableModelSelect,type ModelOption} from './model-select';
 
 const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren>(function ConversationScroll({children},forwardedRef){
   const nodeRef=useRef<HTMLDivElement|null>(null);
@@ -151,6 +153,12 @@ export function App({host}:{host?:SessionHost}={}) {
       else setFolderReferences(current=>current.includes(path)?current:[...current,path]);
     }
     setPanel('assistant');
+  }
+  function removeFolderReference(path:string){setFolderReferences(current=>current.filter(item=>item!==path));}
+  function referenceMention(item:MentionItem){
+    if(item.kind==='folder'){referenceFolder(item.path);return;}
+    const parent=item.path.split('/').slice(0,-1).join('/');
+    if(parent)referenceFolder(parent);else setPanel('assistant');
   }
   function setReferences(next:Entity[]){referencesNow.current=next;updateReferences(next);}
   function choosePrimary(entity:Entity|null){const current=currentProject.current;selectionIntent.current=entity&&current?{workspace:current.workspace_id,entity}:null;updateSelection(entity);}
@@ -348,6 +356,12 @@ export function App({host}:{host?:SessionHost}={}) {
   const catalogBackend=providerOpen?agentBackend:assistantVisible?savedBackend:undefined;
   const agentModels=agentCatalog?.backend===agentBackend?agentCatalog.models:null;
   const composerModels=agentCatalog&&agentCatalog.backend===savedBackend?agentCatalog.models:[];
+  const savedBackendIsDirect=savedBackend==='anthropic_api'||savedBackend==='openrouter_api';
+  const composerModelOptions:ModelOption[]=[
+    ...(!savedBackendIsDirect?[{value:'',label:'Provider default'}]:[]),
+    ...(savedModel&&!composerModels.some(model=>model.id===savedModel)?[{value:savedModel,label:savedModel}]:[]),
+    ...composerModels.map(model=>({value:model.id,label:model.label,detail:model.id===model.label?undefined:model.id})),
+  ];
   const liveTurn=useRef<AgentTurn|null>(null);
   const pendingTurnChat=useRef(new Map<string,string>());
   const settledTurns=useRef(new Set<string>());
@@ -1334,7 +1348,7 @@ export function App({host}:{host?:SessionHost}={}) {
     const target=model?`the project model ${model.builder} in ${model.entry}`:'this design';
     const others=mentioned.filter(item=>!model||item.entry!==model.entry||item.builder!==model.builder);
     const mentions=mentioned.length>1||others.length?`\nThe requirement mentions these project models (as @[Label](entry#builder) tokens): ${mentioned.map(item=>`${item.builder} in ${item.entry}`).join('; ')}. Consider every one of them when inspecting and writing checks.`:'';
-    const request=(id?`Edit the requirement with ID ${id} for ${target}. Use control_requirements: list first and read its print, then compile the changed IR.\n`:`Create a requirement for ${target} from this free-text requirement:\n`)+intent+mentions+'\nUse control_requirements: compile the IR (keep @[Label](entry#builder) chips as written and give every number a source), apply edit_ir fixes and propose edit_source changes. If ask_user or E_VAGUE remains, save the draft with its diagnostics so I can answer in Requirements. When compilation succeeds, save the draft for review. Never invent numbers: take them from my text, the model or the library, or propose them marked inferred. Do not run it and do not approve it: I review the print and approve it myself. Explain the requirement only from its print. Geometry only.';
+    const request=(id?`Edit the requirement with ID ${id} for ${target}. Use control_requirements: list first and read its print, then compile the changed IR.\n`:`Create a requirement for ${target} from this free-text requirement:\n`)+intent+mentions+'\nUse control_requirements: compile the IR (keep @[Label](entry#builder) chips as written and give every number a source), apply edit_ir fixes and propose edit_source changes (a claim that names parts of several models needs an assembly: follow its skeleton, publishing each part with origin="entry.py#builder" and placing it with place(), then retarget the claim). If ask_user or E_VAGUE remains, save the draft with its diagnostics so I can answer in Requirements. When compilation succeeds, save the draft for review. Never invent numbers: take them from my text, the model or the library, or propose them marked inferred. Do not run it and do not approve it: I review the print and approve it myself. Explain the requirement only from its print. Geometry only.';
     setPanel('assistant');setPrompt(request);await sendPrompt(request,undefined,undefined,view?.workspace);
   }
   /** Send the user's answer, allowance request or rule removal for a requirement to the assistant (the UI never edits the IR). */
@@ -1480,16 +1494,16 @@ export function App({host}:{host?:SessionHost}={}) {
     onVersion={index=>void chooseCloudVersion(index)} onDismissVersions={()=>setCloudVersions(null)}/>);
   // Requirements belong to the project: the shared sidebar shows them for every model.
   const requirementModels=useProjectModels(host?.chrome||!host?project?.workspace_id:undefined,host?.chrome||!host?project?.revision:undefined);
-  const requirementsBody=project&&<Requirements project={project.workspace_id} projectRevision={project.revision} projectRunnable={project.model.parts.length>0}
+  const requirementsBody=project&&<Requirements project={project.workspace_id} projectRunnable={project.model.parts.length>0}
     models={requirementModels} focusedModel={host?host.focusModelEntry??null:null}
     modelViews={()=>host?.modelViews?.()??[]}
-    ensureView={host?.ensureModelView?model=>host.ensureModelView!(model.entry,model.builder):undefined}
-    openModel={host?.onOpenModel?model=>host.onOpenModel!(model.entry,model.builder):undefined}
-    onSnapshot={snapshot=>{if(snapshot.workspace_id!==project.workspace_id)return;setSimulationRunning(false);setPlaybackRunning(false);pendingTargets.current.clear();receiveMotion(snapshot);}}
     onChanged={()=>{const workspace=project.workspace_id;void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace&&currentProject.current?.revision===next.revision){currentProject.current=next;setProject(next);}}).catch(e=>setError(message(e)));}}
     agentBusy={agentWorking||agentSending} onCreate={(intent,model,mentioned)=>prepareMotionTest(intent,model,undefined,mentioned)} onEdit={(id,intent,model,mentioned)=>prepareMotionTest(intent,model,id,mentioned)} onAsk={askAboutRequirement}/>;
   const requirementsPanel=(<aside className="motion-sidebar inspector-page" id="panel-test" aria-label="Requirements"><div className="motion-sidebar-content">{requirementsBody}</div></aside>);
   const explorer=displayProject||project;
+  const projectPaths=projectFiles(explorer?.files??[]);
+  const folderOptions=projectFolders(projectPaths);
+  const mentionItems:MentionItem[]=[...folderOptions.map(path=>({kind:'folder' as const,path})),...projectFileMentions(projectPaths)];
   const selectedMesh=explorer?.model.parts.some(part=>part.instance_id===selection?.instance_id&&part.accuracy==='mesh');
   const modelPanel=(          <aside className="model-browser explorer-panel inspector-page" id="panel-model" aria-label="Explorer" hidden={!host&&!modelOpen}>
             {!host&&<PanelResizeHandle panel="model" value={panelSizes.model} onChange={value=>resizePanel('model',value)}/>}
@@ -1589,7 +1603,7 @@ export function App({host}:{host?:SessionHost}={}) {
                   {live&&!!agentTurn?.artifacts.length&&<section className="agent-artifacts">{agentTurn.artifacts.map(artifact=><button key={artifact.handle} onClick={()=>saveAgentArtifact(artifact)}>Save {artifact.format} export</button>)}</section>}
                 </div>
               </ConversationScroll>
-              <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&selectionNotice&&<div className="composer-notice" role="status">{selectionNotice}<button type="button" className="icon-button" aria-label="Dismiss selection notice" onClick={()=>setSelectionNotice('')}><Icon name="close" size={12}/></button></div>}{activePane&&!!composerReferences.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>remoteSelection?focusedSelection?.toggleOmitted(chip.entity):toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&!!folderReferences.length&&<ul className="composer-references" aria-label="Folders sent with your message">{folderReferences.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span><button type="button" className="reference-remove" aria-label={`Remove folder ${path}`} onClick={()=>setFolderReferences(current=>current.filter(item=>item!==path))}><Icon name="close" size={11}/></button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="composer-image-action" title="Generate an editable model from this image with Cadpad Cloud. Your message is sent as guidance." disabled={!project||working} onClick={()=>void attachedImageToCad(chatId)}><Icon name="sparkles" size={12}/>{cloudGenerating?'Generating…':'Turn into model'}</button><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<textarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&composerReferences.length?(composerReferences.length>1?'Ask about A, B…  (⇧-click to add or remove)':'Ask about this selection…  (⇧-click to add more)'):activePane&&attachedImage?'Ask about this image…':activePane&&folderReferences.length?(folderReferences.length>1?'Ask about these folders…':'Ask about this folder…'):'Ask for a part or a change…'} value={draft} onPaste={event=>{
+              <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&selectionNotice&&<div className="composer-notice" role="status">{selectionNotice}<button type="button" className="icon-button" aria-label="Dismiss selection notice" onClick={()=>setSelectionNotice('')}><Icon name="close" size={12}/></button></div>}{activePane&&!!composerReferences.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>remoteSelection?focusedSelection?.toggleOmitted(chip.entity):toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&!!folderReferences.length&&<ul className="composer-references composer-folder-references" aria-label="Folders sent with your message">{folderReferences.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span><button type="button" className="reference-remove" aria-label={`Remove folder ${path}`} onClick={()=>removeFolderReference(path)}><Icon name="close" size={11}/></button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="composer-image-action" title="Generate an editable model from this image with Cadpad Cloud. Your message is sent as guidance." disabled={!project||working} onClick={()=>void attachedImageToCad(chatId)}><Icon name="sparkles" size={12}/>{cloudGenerating?'Generating…':'Turn into model'}</button><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<MentionTextarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&composerReferences.length?(composerReferences.length>1?'Ask about A, B…  Type @ to add files or folders':'Ask about this selection…  Type @ to add files or folders'):activePane&&attachedImage?'Ask about this image…  Type @ to add files or folders':activePane&&folderReferences.length?(folderReferences.length>1?'Ask about these folders…  Type @ to add more':'Ask about this folder…  Type @ to add more'):'Ask for a part or a change…  Type @ to add files or folders'} value={draft} items={mentionItems} openModels={(host?.modelViews?.()??[]).map(view=>view.entry)} onValueChange={value=>setDraft(chatId,value)} onMention={referenceMention} onPaste={event=>{
                 const text=event.clipboardData.getData('text/plain');
                 const pasted=[...event.clipboardData.files].find(item=>item.type.startsWith('image/'));
                 if(!text&&pasted){event.preventDefault();void encodeReferenceImage(pasted).then(image=>{setAttachedImage(image);setError('');}).catch(error=>setError(message(error)));return;}
@@ -1598,13 +1612,10 @@ export function App({host}:{host?:SessionHost}={}) {
                 const input=event.currentTarget,start=input.selectionStart,end=input.selectionEnd;
                 setDraft(chatId,draft.slice(0,start)+text+draft.slice(end));
                 requestAnimationFrame(()=>{input.selectionStart=input.selectionEnd=start+text.length;});
-              }} onFocus={()=>{setPanel('assistant');if(chatId!==activeChatId&&chatId!=='new')void changeChat('select',chatId);}} onChange={event=>setDraft(chatId,event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();if(!agentWorking&&!agentSending&&!chatBusy){setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}}}/><div className="composer-actions"><div className="composer-options">
+              }} onFocus={()=>{setPanel('assistant');if(chatId!==activeChatId&&chatId!=='new')void changeChat('select',chatId);}} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();if(!agentWorking&&!agentSending&&!chatBusy){setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}}}/>
+<div className="composer-actions"><div className="composer-options">
                 <button type="button" className="composer-settings" disabled={savingProvider} onClick={()=>setProviderOpen(true)}><Icon name="sliders" size={14}/>Settings</button>
-                <select className="composer-model" aria-label="Assistant model" title={composerModels.find(model=>model.id===savedModel)?.label||savedModel||'Assistant model'} value={savedModel} disabled={!savedBackend||savingProvider||agentSending||agentWorking} onChange={event=>void saveProvider(event.target.value)}>
-                  {savedBackend==='anthropic_api'?(!savedModel&&<option value="" disabled>Choose a model</option>):<option value="">Provider default</option>}
-                  {savedModel&&!composerModels.some(model=>model.id===savedModel)&&<option value={savedModel}>{savedModel}</option>}
-                  {composerModels.map(model=><option key={model.id} value={model.id}>{model.label}</option>)}
-                </select>
+                <SearchableModelSelect className="composer-model" ariaLabel="Assistant model" value={savedModel} options={composerModelOptions} placeholder={savedBackendIsDirect?'Choose a model':'Provider default'} loading={!!savedBackend&&agentCatalog?.backend!==savedBackend} disabled={!savedBackend||savingProvider||agentSending||agentWorking} onChange={value=>void saveProvider(value)}/>
               </div>{agentWorking||agentSending?<button className="send-prompt" title="Stop assistant" aria-label="Stop assistant" disabled={agentStartCancelling||agentTurn?.state==='cancelling'} type="button" onClick={()=>void stopAgent()}><span className="stop-glyph" aria-hidden="true"/></button>:<button className="send-prompt" title="Send message" aria-label="Send message" disabled={!project||!draft.trim()||chatBusy||savingProvider} type="submit"><Icon name="arrowUp" size={18}/></button>}</div></div></form>
             </div>;
           }}
@@ -1627,7 +1638,7 @@ export function App({host}:{host?:SessionHost}={}) {
       mcpSettings={mcpSettings}
       models={agentModels}
       onClose={()=>setProviderOpen(false)}
-      onBackend={setAgentBackend}
+      onBackend={value=>{setAgentBackend(value);setModelId('');}}
       onModel={setModelId}
       onApiKey={setApiKey}
       onSave={()=>void saveProvider()}

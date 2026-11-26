@@ -1,5 +1,34 @@
 {
   "$defs": {
+    "Action": {
+      "additionalProperties": false,
+      "properties": {
+        "loads": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Load"
+          },
+          "type": "object"
+        },
+        "motors": {
+          "items": {
+            "$ref": "#/$defs/Motor"
+          },
+          "type": "array"
+        },
+        "ticks": {
+          "description": "1/120 s ticks. Motor targets persist between actions; loads replace.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ticks",
+        "motors",
+        "loads"
+      ],
+      "type": "object"
+    },
     "AllowKind": {
       "oneOf": [
         {
@@ -339,6 +368,60 @@
         }
       ]
     },
+    "Body": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "friction": {
+              "format": "double",
+              "type": "number"
+            },
+            "restitution": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "fixed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "friction",
+            "restitution"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "friction": {
+              "format": "double",
+              "type": "number"
+            },
+            "mass": {
+              "$ref": "#/$defs/Mass"
+            },
+            "restitution": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "dynamic",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "mass",
+            "friction",
+            "restitution"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "Claim": {
       "additionalProperties": false,
       "description": "One checkable statement: a library rule or primitive applied to arguments.",
@@ -517,6 +600,31 @@
       ],
       "type": "object"
     },
+    "Definition": {
+      "additionalProperties": false,
+      "properties": {
+        "bodies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Body"
+          },
+          "type": "object"
+        },
+        "gravity_m_s2": {
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "gravity_m_s2",
+        "bodies"
+      ],
+      "type": "object"
+    },
     "EntityKind": {
       "description": "Kind of a geometric entity.",
       "enum": [
@@ -555,6 +663,10 @@
           "additionalProperties": false,
           "description": "History name: the operation that created the entity, e.g.\n`make_door/hole#1/wall`.",
           "properties": {
+            "hash": {
+              "description": "Exact group hash returned by opt-in history tracing.",
+              "type": "string"
+            },
             "kind": {
               "const": "history",
               "type": "string"
@@ -564,12 +676,18 @@
             },
             "part": {
               "$ref": "#/$defs/PartRef"
+            },
+            "positional": {
+              "default": false,
+              "description": "Positional names are diagnostic evidence only, never stable refs.",
+              "type": "boolean"
             }
           },
           "required": [
             "kind",
             "part",
-            "name"
+            "name",
+            "hash"
           ],
           "type": "object"
         },
@@ -646,6 +764,75 @@
       ],
       "type": "object"
     },
+    "Load": {
+      "additionalProperties": false,
+      "description": "Persistent world-space load. Force acts at the body's center of mass;\ntorque is an independent couple, not an application-point offset.",
+      "properties": {
+        "force_n": {
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "torque_nm": {
+          "items": {
+            "format": "double",
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "force_n",
+        "torque_nm"
+      ],
+      "type": "object"
+    },
+    "Mass": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mass_kg": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "kilograms",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "mass_kg"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "density_kg_m3": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": {
+              "const": "density",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "density_kg_m3"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ModelRef": {
       "additionalProperties": false,
       "description": "A model in the project's source catalog: source file plus builder ID.\n`@cabinet`.",
@@ -660,6 +847,43 @@
       "required": [
         "entry",
         "builder"
+      ],
+      "type": "object"
+    },
+    "Motor": {
+      "additionalProperties": false,
+      "properties": {
+        "damping": {
+          "format": "double",
+          "type": "number"
+        },
+        "joint_id": {
+          "type": "string"
+        },
+        "max_force": {
+          "description": "Force in N for prismatic joints; torque in N m for revolute joints.",
+          "format": "double",
+          "type": "number"
+        },
+        "stiffness": {
+          "format": "double",
+          "type": "number"
+        },
+        "target": {
+          "format": "double",
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "joint_id",
+        "target",
+        "unit",
+        "stiffness",
+        "damping",
+        "max_force"
       ],
       "type": "object"
     },
@@ -849,6 +1073,34 @@
       "description": "A named set from the requirement's `sets` table (`let turntable = ...`).",
       "type": "string"
     },
+    "SimulationState": {
+      "additionalProperties": false,
+      "description": "Reusable input portion of a motion test, embedded by requirement simulation\nstates. Keeps the legacy action and dynamics payloads byte-compatible.",
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/Action"
+          },
+          "type": "array"
+        },
+        "initial_coordinates": {
+          "additionalProperties": {
+            "format": "double",
+            "type": "number"
+          },
+          "type": "object"
+        },
+        "simulation": {
+          "$ref": "#/$defs/Definition"
+        }
+      },
+      "required": [
+        "initial_coordinates",
+        "simulation",
+        "actions"
+      ],
+      "type": "object"
+    },
     "Source": {
       "description": "Where a value, claim, allowance or set membership comes from (spec §3.6).\nChecked mechanically; anything not from the text, model or library must be\n`inferred`, which is marked in the review and confirmed by approving it.",
       "oneOf": [
@@ -984,6 +1236,32 @@
             "kind",
             "joint",
             "range"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "One trace from the existing proxy dynamics engine, tied to one model.",
+          "properties": {
+            "kind": {
+              "const": "simulate",
+              "type": "string"
+            },
+            "model": {
+              "$ref": "#/$defs/ModelRef"
+            },
+            "simulation": {
+              "$ref": "#/$defs/SimulationState"
+            },
+            "when": {
+              "$ref": "#/$defs/When"
+            }
+          },
+          "required": [
+            "kind",
+            "model",
+            "simulation",
+            "when"
           ],
           "type": "object"
         },
@@ -1159,6 +1437,67 @@
         "reason"
       ],
       "type": "object"
+    },
+    "When": {
+      "description": "Which proxy sample(s) of a simulation trace a primitive checks.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "end",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "at",
+              "type": "string"
+            },
+            "time": {
+              "$ref": "#/$defs/Literal"
+            }
+          },
+          "required": [
+            "kind",
+            "time"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "always",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "eventually",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",

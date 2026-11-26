@@ -23,6 +23,7 @@ async function load(){
   b.onLoad({filter:/.*/,namespace:'viewer-stub'},()=>({contents:`export class CadViewport {
    load(model, revision, artifact, workspace) { return globalThis.__replayViewer.load(model, revision, artifact, workspace); }
    applyRequirementMoves(moves) { globalThis.__replayViewer.apply(moves); }
+   applyRequirementPoses(poses) { globalThis.__replayViewer.applyPoses(poses); }
    dispose() { globalThis.__replayViewer.dispose(); }
   }`,loader:'js'}));
  }};
@@ -82,6 +83,38 @@ test('replay loads the evaluated workspace and releases it when the preview clos
   window.window.close();
   delete globalThis.__replayViewer;
   delete globalThis.__invoke;
+ }
+});
+
+test('simulation replay applies the selected sampled poses',async()=>{
+ const {module:m,cleanup}=await load();
+ const window=dom();
+ const {createRoot}=await import('react-dom/client');
+ const root=createRoot(document.getElementById('root'));
+ const poses={shoe:{position:[1,2,3],quaternion:[0,0,0,1]}};
+ const calls=[];
+ globalThis.__invoke=async(command,args)=>{
+  calls.push([command,args]);
+  if(command==='project')return {workspace_id:'model',revision:'sample-r1',model:{parts:[]}};
+  if(command==='artifact')return new ArrayBuffer(0);
+ };
+ globalThis.__replayViewer={
+  load:async(model,revision,artifact,workspace)=>{calls.push(['load',{model,revision,workspace}]);await artifact('mesh');},
+  apply:values=>calls.push(['moves',values]),
+  applyPoses:values=>calls.push(['poses',values]),
+  dispose:()=>calls.push(['dispose']),
+ };
+ try{
+  await act(async()=>root.render(React.createElement(m.RequirementReplayPanel,{
+   replay:{requirement_id:'req-1',primitive_id:'c1',state_index:3,mode:'simulation',moves:[],simulation_poses:poses,view:{workspace:'model',revision:'sample-r1',temporary:false}},
+   onClose:()=>root.render(null),
+  })));
+  assert.deepEqual(calls.at(-1),['poses',poses]);
+  assert.match(document.querySelector('.rq-replay header .muted').textContent,/Simulation sample/);
+ }finally{
+  await act(async()=>root.unmount());
+  window.window.close();
+  await cleanup();
  }
 });
 

@@ -1,4 +1,6 @@
-use cadpad_core::requirements::{Requirement, ir_schema, parse::Parsed, parse::parse_quantities};
+use cadpad_core::requirements::{
+    Requirement, Source, ir_schema, parse::Parsed, parse::parse_quantities,
+};
 use serde_json::Value;
 
 macro_rules! fixtures {
@@ -94,7 +96,11 @@ fn spans_cover_text_and_numbers_in_text_claims_parse() {
     for (name, text) in FIXTURES {
         let r: Requirement = serde_json::from_str(text).unwrap();
         for claim in &r.claims {
-            let span = claim.span.unwrap();
+            // Inferred claims (e.g. placement seating) have no prose span.
+            let Some(span) = claim.span else {
+                assert_eq!(claim.source, Source::Inferred, "{name} {}", claim.id);
+                continue;
+            };
             let slice: String = r
                 .text
                 .chars()

@@ -5,6 +5,7 @@
 use super::ir::{EntityKind, ModelRef};
 use super::parse::parse_unit;
 use super::quantity::{Quantity, Unit};
+use super::suggestions::{ShapeSignature, signature_from_part};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,6 +35,17 @@ pub struct PartInfo {
     /// Explicit fastener properties published by the worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fastener: Option<crate::geometry::FastenerMetadata>,
+    /// Managed STEP inputs used by this published part, recorded as exact
+    /// workspace-relative path and content digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_assets: Vec<SourceAssetInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceAssetInfo {
+    pub path: String,
+    pub sha256: String,
 }
 
 /// A model parameter with its declared bounds.
@@ -53,6 +65,9 @@ pub struct ParamInfo {
 #[serde(deny_unknown_fields)]
 pub struct JointInfo {
     pub name: String,
+    /// Native joint coordinate unit (`m` or `rad`); absent only in older catalogs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<[f64; 2]>,
 }
@@ -67,6 +82,15 @@ pub struct ConstantInfo {
 }
 
 /// A feature published with `show(..., features={...})`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureSource {
+    #[default]
+    Explicit,
+    History,
+    Geometric,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FeatureInfo {
@@ -76,6 +100,67 @@ pub struct FeatureInfo {
     /// Number of entities the name selects.
     pub count: u64,
     pub hash: String,
+    #[serde(default, skip_serializing_if = "is_explicit_feature")]
+    pub source: FeatureSource,
+    /// Positional history hints are never accepted as stable references.
+    #[serde(default)]
+    pub positional: bool,
+}
+
+impl FeatureInfo {
+    /// Suffix of this feature's manifest key: the bare name for explicit and
+    /// geometric features, `history:<name>` for history names. Matches the
+    /// suffix [`super::bind::feature_ref_key`] produces for the same
+    /// reference.
+    pub fn link_suffix(&self) -> String {
+        match self.source {
+            FeatureSource::History => format!("history:{}", self.name),
+            FeatureSource::Explicit | FeatureSource::Geometric => self.name.clone(),
+        }
+    }
+}
+
+fn is_explicit_feature(value: &FeatureSource) -> bool {
+    *value == FeatureSource::Explicit
+}
+
+/// What a `place()` call targeted: a face, edge or whole part, optionally a
+/// published part's named feature.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementOn {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature: Option<serde_json::Value>,
+}
+
+/// `origin="entry.py#builder"` provenance recorded by `place()`/`show()`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementOrigin {
+    pub entry: String,
+    pub builder: String,
+}
+
+/// How one published part was positioned (spec §3.2/§6.4). `method` is
+/// `place`, `position`, `assembly` or `source`; only `place` records carry
+/// `on`/`align`/`offset_mm`/`mate`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlacementInfo {
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<PlacementOn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_mm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mate: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<PlacementOrigin>,
+    /// Forward-compatible extras the worker may add later.
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -93,6 +178,24 @@ pub struct BuiltModel {
     pub constants: Vec<ConstantInfo>,
     #[serde(default)]
     pub features: Vec<FeatureInfo>,
+    /// Per-part placement records; only present when the build used `place()`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub placements: BTreeMap<String, PlacementInfo>,
+    /// Shape signatures of this build's parts, keyed by part name (spec §3.1).
+    /// Used only to *suggest* candidates for broken references; a signature
+    /// never decides a binding.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub part_signatures: BTreeMap<String, ShapeSignature>,
+    /// Shape signatures of this build's features, keyed `part#suffix` where
+    /// the suffix is [`FeatureInfo::link_suffix`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub feature_signatures: BTreeMap<String, ShapeSignature>,
+    /// Shape signatures the *approved* manifest recorded, keyed
+    /// `entry#builder/...` like [`super::manifest::Manifest::part_signatures`]
+    /// and `feature_signatures`. Suggestion queries only: binding never reads
+    /// them. Empty for requirements that were never approved.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reference_signatures: BTreeMap<String, ShapeSignature>,
 }
 
 impl BuiltModel {
@@ -132,6 +235,22 @@ pub struct WorkspaceSnapshot {
 impl WorkspaceSnapshot {
     pub fn model(&self, model: &ModelRef) -> Option<&ModelSnapshot> {
         self.models.iter().find(|m| &m.model == model)
+    }
+
+    /// Give every built model the shape signatures an approved manifest
+    /// recorded, so broken references can offer signature-ranked suggestions
+    /// (spec §3.1). The map is keyed `entry#builder/...` exactly like the
+    /// manifest's signature maps; it is suggestion data only and never
+    /// participates in binding or hashing.
+    pub fn attach_reference_signatures(&mut self, signatures: &BTreeMap<String, ShapeSignature>) {
+        if signatures.is_empty() {
+            return;
+        }
+        for model in &mut self.models {
+            if let Some(built) = &mut model.built {
+                built.reference_signatures = signatures.clone();
+            }
+        }
     }
 }
 
@@ -193,10 +312,50 @@ pub fn built_from_project(project: &Value) -> Result<BuiltModel, String> {
             .to_string(),
         ..Default::default()
     };
+    // `place()` evidence is emitted at the build-result top level; depending on
+    // the reply shape it lands under `model` or next to it.
+    if let Some(map) = model
+        .get("placements")
+        .or_else(|| project.get("placements"))
+        .and_then(Value::as_object)
+    {
+        for (name, record) in map {
+            match serde_json::from_value::<PlacementInfo>(record.clone()) {
+                Ok(info) => {
+                    built.placements.insert(name.clone(), info);
+                }
+                Err(_) => {
+                    // Unknown shape: keep the raw record rather than drop it.
+                    built.placements.insert(
+                        name.clone(),
+                        PlacementInfo {
+                            method: record["method"].as_str().unwrap_or("unknown").to_string(),
+                            on: None,
+                            align: None,
+                            offset_mm: None,
+                            mate: None,
+                            origin: None,
+                            extra: BTreeMap::from([("raw".to_string(), record.clone())]),
+                        },
+                    );
+                }
+            }
+        }
+    }
     for p in model["parts"].as_array().into_iter().flatten() {
         let Some(name) = p["name"].as_str() else {
             continue;
         };
+        let source_assets = if p["source_assets"].is_null() {
+            Vec::new()
+        } else {
+            serde_json::from_value(p["source_assets"].clone()).map_err(|error| {
+                format!("part {name} has invalid source asset metadata: {error}")
+            })?
+        };
+        built
+            .part_signatures
+            .insert(name.to_string(), signature_from_part(p));
         built.parts.push(PartInfo {
             name: name.to_string(),
             geometry_hash: p["geometry_fingerprint"]["sha256"]
@@ -217,6 +376,7 @@ pub fn built_from_project(project: &Value) -> Result<BuiltModel, String> {
                     })?,
                 )
             },
+            source_assets,
         });
         for (feature, ids) in p["features"].as_object().into_iter().flatten() {
             let kind = &p["feature_kinds"][feature.as_str()];
@@ -232,7 +392,25 @@ pub fn built_from_project(project: &Value) -> Result<BuiltModel, String> {
                 },
                 count: kind["count"].as_u64().unwrap_or(listed),
                 hash: kind["hash"].as_str().unwrap_or_default().to_string(),
+                source: FeatureSource::Explicit,
+                positional: false,
             });
+            // The project reply publishes only the selection's face/edge
+            // counts per feature — enough for a weak signature ranking, not
+            // for histograms (those need an `inspect` reply).
+            let suffix = built
+                .features
+                .last()
+                .map(|info| info.link_suffix())
+                .unwrap_or_default();
+            built.feature_signatures.insert(
+                format!("{name}#{suffix}"),
+                ShapeSignature {
+                    face_count: kind["faces"].as_u64(),
+                    edge_count: kind["edges"].as_u64(),
+                    ..Default::default()
+                },
+            );
         }
     }
     // Constants are raw numbers from the entry file. Their unit is the
@@ -281,6 +459,11 @@ pub fn built_from_project(project: &Value) -> Result<BuiltModel, String> {
         if let Some(id) = j["id"].as_str() {
             built.joints.push(JointInfo {
                 name: id.to_string(),
+                unit: match j["kind"]["type"].as_str() {
+                    Some("prismatic" | "path") => Some("m".into()),
+                    Some("revolute") => Some("rad".into()),
+                    _ => None,
+                },
                 limits: j["limits"]
                     .as_array()
                     .and_then(|l| Some([l.first()?.as_f64()?, l.get(1)?.as_f64()?])),
@@ -351,6 +534,7 @@ mod tests {
                 "parts": [
                     {"name": "door", "geometry_fingerprint": {"format": "x", "sha256": "abc"},
                      "fastener": {"kind": "bolt", "size": "M8", "length": 20.0, "mates": ["frame"]},
+                     "source_assets": [{"path":"assets/housing.step", "sha256":"step-hash"}],
                      "source": {"file": "cabinet.py", "line": 12}, "builder_function": "make_door",
                      "features": {"hinge": ["f1", "f2"], "rim": ["edge:0", "edge:1", "edge:2"]},
                      "feature_kinds": {"hinge": {"entity": "face", "count": 2, "hash": "fh"},
@@ -362,6 +546,13 @@ mod tests {
         let b = built_from_project(&project).unwrap();
         assert_eq!(b.fingerprint, "r1");
         assert_eq!(b.part("door").unwrap().geometry_hash, "abc");
+        assert_eq!(
+            b.part("door").unwrap().source_assets,
+            vec![SourceAssetInfo {
+                path: "assets/housing.step".into(),
+                sha256: "step-hash".into(),
+            }]
+        );
         assert_eq!(b.part("door").unwrap().source.as_ref().unwrap().line, 12);
         assert_eq!(
             b.part("door").unwrap().fastener.as_ref().unwrap().kind,
@@ -416,5 +607,40 @@ mod tests {
         );
         let c = snap.model(&key("c")).unwrap();
         assert!(c.built.is_none() && c.build_error.is_none());
+    }
+
+    #[test]
+    fn project_reply_records_part_feature_signatures_and_placements() {
+        let project = json!({
+            "model": {
+                "parts": [{
+                    "name": "arm",
+                    "volume": 1200.0, "area": 640.0, "shape_kind": "Solid",
+                    "bounds": {"size": [40.0, 20.0, 10.0]},
+                    "face_count": 6, "edge_count": 12,
+                    "features": {"wall": ["f1"]},
+                    "feature_kinds": {"wall": {"entity": "face", "count": 1, "hash": "h",
+                                               "faces": 1, "edges": 0}}}],
+                "placements": {"arm": {"method": "place", "on": {"kind": "face", "part": "base"},
+                                       "align": "top", "offset_mm": 5.0}}}});
+        let b = built_from_project(&project).unwrap();
+        let part_sig = b.part_signatures.get("arm").expect("part signature");
+        assert_eq!(part_sig.volume_mm3, Some(1200.0));
+        assert_eq!(part_sig.area_mm2, Some(640.0));
+        assert_eq!(part_sig.extents_mm, Some([40.0, 20.0, 10.0]));
+        assert_eq!(part_sig.face_count, Some(6));
+        assert_eq!(part_sig.edge_count, Some(12));
+        assert_eq!(part_sig.shape_kind.as_deref(), Some("Solid"));
+        let feature_sig = b
+            .feature_signatures
+            .get("arm#wall")
+            .expect("feature signature");
+        assert_eq!(feature_sig.face_count, Some(1));
+        assert_eq!(feature_sig.edge_count, Some(0));
+        let placement = b.placements.get("arm").expect("placement");
+        assert_eq!(placement.method, "place");
+        assert_eq!(placement.align.as_deref(), Some("top"));
+        assert_eq!(placement.offset_mm, Some(5.0));
+        assert!(placement.on.is_some());
     }
 }

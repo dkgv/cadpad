@@ -8,6 +8,7 @@
 //! | reference broke, old exact hash matches exactly one entity now | relink to it, run |
 //! | feature hash only, set / glob / `others` membership, parameter bounds or value, expanded states | run, "changed since approval" with the diff |
 //! | reference gone or ambiguous, feature kind or count, subject or chip mapping, library or settings version | do not run: `needs_review` with the diff |
+//! | a managed STEP input behind a referenced part changed | do not run: `needs_review` |
 //!
 //! Auto-relink is by exact hash only and only for a unique match: if the old
 //! hash matches no entity, several entities, or another broken reference
@@ -15,10 +16,11 @@
 //! Nothing is matched approximately.
 use super::bind::{glob_match, model_key, part_ref_key};
 use super::ir::{AxisRef, FeatureRef, PartName, PartRef, Target};
-use super::manifest::{FeatureLink, Manifest, MemberLink, ParamLink};
+use super::manifest::{FeatureLink, Manifest, MemberLink, ParamLink, PlacementLink};
 use super::settings::ProjectSettings;
 use super::snapshot::WorkspaceSnapshot;
 use super::states::{ConcreteState, StateValue};
+use super::suggestions::{ShapeSignature, Suggestion, rank};
 use super::worker_plan::split_part_key;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -36,11 +38,24 @@ pub struct BuildIndex {
     pub params: BTreeMap<String, ParamLink>,
     /// `entry#builder` of every model that built.
     pub models: BTreeSet<String>,
+    /// `entry#builder/name` to the part's shape signature (spec §3.1).
+    pub part_signatures: BTreeMap<String, ShapeSignature>,
+    /// `entry#builder/part#suffix` to the feature's shape signature.
+    pub feature_signatures: BTreeMap<String, ShapeSignature>,
+    /// `entry#builder/part` to the recorded placement.
+    pub placements: BTreeMap<String, PlacementLink>,
+    /// Exact managed STEP inputs for each published part.
+    pub part_source_assets: BTreeMap<String, Vec<super::snapshot::SourceAssetInfo>>,
 }
 
 impl BuildIndex {
     pub fn from_snapshot(snap: &WorkspaceSnapshot) -> Self {
         let mut out = BuildIndex::default();
+        let (part_signatures, feature_signatures) = super::manifest::signature_links(snap);
+        out.part_signatures = part_signatures;
+        out.feature_signatures = feature_signatures;
+        out.placements = super::manifest::placement_links(snap);
+        out.part_source_assets = super::manifest::source_asset_links(snap);
         for m in &snap.models {
             let Some(b) = &m.built else { continue };
             let mk = model_key(&m.model);
@@ -52,12 +67,17 @@ impl BuildIndex {
                 });
             }
             for f in &b.features {
+                let suffix = f.link_suffix();
+                let key = format!("{mk}/{}#{suffix}", f.part);
                 out.features.insert(
-                    format!("{mk}/{}#{}", f.part, f.name),
+                    key.clone(),
                     FeatureLink {
                         entity: f.entity,
                         count: f.count,
                         hash: f.hash.clone(),
+                        source: f.source,
+                        positional: f.positional,
+                        key_size: key.len() as u64,
                     },
                 );
             }
@@ -108,11 +128,16 @@ pub enum ChangeKind {
     ReferenceAmbiguous,
     FeatureKind,
     FeatureCount,
+    FeatureSource,
     ParamGone,
     SubjectChanged,
     ChipRemapped,
     LibraryVersion,
     SettingsChanged,
+    /// A placed part's placement method or target changed (spec §6.3).
+    PlacementMethod,
+    /// A managed STEP file used by a referenced part was replaced.
+    ImportedFileChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -123,6 +148,10 @@ pub struct Change {
     pub at: String,
     /// Human-readable.
     pub message: String,
+    /// Shape-signature-ranked candidates for a broken reference (spec §3.1):
+    /// suggestions only, never a relink.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<Suggestion<String>>,
 }
 
 /// A reference relinked to the entity with the same exact hash.
@@ -184,7 +213,30 @@ fn push(changes: &mut Vec<Change>, kind: ChangeKind, effect: Effect, at: &str, m
         effect,
         at: at.to_string(),
         message,
+        suggestions: Vec::new(),
     });
+}
+
+/// Shape-ranked candidates for a reference that no longer resolves: the
+/// approved signature is the query, every signature of the new build a
+/// candidate. Returns an empty list when either side has no comparable
+/// signature (older manifests, parts without published geometry).
+fn signature_suggestions(
+    query: Option<&ShapeSignature>,
+    candidates: &BTreeMap<String, ShapeSignature>,
+    skip: &str,
+) -> Vec<Suggestion<String>> {
+    let Some(query) = query else {
+        return Vec::new();
+    };
+    rank(
+        query,
+        candidates
+            .iter()
+            .filter(|(key, _)| key.as_str() != skip)
+            .map(|(k, s)| (k.clone(), s.clone())),
+        3,
+    )
 }
 
 fn is_glob(key: &str) -> bool {
@@ -336,24 +388,84 @@ pub fn relink(
                     format!("{key} is now {to} (same exact geometry)"),
                 );
             }
-            Err(c) if c.is_empty() => push(
+            Err(c) if c.is_empty() => {
+                push(
+                    &mut changes,
+                    ChangeKind::ReferenceGone,
+                    Effect::NeedsReview,
+                    key,
+                    format!("{key} no longer exists and no entity has its exact geometry"),
+                );
+                if let Some(change) = changes.last_mut() {
+                    change.suggestions = signature_suggestions(
+                        approved.part_signatures.get(*key),
+                        &build.part_signatures,
+                        key,
+                    );
+                }
+            }
+            Err(c) => {
+                push(
+                    &mut changes,
+                    ChangeKind::ReferenceAmbiguous,
+                    Effect::NeedsReview,
+                    key,
+                    format!(
+                        "{key} no longer exists and its geometry matches {} entities or is claimed twice: {}",
+                        c.len(),
+                        c.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+                    ),
+                );
+                if let Some(change) = changes.last_mut() {
+                    change.suggestions = signature_suggestions(
+                        approved.part_signatures.get(*key),
+                        &build.part_signatures,
+                        key,
+                    );
+                }
+            }
+        }
+    }
+
+    // Replacing the managed STEP input behind a published part needs review,
+    // even when OCCT produces the same geometry hash. A STEP file is the
+    // reference; geometry signatures may suggest alternatives but never
+    // silently preserve its approval.
+    let mut referenced: BTreeSet<String> = approved.part_source_assets.keys().cloned().collect();
+    for members in approved
+        .parts
+        .values()
+        .chain(approved.sets.values())
+        .chain(approved.others.values())
+    {
+        referenced.extend(members.iter().map(|member| member.key.clone()));
+    }
+    for key in referenced {
+        let old = approved
+            .part_source_assets
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let new = build
+            .part_source_assets
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if old != new && (!old.is_empty() || !new.is_empty()) {
+            push(
                 &mut changes,
-                ChangeKind::ReferenceGone,
+                ChangeKind::ImportedFileChanged,
                 Effect::NeedsReview,
-                key,
-                format!("{key} no longer exists and no entity has its exact geometry"),
-            ),
-            Err(c) => push(
-                &mut changes,
-                ChangeKind::ReferenceAmbiguous,
-                Effect::NeedsReview,
-                key,
-                format!(
-                    "{key} no longer exists and its geometry matches {} entities or is claimed twice: {}",
-                    c.len(),
-                    c.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
-                ),
-            ),
+                &key,
+                format!("managed STEP input for {key} changed; this reference needs review"),
+            );
+            if let Some(change) = changes.last_mut() {
+                change.suggestions = signature_suggestions(
+                    approved.part_signatures.get(&key),
+                    &build.part_signatures,
+                    &key,
+                );
+            }
         }
     }
 
@@ -427,6 +539,13 @@ pub fn relink(
                     old.count, new.count
                 ),
             ),
+            Some(new) if new.source != old.source || new.positional != old.positional => push(
+                &mut changes,
+                ChangeKind::FeatureSource,
+                Effect::NeedsReview,
+                key,
+                format!("{key} changed feature naming basis"),
+            ),
             Some(new) if new.hash != old.hash => push(
                 &mut changes,
                 ChangeKind::FeatureGeometry,
@@ -441,10 +560,16 @@ pub fn relink(
     let fmatched = match_by_hash(&fbroken, &fpool);
     for (key, hash) in &fbroken {
         let old = &approved.features[*key];
-        // Only an entity of the same kind can stand in.
+        // Only a unique exact hash with the same entity kind and naming basis can stand in.
         let res = match &fmatched[key] {
-            Ok(to) if build.features[*to].entity == old.entity => Ok(*to),
-            Ok(to) => Err(vec![*to]),
+            Ok(to)
+                if build.features[*to].entity == old.entity
+                    && build.features[*to].source == old.source
+                    && build.features[*to].positional == old.positional =>
+            {
+                Ok(*to)
+            }
+            Ok(_) => Err(Vec::new()),
             Err(c) => Err(c.clone()),
         };
         match res {
@@ -462,23 +587,85 @@ pub fn relink(
                     format!("{key} is now {to} (same exact geometry)"),
                 );
             }
-            Err(c) if c.is_empty() => push(
+            Err(c) if c.is_empty() => {
+                push(
+                    &mut changes,
+                    ChangeKind::ReferenceGone,
+                    Effect::NeedsReview,
+                    key,
+                    format!("feature {key} no longer exists and no entity has its exact geometry"),
+                );
+                if let Some(change) = changes.last_mut() {
+                    change.suggestions = signature_suggestions(
+                        approved.feature_signatures.get(*key),
+                        &build.feature_signatures,
+                        key,
+                    );
+                }
+            }
+            Err(c) => {
+                push(
+                    &mut changes,
+                    ChangeKind::ReferenceAmbiguous,
+                    Effect::NeedsReview,
+                    key,
+                    format!(
+                        "feature {key} no longer exists and its geometry is ambiguous or of another kind ({} candidates)",
+                        c.len()
+                    ),
+                );
+                if let Some(change) = changes.last_mut() {
+                    change.suggestions = signature_suggestions(
+                        approved.feature_signatures.get(*key),
+                        &build.feature_signatures,
+                        key,
+                    );
+                }
+            }
+        }
+    }
+
+    // Placements (spec §6.3): a changed method or target runs with a diff.
+    let live_parts: BTreeSet<&String> = build.parts.iter().map(|p| &p.key).collect();
+    for (key, old) in &approved.placements {
+        match build.placements.get(key) {
+            Some(new) if new != old => {
+                let message = if new.method == old.method {
+                    format!("placement target of {key} changed")
+                } else {
+                    format!(
+                        "placement of {key} changed from {} to {}",
+                        old.method, new.method
+                    )
+                };
+                push(
+                    &mut changes,
+                    ChangeKind::PlacementMethod,
+                    Effect::RunChanged,
+                    key,
+                    message,
+                );
+            }
+            // A gone part is already reported by the reference checks.
+            None if live_parts.contains(key) => push(
                 &mut changes,
-                ChangeKind::ReferenceGone,
-                Effect::NeedsReview,
+                ChangeKind::PlacementMethod,
+                Effect::RunChanged,
                 key,
-                format!("feature {key} no longer exists and no entity has its exact geometry"),
+                format!("{key} lost its placement record"),
             ),
-            Err(c) => push(
+            _ => {}
+        }
+    }
+    for (key, new) in &build.placements {
+        if !approved.placements.contains_key(key) {
+            push(
                 &mut changes,
-                ChangeKind::ReferenceAmbiguous,
-                Effect::NeedsReview,
+                ChangeKind::PlacementMethod,
+                Effect::RunChanged,
                 key,
-                format!(
-                    "feature {key} no longer exists and its geometry is ambiguous or of another kind ({} candidates)",
-                    c.len()
-                ),
-            ),
+                format!("{key} gained a {} placement", new.method),
+            );
         }
     }
 
@@ -659,6 +846,7 @@ pub fn relink(
                     effect: Effect::RunChanged,
                     at: "states".into(),
                     message: format!("expanded states changed for {}", list(&ids)),
+                    suggestions: Vec::new(),
                 });
             }
         }
@@ -716,5 +904,125 @@ fn membership_change(
         effect: Effect::RunChanged,
         at: at.to_string(),
         message: membership_text(what, &added, &removed),
+        suggestions: Vec::new(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn manifest(value: serde_json::Value) -> Manifest {
+        serde_json::from_value(value).expect("manifest json")
+    }
+
+    #[test]
+    fn broken_part_reference_offers_signature_ranked_suggestions() {
+        let approved = manifest(json!({
+            "requirement_hash": "r", "library_version": "lib", "settings_hash": "s",
+            "subjects": [], "chips": [], "sets": {},
+            "parts": {"machine.py#machine/arm": [
+                {"key": "machine.py#machine/arm", "geometry_hash": "h-old"}]},
+            "others": {}, "features": {}, "params": {}, "states": {},
+            "part_signatures": {"machine.py#machine/arm":
+                {"volume_mm3": 1000.0, "face_count": 6}}
+        }));
+        let mut build = BuildIndex::default();
+        build.parts.push(MemberLink {
+            key: "machine.py#machine/outrigger".into(),
+            geometry_hash: "h-new".into(),
+        });
+        build.part_signatures.insert(
+            "machine.py#machine/outrigger".into(),
+            ShapeSignature {
+                volume_mm3: Some(1000.0),
+                face_count: Some(6),
+                ..Default::default()
+            },
+        );
+        let report = relink(&approved, None, &build, &ProjectSettings::default());
+        let change = report
+            .changes
+            .iter()
+            .find(|c| c.kind == ChangeKind::ReferenceGone && c.at == "machine.py#machine/arm")
+            .expect("gone-part change");
+        assert_eq!(change.effect, Effect::NeedsReview);
+        assert!(
+            change
+                .suggestions
+                .iter()
+                .any(|s| s.key == "machine.py#machine/outrigger"),
+            "suggestions: {:?}",
+            change.suggestions
+        );
+    }
+
+    #[test]
+    fn changed_placement_method_is_a_run_changed_diff() {
+        // Match the live library and settings so only the placement differs.
+        let approved = manifest(json!({
+            "requirement_hash": "r",
+            "library_version": crate::requirements::library::library_version(),
+            "settings_hash": ProjectSettings::default().content_hash(),
+            "subjects": [], "chips": [], "sets": {}, "parts": {}, "others": {},
+            "features": {}, "params": {}, "states": {},
+            "placements": {"machine.py#machine/lid": {"method": "place", "hash": "a"}}
+        }));
+        let mut build = BuildIndex::default();
+        build.parts.push(MemberLink {
+            key: "machine.py#machine/lid".into(),
+            geometry_hash: "a".into(),
+        });
+        build.placements.insert(
+            "machine.py#machine/lid".into(),
+            PlacementLink {
+                method: "position".into(),
+                hash: "b".into(),
+            },
+        );
+        let report = relink(&approved, None, &build, &ProjectSettings::default());
+        assert!(report.runs(), "{:?}", report.changes);
+        let change = report
+            .changes
+            .iter()
+            .find(|c| c.kind == ChangeKind::PlacementMethod)
+            .expect("placement change");
+        assert_eq!(change.effect, Effect::RunChanged);
+        assert!(change.message.contains("place") && change.message.contains("position"));
+    }
+
+    #[test]
+    fn replaced_step_file_needs_review_even_when_geometry_is_unchanged() {
+        let key = "machine.py#machine/imported";
+        let approved = manifest(json!({
+            "requirement_hash": "r",
+            "library_version": crate::requirements::library::library_version(),
+            "settings_hash": ProjectSettings::default().content_hash(),
+            "subjects": [], "chips": [], "sets": {},
+            "parts": {"claim": [{"key": key, "geometry_hash": "same-shape"}]},
+            "others": {}, "features": {}, "params": {}, "states": {},
+            "part_source_assets": {key: [{"path":"assets/housing.step", "sha256":"old-file"}]}
+        }));
+        let mut build = BuildIndex::default();
+        build.parts.push(MemberLink {
+            key: key.into(),
+            geometry_hash: "same-shape".into(),
+        });
+        build.part_source_assets.insert(
+            key.into(),
+            vec![super::super::snapshot::SourceAssetInfo {
+                path: "assets/housing.step".into(),
+                sha256: "new-file".into(),
+            }],
+        );
+
+        let report = relink(&approved, None, &build, &ProjectSettings::default());
+        assert_eq!(report.decision, Effect::NeedsReview);
+        assert!(report.changes.iter().any(|change| {
+            change.kind == ChangeKind::ImportedFileChanged
+                && change.at == key
+                && change.effect == Effect::NeedsReview
+        }));
+    }
 }

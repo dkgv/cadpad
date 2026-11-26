@@ -14,8 +14,9 @@ pub mod events;
 pub mod geometry;
 mod geometry_cache;
 pub mod kinematics;
-pub mod motion;
 pub mod mesh_ops;
+pub mod motion;
+pub mod motion_migration;
 pub mod motion_test_runs;
 pub mod motion_tests;
 pub mod native_admission;
@@ -1078,6 +1079,10 @@ impl Core {
         let mut next = ws.stored.clone();
         let mut candidate = None;
         let mut candidate_motion = None;
+        // P2.23: the before/after geometry guard for the committed model, so a
+        // client can tell a naming/metadata edit from a normal code change
+        // (`requirements::auto_edits::classify_edit`).
+        let edit_base = next.revisions.read(&draft.base_revision).ok();
         let final_result = match outcome {
             Ok((worker, result, motion, rebound))
                 if !*cancel.borrow() && next.current == draft.base_revision =>
@@ -1185,8 +1190,17 @@ impl Core {
             Ok(result) => {
                 job.state = JobState::Succeeded;
                 job.resulting_revision = Some(revision_id);
-                job.diagnostics =
-                    json!({"logs":result["logs"],"logs_truncated":result["logs_truncated"]});
+                // `classify_edit` reads the `get_project` reply shape.
+                let auto_edit = edit_base.map(|base| {
+                    crate::requirements::auto_edits::classify_edit(
+                        &json!({"model": &base.model}),
+                        &json!({"model": &result["data"]}),
+                    )
+                    .value()
+                });
+                job.diagnostics = json!({"logs":result["logs"],
+                    "logs_truncated":result["logs_truncated"],
+                    "auto_edit":auto_edit});
             }
             Err(error) => {
                 job.state = if error.code() == "CANCELLED" {
@@ -1305,6 +1319,7 @@ impl Core {
         if !matches!(
             method,
             "inspect"
+                | "resolve_features"
                 | "export"
                 | "trace_mesh_edges"
                 | "mesh_edge_segments"

@@ -1,0 +1,3 @@
+Cover seating
+  1. Cover is seated on base with contact area 10 mm², as built.
+     ▸ details: 2 checks · overlap tolerance ε 0.001 mm³ · accuracy exact (contact_area, interference)

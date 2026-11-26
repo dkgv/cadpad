@@ -274,6 +274,9 @@ fn run_states(f: &Finding) -> Result<Option<StateSpace>, String> {
             }))
         }
         StateValue::Joint { .. } => Err("joint states cannot be expressed in `at` yet".into()),
+        StateValue::Simulate { .. } => {
+            Err("simulation traces cannot be drafted as allowances".into())
+        }
     }
 }
 

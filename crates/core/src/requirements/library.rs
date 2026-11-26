@@ -30,6 +30,9 @@ pub enum ArgKind {
         single: bool,
     },
     Axis,
+    /// One axis or a list of axes/directions (feature axes allowed).
+    Axes,
+    Joint,
     Quantity {
         dimension: Dimension,
     },
@@ -65,13 +68,18 @@ pub struct ArgSpec {
     pub default: Option<Arg>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Accuracy {
     /// OCC BRep query on a fresh build.
+    #[default]
     Exact,
     /// Dense surface samples, printed with the spacing.
     Sampled,
+    /// Rust dynamics over conservative collision proxies, never an exact CAD query.
+    Proxy,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -142,6 +150,66 @@ impl Library {
         let len = Dimension::Length;
         let primitives = vec![
             PrimitiveDef {
+                name: "joint",
+                summary: "Mechanism joint coordinate in metres or radians, from a proxy simulation trace.",
+                args: vec![spec("j", ArgKind::Joint, true, "the mechanism joint")],
+                result: Dimension::Length,
+                accuracy: Accuracy::Proxy,
+                template: "coordinate of {j}",
+            },
+            PrimitiveDef {
+                name: "displacement",
+                summary: "Projected body displacement from the initial pose, from a proxy simulation trace.",
+                args: vec![
+                    parts("body", true, "the body"),
+                    spec("direction", ArgKind::Axis, true, "world direction"),
+                ],
+                result: Dimension::Length,
+                accuracy: Accuracy::Proxy,
+                template: "displacement of {body} along {direction}",
+            },
+            PrimitiveDef {
+                name: "contact",
+                summary: "Whether a pair has a sampled contact impulse in the proxy simulation.",
+                args: vec![
+                    parts("a", true, "first body"),
+                    parts("b", true, "second body"),
+                ],
+                result: Dimension::Dimensionless,
+                accuracy: Accuracy::Proxy,
+                template: "contact between {a} and {b}",
+            },
+            PrimitiveDef {
+                name: "contact_impulse",
+                summary: "Sampled contact impulse projected along a world direction for a body pair in the proxy simulation.",
+                args: vec![
+                    parts("a", true, "first body"),
+                    parts("b", true, "second body"),
+                    spec("direction", ArgKind::Axis, true, "world direction"),
+                ],
+                result: Dimension::Impulse,
+                accuracy: Accuracy::Proxy,
+                template: "contact impulse between {a} and {b}",
+            },
+            PrimitiveDef {
+                name: "push",
+                summary: "Additional receiver displacement with a driver joint enabled, versus the same proxy run with that driver disabled.",
+                args: vec![
+                    parts("pusher", true, "pushing body"),
+                    parts("receiver", true, "receiving body"),
+                    spec(
+                        "driver_joint",
+                        ArgKind::Joint,
+                        true,
+                        "joint motor to disable for the baseline",
+                    ),
+                    spec("direction", ArgKind::Axis, true, "world direction"),
+                ],
+                result: Dimension::Length,
+                accuracy: Accuracy::Proxy,
+                template: "additional displacement of {receiver} when {pusher} pushes with {driver_joint}",
+            },
+            PrimitiveDef {
                 name: "interference",
                 summary: "Volume of the intersection of two parts.",
                 args: vec![
@@ -151,6 +219,17 @@ impl Library {
                 result: Dimension::Volume,
                 accuracy: Accuracy::Exact,
                 template: "overlap volume of {a} and {b}",
+            },
+            PrimitiveDef {
+                name: "contact_area",
+                summary: "Area of common faces between two parts without volume overlap.",
+                args: vec![
+                    parts("a", true, "first part"),
+                    parts("b", true, "second part"),
+                ],
+                result: Dimension::Area,
+                accuracy: Accuracy::Exact,
+                template: "area of common faces between {a} and {b}",
             },
             PrimitiveDef {
                 name: "min_clearance",
@@ -163,6 +242,18 @@ impl Library {
                 accuracy: Accuracy::Exact,
                 template: "smallest distance between {a} and {b}",
             },
+            // Spec §4.2 lists `distance(a, b)` as a name for this measurement.
+            PrimitiveDef {
+                name: "distance",
+                summary: "Alias of `min_clearance`: smallest distance between two sets of entities (0 when touching).",
+                args: vec![
+                    spec("a", ArgKind::Entities { single: false }, true, "first set"),
+                    spec("b", ArgKind::Entities { single: false }, true, "second set"),
+                ],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "distance between {a} and {b}",
+            },
             PrimitiveDef {
                 name: "extent",
                 summary: "Length of the world bounding box of a set along an axis.",
@@ -173,6 +264,291 @@ impl Library {
                 result: len,
                 accuracy: Accuracy::Exact,
                 template: "extent of {a} along {axis}",
+            },
+            // P2.9–P2.13: measurements on bound features (faces/edges) as well
+            // as whole parts. `Entities` arguments resolve to part keys plus an
+            // optional feature descriptor the worker resolves per state.
+            PrimitiveDef {
+                name: "diameter",
+                summary: "Diameter of a cylindrical face, circular edge or single-axis solid (twice the radius).",
+                args: vec![spec(
+                    "a",
+                    ArgKind::Entities { single: true },
+                    true,
+                    "the feature or part",
+                )],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "diameter of {a}",
+            },
+            PrimitiveDef {
+                name: "radius",
+                summary: "Radius of a cylindrical face, circular edge, spherical face or single-axis solid.",
+                args: vec![spec(
+                    "a",
+                    ArgKind::Entities { single: true },
+                    true,
+                    "the feature or part",
+                )],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "radius of {a}",
+            },
+            PrimitiveDef {
+                name: "length",
+                summary: "Length of an edge (exact curve length), a face or a part (largest bounding-box dimension); a set reports its longest member.",
+                args: vec![spec(
+                    "a",
+                    ArgKind::Entities { single: false },
+                    true,
+                    "the feature(s) or part(s)",
+                )],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "length of {a}",
+            },
+            PrimitiveDef {
+                name: "area",
+                summary: "Surface area of faces or whole parts; a set reports the total.",
+                args: vec![spec(
+                    "a",
+                    ArgKind::Entities { single: false },
+                    true,
+                    "the feature(s) or part(s)",
+                )],
+                result: Dimension::Area,
+                accuracy: Accuracy::Exact,
+                template: "area of {a}",
+            },
+            PrimitiveDef {
+                name: "volume",
+                summary: "Volume of solids; a set reports the total.",
+                args: vec![spec(
+                    "a",
+                    ArgKind::Entities { single: false },
+                    true,
+                    "the feature(s) or part(s)",
+                )],
+                result: Dimension::Volume,
+                accuracy: Accuracy::Exact,
+                template: "volume of {a}",
+            },
+            PrimitiveDef {
+                name: "gap",
+                summary: "Gap between two features: the exact minimum distance, and a maximum sampled over the surfaces every `spacing` (default derived from the bounding box). `in [lo, hi]` requires min >= lo and max <= hi; `<=` bounds the max, `>=` bounds the min.",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "first feature or part",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "second feature or part",
+                    ),
+                    spec(
+                        "spacing",
+                        ArgKind::Quantity { dimension: len },
+                        false,
+                        "surface sampling step for the maximum",
+                    ),
+                ],
+                result: len,
+                accuracy: Accuracy::Sampled,
+                template: "gap between {a} and {b}[, sampled every {spacing}]",
+            },
+            PrimitiveDef {
+                name: "clearance_along",
+                summary: "Clearance of A from B along each direction: the distance A travels purely along the direction before B is reached ahead of it (shadow clearance; perpendicular offsets are ignored, so it never overstates). The result is the smallest over `dirs` and over the entities of each side, so a feature selection with several faces reports the tightest wall.",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: false },
+                        true,
+                        "the moving feature(s) or part(s)",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: false },
+                        true,
+                        "the obstacle feature(s) or part(s)",
+                    ),
+                    spec(
+                        "directions",
+                        ArgKind::Axes,
+                        true,
+                        "directions to check, e.g. [+x, -x, +y, -y]",
+                    ),
+                ],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "clearance of {a} from {b} along {directions}",
+            },
+            PrimitiveDef {
+                name: "overlap_depth",
+                summary: "Depth of the volumetric overlap of A and B measured along `along`: the extent of the intersection projected on the direction (0 when they do not overlap). A set reports the deepest pair.",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "first feature or part",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "second feature or part",
+                    ),
+                    spec(
+                        "along",
+                        ArgKind::OneOf {
+                            kinds: vec![ArgKind::Axis, ArgKind::Entities { single: true }],
+                        },
+                        true,
+                        "the direction to measure along (axis, direction word or feature)",
+                    ),
+                ],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "overlap depth of {a} and {b} along {along}",
+            },
+            PrimitiveDef {
+                name: "axis_offset",
+                summary: "Distance between the axes of two features (cylinder axis, circle or line edge, plane normal). A set reports the largest offset. Fails when a side has no single axis.",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "first feature or part",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "second feature or part",
+                    ),
+                ],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "offset between the axes of {a} and {b}",
+            },
+            PrimitiveDef {
+                name: "axis_angle",
+                summary: "Acute angle between the axes of two features, in radians (0 when parallel or anti-parallel). A set reports the largest angle.",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "first feature or part",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "second feature or part",
+                    ),
+                ],
+                result: Dimension::Angle,
+                accuracy: Accuracy::Exact,
+                template: "angle between the axes of {a} and {b}",
+            },
+            PrimitiveDef {
+                name: "diameter_difference",
+                summary: "Diameter of a minus diameter of b (negative when b is larger); a set reports the pair with the largest absolute difference.",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "first feature or part",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "second feature or part",
+                    ),
+                ],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "diameter of {a} minus diameter of {b}",
+            },
+            PrimitiveDef {
+                name: "thread_protrusion",
+                summary: "Length of a fastener's threaded end protruding past the far side of the parts it mates (fastener metadata `mates`), measured along the fastener axis; 0 when it does not reach through. The head end is recognised by its larger profile.",
+                args: vec![spec(
+                    "a",
+                    ArgKind::Entities { single: true },
+                    true,
+                    "the fastener part",
+                )],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "thread protrusion of {a}",
+            },
+            PrimitiveDef {
+                name: "profile_centre",
+                summary: "Distance between the centres of the bounding profiles of two features perpendicular to `axis` (0 when centred). A set reports the largest offset.",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "reference feature or part",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "feature or part to compare",
+                    ),
+                    spec(
+                        "axis",
+                        ArgKind::OneOf {
+                            kinds: vec![ArgKind::Axis, ArgKind::Entities { single: true }],
+                        },
+                        true,
+                        "profile normal (x, y, z, vector, direction word or feature)",
+                    ),
+                ],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "centre offset of {b} from {a} across {axis}",
+            },
+            PrimitiveDef {
+                name: "profile_size",
+                summary: "How much larger the bounding profile of b is than a's perpendicular to `axis`: the difference of the larger in-plane bounding-box extents. A set reports the smallest difference.",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "reference feature or part",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "feature or part to compare",
+                    ),
+                    spec(
+                        "axis",
+                        ArgKind::OneOf {
+                            kinds: vec![ArgKind::Axis, ArgKind::Entities { single: true }],
+                        },
+                        true,
+                        "profile normal (x, y, z, vector, direction word or feature)",
+                    ),
+                ],
+                result: len,
+                accuracy: Accuracy::Exact,
+                template: "profile size of {b} minus {a} across {axis}",
             },
             // Not in the spec's §4.2 table; the v1 rules `inside` and
             // `single_solid` need them. Flagged in the report.
@@ -273,7 +649,7 @@ impl Library {
                 template: "{a} is clear of {envelope}[, {at}]",
                 covers: vec![],
                 available: true,
-                settings: eps,
+                settings: eps.clone(),
                 expands_to: vec!["interference"],
             },
             RuleDef {
@@ -356,9 +732,147 @@ impl Library {
                         reason: "fastener in its hole",
                     },
                 ],
-                available: false,
+                available: true,
+                settings: eps.clone(),
+                expands_to: vec![
+                    "diameter",
+                    "interference",
+                    "contact_area",
+                    "thread_protrusion",
+                ],
+            },
+            RuleDef {
+                name: "aligned",
+                summary: "A's bounding profile is centred on B's within `tol` and B's opening exceeds A's by `margin`, measured perpendicular to `plane` (or to B's own axis/normal when `plane` is omitted).",
+                args: vec![
+                    spec(
+                        "a",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "feature or part to centre",
+                    ),
+                    spec(
+                        "b",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "reference feature or part (its opening)",
+                    ),
+                    spec(
+                        "plane",
+                        ArgKind::OneOf {
+                            kinds: vec![ArgKind::Axis, ArgKind::Entities { single: true }],
+                        },
+                        false,
+                        "profile normal (axis, direction word or feature); defaults to B's own axis",
+                    ),
+                    spec(
+                        "tol",
+                        ArgKind::Quantity { dimension: len },
+                        true,
+                        "allowed centre offset, e.g. 0.2 mm",
+                    ),
+                    spec(
+                        "margin",
+                        ArgKind::Quantity { dimension: len },
+                        true,
+                        "how much B's opening must exceed A's, e.g. 0.3 mm",
+                    ),
+                    at_arg("states to check", false),
+                ],
+                template: "{a} is aligned with {b} within {tol} and clears it by {margin}[, {at}]",
+                covers: vec![],
+                available: true,
                 settings: vec![],
-                expands_to: vec![],
+                expands_to: vec!["profile_centre", "profile_size"],
+            },
+            RuleDef {
+                name: "press_fit",
+                summary: "diameter(pin) - diameter(hole) within `range` (positive = interference) and the axes coaxial within half the minimum guaranteed radial engagement.",
+                args: vec![
+                    spec(
+                        "pin",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "the pin feature or part",
+                    ),
+                    spec(
+                        "hole",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "the hole feature or part",
+                    ),
+                    spec(
+                        "range",
+                        ArgKind::Compare {
+                            dimension: Some(len),
+                        },
+                        true,
+                        "diametral difference limit, e.g. in [0.02 mm, 0.05 mm]",
+                    ),
+                    at_arg("states to check", false),
+                ],
+                template: "{pin} is a press fit in {hole}: diameter difference {range}[, {at}]",
+                covers: vec![],
+                available: true,
+                settings: vec![],
+                expands_to: vec!["diameter_difference", "axis_offset"],
+            },
+            RuleDef {
+                name: "fit",
+                summary: "A feature's diameter lies inside the ISO 286 tolerance zone of `class` at `nominal` (e.g. 8 mm H7 = 8.000–8.015 mm).",
+                args: vec![
+                    spec(
+                        "feature",
+                        ArgKind::Entities { single: true },
+                        true,
+                        "the bore or shaft feature",
+                    ),
+                    spec(
+                        "class",
+                        ArgKind::Token { allowed: vec![] },
+                        true,
+                        "ISO 286 class as written, e.g. H7, h6, js6",
+                    ),
+                    spec(
+                        "nominal",
+                        ArgKind::OneOf {
+                            kinds: vec![
+                                ArgKind::Quantity { dimension: len },
+                                ArgKind::Token { allowed: vec![] },
+                            ],
+                        },
+                        true,
+                        "nominal diameter, e.g. 8 mm, or a fastener size like M8",
+                    ),
+                    at_arg("states to check", false),
+                ],
+                template: "{feature} is {class} at {nominal}[, {at}]",
+                covers: vec![],
+                available: true,
+                settings: vec![],
+                expands_to: vec!["diameter"],
+            },
+            RuleDef {
+                name: "seated",
+                summary: "A rests on B: no overlap beyond ε and a positive common-face contact area (at least `area` when given).",
+                args: vec![
+                    parts("a", false, "the seated part(s)"),
+                    parts("on", false, "the part(s) they rest on"),
+                    spec(
+                        "area",
+                        ArgKind::Quantity {
+                            dimension: Dimension::Area,
+                        },
+                        false,
+                        "minimum contact area, e.g. 100 mm2; any contact when omitted",
+                    ),
+                    at_arg("states to check", false),
+                ],
+                template: "{a} is seated on {on}[ with contact area {area}][, {at}]",
+                covers: vec![],
+                available: true,
+                settings: eps.clone(),
+                expands_to: vec!["interference", "contact_area"],
             },
             RuleDef {
                 name: "single_solid",
@@ -380,9 +894,25 @@ impl Library {
     pub fn primitive(&self, name: &str) -> Option<&PrimitiveDef> {
         self.primitives.iter().find(|p| p.name == name)
     }
-    /// SHA-256 over the canonical JSON of the whole registry.
+    /// SHA-256 over canonical rule registry and standards reference data.
     pub fn version(&self) -> String {
+        self.version_with_reference_data(
+            &super::iso286::reference_data(),
+            &super::fasteners::reference_data(),
+        )
+    }
+
+    fn version_with_reference_data(
+        &self,
+        iso286: &serde_json::Value,
+        fasteners: &serde_json::Value,
+    ) -> String {
         let value = serde_json::to_value(self).expect("library serializes");
+        let mut text = String::new();
+        canonical(&value, &mut text);
+        let registry = portable::bytes_hash(text.as_bytes());
+        let value =
+            serde_json::json!({ "registry": registry, "iso286": iso286, "fasteners": fasteners });
         let mut text = String::new();
         canonical(&value, &mut text);
         portable::bytes_hash(text.as_bytes())
@@ -404,9 +934,8 @@ pub fn library() -> &'static Library {
     LIBRARY.get_or_init(Library::build)
 }
 
-/// Version of the library: a hash of the registry contents. Changing any rule,
-/// signature, default or template changes it, which marks requirements using
-/// it `stale`.
+/// Version of the rules and reference datasets. Changes mark requirements
+/// using them `stale`.
 pub fn library_version() -> &'static str {
     static VERSION: OnceLock<String> = OnceLock::new();
     VERSION.get_or_init(|| library().version())
@@ -420,6 +949,21 @@ fn is_parts_like(arg: &Arg) -> bool {
         Arg::List(items) => !items.is_empty() && items.iter().all(|i| matches!(i, Arg::Part(_))),
         _ => false,
     }
+}
+
+/// Parts, features or lists mixing them (only meaningful for
+/// [`ArgKind::Entities`]; `Parts` keeps the stricter part-only check).
+fn is_entities_like(arg: &Arg) -> bool {
+    match arg {
+        Arg::Feature(_) => true,
+        Arg::List(items) => !items.is_empty() && items.iter().all(is_entities_like),
+        _ => is_parts_like(arg),
+    }
+}
+
+/// A direction keyword arg: `"+x"`, `"-y"`, … (see `Arg::Text`).
+fn is_direction_word(arg: &Arg) -> bool {
+    matches!(arg, Arg::Text(t) if matches!(t.as_str(), "+x" | "-x" | "+y" | "-y" | "+z" | "-z"))
 }
 
 fn describe(arg: &Arg) -> &'static str {
@@ -450,6 +994,8 @@ fn kind_name(kind: &ArgKind) -> String {
         ArgKind::Entities { single: true } => "a single part or feature".into(),
         ArgKind::Entities { single: false } => "parts or features".into(),
         ArgKind::Axis => "an axis".into(),
+        ArgKind::Axes => "an axis or a list of axes".into(),
+        ArgKind::Joint => "a mechanism joint".into(),
         ArgKind::Quantity { dimension } => format!("a {}", dimension.name()),
         ArgKind::Quantities { dimension, count } => {
             format!("a list of {count} {} values", dimension.name())
@@ -474,8 +1020,7 @@ fn check_kind(kind: &ArgKind, arg: &Arg, at: &str, relax_single: bool, out: &mut
     };
     match kind {
         ArgKind::Parts { single } | ArgKind::Entities { single } => {
-            let is_feature =
-                matches!(kind, ArgKind::Entities { .. }) && matches!(arg, Arg::Feature(_));
+            let is_feature = matches!(kind, ArgKind::Entities { .. }) && is_entities_like(arg);
             if !is_parts_like(arg) && !is_feature {
                 out.push(mismatch());
             } else if *single && !relax_single {
@@ -490,7 +1035,22 @@ fn check_kind(kind: &ArgKind, arg: &Arg, at: &str, relax_single: bool, out: &mut
             }
         }
         ArgKind::Axis => {
-            if !matches!(arg, Arg::Axis(_)) {
+            if !matches!(arg, Arg::Axis(_)) && !is_direction_word(arg) {
+                out.push(mismatch());
+            }
+        }
+        ArgKind::Axes => match arg {
+            Arg::Axis(_) => {}
+            _ if is_direction_word(arg) => {}
+            Arg::List(items)
+                if !items.is_empty()
+                    && items
+                        .iter()
+                        .all(|i| matches!(i, Arg::Axis(_)) || is_direction_word(i)) => {}
+            _ => out.push(mismatch()),
+        },
+        ArgKind::Joint => {
+            if !matches!(arg, Arg::Joint(_)) {
                 out.push(mismatch());
             }
         }
@@ -811,7 +1371,9 @@ mod tests {
             }
             for a in &r.args {
                 assert!(
-                    a.required || a.default.is_some() || ["clearance"].contains(&a.name),
+                    a.required
+                        || a.default.is_some()
+                        || ["clearance", "plane", "area"].contains(&a.name),
                     "{}.{} optional without default",
                     r.name,
                     a.name
@@ -853,7 +1415,7 @@ mod tests {
         ] {
             assert!(lib.rule(want).is_some(), "{want}");
         }
-        for want in ["interference", "min_clearance", "extent"] {
+        for want in ["interference", "contact_area", "min_clearance", "extent"] {
             assert!(lib.primitive(want).is_some(), "{want}");
         }
     }
@@ -864,7 +1426,7 @@ mod tests {
         // are arguments, never library defaults.
         let lib = library();
         let bolted = lib.rule("bolted").unwrap();
-        assert!(!bolted.available, "expansion needs phase-2 primitives");
+        assert!(bolted.available, "P3.6 expansion is implemented");
         for arg in ["size", "hole", "protrusion", "bearing"] {
             let a = bolted.args.iter().find(|a| a.name == arg).unwrap();
             assert!(a.required && a.default.is_none(), "{arg}");
@@ -902,6 +1464,24 @@ mod tests {
         let mut changed = Library::build();
         changed.rules[1].args[0].required = false;
         assert_ne!(changed.version(), v);
+        let base_iso = super::super::iso286::reference_data();
+        let base_fasteners = super::super::fasteners::reference_data();
+        assert_eq!(
+            library().version_with_reference_data(&base_iso, &base_fasteners),
+            v
+        );
+        let mut iso = base_iso.clone();
+        iso["it_grades_um"][2][2] = serde_json::json!(15.1);
+        assert_ne!(
+            library().version_with_reference_data(&iso, &base_fasteners),
+            v
+        );
+        let mut fasteners = base_fasteners.clone();
+        fasteners["pitch_mm"][4][1] = serde_json::json!(1.26);
+        assert_ne!(
+            library().version_with_reference_data(&base_iso, &fasteners),
+            v
+        );
     }
 
     #[test]

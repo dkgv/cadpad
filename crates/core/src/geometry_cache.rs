@@ -396,12 +396,33 @@ impl Core {
                     "Revision changed before authoritative reuse",
                 ));
             }
-            let candidate=ws.stored.revisions.headers().find(|(id,prior)| {
-                prior.input_fingerprint==digest && !prior.protected && prior.part_count>0 && !prior.mesh_handles.is_empty()
-                    && prior.mesh_handles.iter().all(|handle|self.root.join("artifacts").join(workspace).join(id).join(handle).is_file())
-            }).map(|(id,_)|id.clone());
-            if let Some(id)=candidate {Some((id.clone(),ws.stored.revisions.load(&id).await?.model.clone()))} else {None}
-
+            let candidate = ws
+                .stored
+                .revisions
+                .headers()
+                .find(|(id, prior)| {
+                    prior.input_fingerprint == digest
+                        && !prior.protected
+                        && prior.part_count > 0
+                        && !prior.mesh_handles.is_empty()
+                        && prior.mesh_handles.iter().all(|handle| {
+                            self.root
+                                .join("artifacts")
+                                .join(workspace)
+                                .join(id)
+                                .join(handle)
+                                .is_file()
+                        })
+                })
+                .map(|(id, _)| id.clone());
+            if let Some(id) = candidate {
+                Some((
+                    id.clone(),
+                    ws.stored.revisions.load(&id).await?.model.clone(),
+                ))
+            } else {
+                None
+            }
         };
         let Some((source_revision, mut model)) = matched else {
             return Ok(None);

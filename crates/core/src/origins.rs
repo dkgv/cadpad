@@ -331,7 +331,9 @@ impl crate::Core {
         }
         let mut draft = Self::input_draft(merged, base, actor);
         draft.python_origin = Some(origin);
-        draft.source_hashes = ws.stored.current_revision()
+        draft.source_hashes = ws
+            .stored
+            .current_revision()
             .inputs
             .files
             .iter()

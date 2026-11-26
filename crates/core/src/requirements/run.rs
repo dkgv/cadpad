@@ -32,21 +32,23 @@ use super::compile::{Compiled, compile};
 use super::diagnostics::Diagnostic;
 use super::dispatch::{LiveSnapshot, ModelView, execute_compiled_chunk, pool_cap};
 use super::evaluate::{EvalResult, ResultBody, evaluate};
-use super::ir::{ModelRef, Requirement};
+use super::ir::{Arg, AxisRef, ModelRef, PartName, Requirement};
+use super::library::{Accuracy, library};
 use super::lifecycle::{StatusInputs, compute_status};
 use super::manifest::Manifest;
 use super::plan::Plan;
 use super::relink::{BuildIndex, Effect, Relink, RelinkReport, relink};
 use super::settings::ProjectSettings;
 use super::snapshot::WorkspaceSnapshot;
+use super::states::StateValue;
 use super::status::RequirementStatus;
 use super::storage::{Approved, RequirementEntry};
 use super::worker_plan::{
-    ChunkOptions, ChunkRequest, EvalError, PlanExecutor, RawChunk, build_requests,
-    parse_chunk_response, run_plan,
+    ChunkOptions, ChunkRequest, EvalError, JobOutcome, MeasStatus, PlanExecutor, RawChunk,
+    RawResults, build_requests, parse_chunk_response, run_plan,
 };
 use crate::motion_test_runs::{self as queue, Lease, State, Status};
-use crate::motion_tests::{Saved, fingerprint};
+use crate::motion_tests::{Saved, SimulationState, fingerprint};
 use crate::{Core, Error, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -511,10 +513,407 @@ pub struct Marks {
     /// Waiting for an on-demand run: `(estimate, budget)` in seconds.
     pub stale: Option<(f64, f64)>,
     pub estimate_s: Option<f64>,
+    /// Proxy simulation has no supported automatic runtime estimate.
+    pub on_demand: bool,
 }
 
 fn previous_body(previous: Option<&Value>) -> Option<ResultBody> {
     previous.and_then(|v| serde_json::from_value(v.get("body")?.clone()).ok())
+}
+
+#[derive(Clone)]
+struct SimulationBatch {
+    model: ModelRef,
+    simulation: SimulationState,
+    contact_pairs: BTreeSet<(String, String)>,
+    drivers: BTreeSet<String>,
+}
+
+fn simulation_key(model: &ModelRef, simulation: &SimulationState) -> String {
+    format!(
+        "{}:{}",
+        model_key(model),
+        serde_json::to_string(simulation).unwrap_or_default()
+    )
+}
+
+fn body_instance(
+    revision: &crate::Revision,
+    model: &ModelRef,
+    arg: Option<&Arg>,
+) -> Result<String> {
+    let Some(Arg::Part(part)) = arg else {
+        return Err(Error::domain(
+            "INVALID_SIMULATION",
+            "Simulation body argument must be one published part",
+        ));
+    };
+    if part.model != *model {
+        return Err(Error::domain(
+            "INVALID_SIMULATION",
+            "Simulation body must belong to the simulated model",
+        ));
+    }
+    let PartName::Name(name) = &part.part else {
+        return Err(Error::domain(
+            "INVALID_SIMULATION",
+            "Simulation bodies must resolve to one published part",
+        ));
+    };
+    revision.model["parts"]
+        .as_array()
+        .and_then(|parts| {
+            parts.iter().find(|p| {
+                p["name"].as_str() == Some(name) || p["instance_id"].as_str() == Some(name)
+            })
+        })
+        .and_then(|p| p["instance_id"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            Error::domain(
+                "INVALID_SIMULATION",
+                format!("No simulation body for published part {name}"),
+            )
+        })
+}
+
+fn joint_id(model: &ModelRef, arg: Option<&Arg>) -> Result<String> {
+    let Some(Arg::Joint(joint)) = arg else {
+        return Err(Error::domain(
+            "INVALID_SIMULATION",
+            "Simulation joint argument must be one joint",
+        ));
+    };
+    if joint.model != *model {
+        return Err(Error::domain(
+            "INVALID_SIMULATION",
+            "Simulation joint must belong to the simulated model",
+        ));
+    }
+    Ok(joint.name.clone())
+}
+
+fn axis_vector(arg: Option<&Arg>) -> Result<glam::DVec3> {
+    let Some(Arg::Axis(axis)) = arg else {
+        return Err(Error::domain(
+            "INVALID_SIMULATION",
+            "Simulation direction must be an axis",
+        ));
+    };
+    let vector = match axis {
+        AxisRef::X => glam::DVec3::X,
+        AxisRef::Y => glam::DVec3::Y,
+        AxisRef::Z => glam::DVec3::Z,
+        AxisRef::Vector(v) => glam::DVec3::from_array(*v),
+        AxisRef::Feature(_) => {
+            return Err(Error::domain(
+                "INVALID_SIMULATION",
+                "Feature axes cannot drive proxy motion checks",
+            ));
+        }
+    };
+    if !vector.is_finite() || vector.length_squared() < 1e-24 {
+        return Err(Error::domain(
+            "INVALID_SIMULATION",
+            "Simulation direction must be finite and nonzero",
+        ));
+    }
+    Ok(vector.normalize())
+}
+
+fn sim_error(reason: String) -> JobOutcome {
+    JobOutcome {
+        status: MeasStatus::Error,
+        value: None,
+        max: None,
+        witness: None,
+        reason: Some(reason),
+        slow: Vec::new(),
+    }
+}
+
+fn fill_proxy_results(
+    plan: &Plan,
+    manifest: &Manifest,
+    raw: &mut RawResults,
+    revisions: &BTreeMap<ModelRef, crate::Revision>,
+    cancel: &watch::Receiver<bool>,
+) -> std::result::Result<(), EvalError> {
+    let mut batches = BTreeMap::<String, SimulationBatch>::new();
+    let mut keys = BTreeMap::<(usize, usize), Option<String>>::new();
+    for (ci, claim) in plan.claims.iter().enumerate() {
+        if library()
+            .primitive(&claim.primitive)
+            .is_none_or(|p| p.accuracy != Accuracy::Proxy)
+        {
+            continue;
+        }
+        for (ji, job) in claim.jobs.iter().enumerate() {
+            let Some(state) = manifest
+                .states
+                .get(&claim.id)
+                .and_then(|states| states.get(job.state))
+            else {
+                keys.insert((ci, ji), None);
+                continue;
+            };
+            let simulations = state
+                .values
+                .iter()
+                .filter_map(|value| match value {
+                    StateValue::Simulate {
+                        model, simulation, ..
+                    } => Some((model, simulation)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if simulations.len() != 1 {
+                keys.insert((ci, ji), None);
+                continue;
+            }
+            let (model, simulation) = simulations[0];
+            let key = simulation_key(model, simulation);
+            let batch = batches
+                .entry(key.clone())
+                .or_insert_with(|| SimulationBatch {
+                    model: model.clone(),
+                    simulation: simulation.clone(),
+                    contact_pairs: BTreeSet::new(),
+                    drivers: BTreeSet::new(),
+                });
+            let add_pair =
+                |batch: &mut SimulationBatch, a: Result<String>, b: Result<String>| -> Result<()> {
+                    batch.contact_pairs.insert((a?, b?));
+                    Ok(())
+                };
+            let revision = revisions.get(model);
+            if let Some(revision) = revision {
+                let result = match claim.primitive.as_str() {
+                    "contact" | "contact_impulse" => add_pair(
+                        batch,
+                        body_instance(revision, model, claim.args.get("a")),
+                        body_instance(revision, model, claim.args.get("b")),
+                    ),
+                    "push" => {
+                        let pair = add_pair(
+                            batch,
+                            body_instance(revision, model, claim.args.get("pusher")),
+                            body_instance(revision, model, claim.args.get("receiver")),
+                        );
+                        if let Ok(driver) = joint_id(model, claim.args.get("driver_joint")) {
+                            batch.drivers.insert(driver);
+                        }
+                        pair
+                    }
+                    _ => Ok(()),
+                };
+                if let Err(error) = result {
+                    keys.insert((ci, ji), None);
+                    raw.jobs.insert((ci, ji), sim_error(error.to_string()));
+                    continue;
+                }
+            }
+            keys.insert((ci, ji), Some(key));
+        }
+    }
+    let mut traces = BTreeMap::new();
+    let mut errors = BTreeMap::new();
+    for (key, batch) in &batches {
+        let Some(revision) = revisions.get(&batch.model) else {
+            errors.insert(
+                key.clone(),
+                "simulated model has no pinned built revision".to_string(),
+            );
+            continue;
+        };
+        let pairs = batch.contact_pairs.iter().cloned().collect::<Vec<_>>();
+        let drivers = batch.drivers.iter().cloned().collect::<Vec<_>>();
+        match crate::motion_tests::simulate_requirement_state(
+            revision,
+            &batch.simulation,
+            &pairs,
+            &drivers,
+            cancel,
+        ) {
+            Ok(trace) => {
+                traces.insert(key.clone(), trace);
+            }
+            Err(error) if error.code() == "CANCELLED" => {
+                return Err(EvalError::Cancelled(error.to_string()));
+            }
+            Err(error) => {
+                errors.insert(key.clone(), error.to_string());
+            }
+        }
+    }
+    for (ci, claim) in plan.claims.iter().enumerate() {
+        if library()
+            .primitive(&claim.primitive)
+            .is_none_or(|p| p.accuracy != Accuracy::Proxy)
+        {
+            continue;
+        }
+        for (ji, job) in claim.jobs.iter().enumerate() {
+            if raw.jobs.contains_key(&(ci, ji)) {
+                continue;
+            }
+            let Some(key) = keys.get(&(ci, ji)).and_then(Option::as_ref) else {
+                raw.jobs.insert(
+                    (ci, ji),
+                    sim_error("primitive needs exactly one simulation state".into()),
+                );
+                continue;
+            };
+            if let Some(error) = errors.get(key) {
+                raw.jobs.insert((ci, ji), sim_error(error.clone()));
+                continue;
+            }
+            let Some(trace) = traces.get(key) else {
+                raw.jobs
+                    .insert((ci, ji), sim_error("simulation produced no trace".into()));
+                continue;
+            };
+            let Some(state) = manifest
+                .states
+                .get(&claim.id)
+                .and_then(|states| states.get(job.state))
+            else {
+                raw.jobs
+                    .insert((ci, ji), sim_error("simulation state was not found".into()));
+                continue;
+            };
+            let Some(StateValue::Simulate {
+                model,
+                sample_index,
+                ..
+            }) = state
+                .values
+                .iter()
+                .find(|v| matches!(v, StateValue::Simulate { .. }))
+            else {
+                raw.jobs.insert(
+                    (ci, ji),
+                    sim_error("primitive needs a simulation state".into()),
+                );
+                continue;
+            };
+            let Some(sample) = trace.get(*sample_index) else {
+                raw.jobs.insert(
+                    (ci, ji),
+                    sim_error("simulation sample is out of range".into()),
+                );
+                continue;
+            };
+            let value = (|| -> Result<f64> {
+                match claim.primitive.as_str() {
+                    "joint" => {
+                        let id = joint_id(model, claim.args.get("j"))?;
+                        sample
+                            .evaluation
+                            .joints
+                            .iter()
+                            .find(|joint| joint.id == id)
+                            .map(|joint| {
+                                if joint.unit == "m" {
+                                    joint.coordinate * 1000.0
+                                } else {
+                                    joint.coordinate
+                                }
+                            })
+                            .ok_or_else(|| {
+                                Error::domain(
+                                    "INVALID_SIMULATION",
+                                    format!("Unknown simulated joint {id}"),
+                                )
+                            })
+                    }
+                    "displacement" => {
+                        let revision = revisions.get(model).ok_or_else(|| {
+                            Error::domain("INVALID_SIMULATION", "Missing simulated model revision")
+                        })?;
+                        let body = body_instance(revision, model, claim.args.get("body"))?;
+                        let direction = axis_vector(claim.args.get("direction"))?;
+                        let initial = trace
+                            .first()
+                            .and_then(|s| s.evaluation.poses.get(&body))
+                            .ok_or_else(|| {
+                                Error::domain("INVALID_SIMULATION", "Missing initial body pose")
+                            })?;
+                        let current = sample.evaluation.poses.get(&body).ok_or_else(|| {
+                            Error::domain("INVALID_SIMULATION", "Missing sampled body pose")
+                        })?;
+                        Ok((glam::DVec3::from_array(current.position)
+                            - glam::DVec3::from_array(initial.position))
+                        .dot(direction))
+                    }
+                    "contact" => {
+                        let revision = revisions.get(model).ok_or_else(|| {
+                            Error::domain("INVALID_SIMULATION", "Missing simulated model revision")
+                        })?;
+                        let a = body_instance(revision, model, claim.args.get("a"))?;
+                        let b = body_instance(revision, model, claim.args.get("b"))?;
+                        Ok(f64::from(sample.contact_impulses.get(&(a, b)).is_some_and(
+                            |v| glam::DVec3::from_array(*v).length() > 1e-12,
+                        )))
+                    }
+                    "contact_impulse" => {
+                        let revision = revisions.get(model).ok_or_else(|| {
+                            Error::domain("INVALID_SIMULATION", "Missing simulated model revision")
+                        })?;
+                        let a = body_instance(revision, model, claim.args.get("a"))?;
+                        let b = body_instance(revision, model, claim.args.get("b"))?;
+                        let direction = axis_vector(claim.args.get("direction"))?;
+                        Ok(sample
+                            .contact_impulses
+                            .get(&(a, b))
+                            .map(|v| glam::DVec3::from_array(*v).dot(direction))
+                            .unwrap_or(0.0))
+                    }
+                    "push" => {
+                        let revision = revisions.get(model).ok_or_else(|| {
+                            Error::domain("INVALID_SIMULATION", "Missing simulated model revision")
+                        })?;
+                        let receiver = body_instance(revision, model, claim.args.get("receiver"))?;
+                        let driver = joint_id(model, claim.args.get("driver_joint"))?;
+                        let direction = axis_vector(claim.args.get("direction"))?;
+                        let current = sample.evaluation.poses.get(&receiver).ok_or_else(|| {
+                            Error::domain("INVALID_SIMULATION", "Missing push receiver pose")
+                        })?;
+                        let baseline = sample
+                            .baseline_poses
+                            .get(&driver)
+                            .and_then(|poses| poses.get(&receiver))
+                            .ok_or_else(|| {
+                                Error::domain("INVALID_SIMULATION", "Missing push baseline pose")
+                            })?;
+                        Ok((glam::DVec3::from_array(current.position)
+                            - glam::DVec3::from_array(baseline.position))
+                        .dot(direction))
+                    }
+                    _ => Err(Error::domain(
+                        "INVALID_SIMULATION",
+                        "Unknown proxy primitive",
+                    )),
+                }
+            })();
+            raw.jobs.insert(
+                (ci, ji),
+                match value {
+                    Ok(value) if value.is_finite() => JobOutcome {
+                        status: MeasStatus::Ok,
+                        value: Some(value),
+                        max: None,
+                        witness: None,
+                        reason: None,
+                        slow: Vec::new(),
+                    },
+                    Ok(_) => sim_error("simulation produced a nonfinite measurement".into()),
+                    Err(error) => sim_error(error.to_string()),
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `YYYY-MM-DDTHH:MM:SS.mmmZ` from Unix milliseconds.
@@ -601,6 +1000,18 @@ pub fn assemble(
         )];
         report.show_previous = body.is_some();
     }
+    if marks.on_demand
+        && !matches!(
+            report.status,
+            RequirementStatus::NeedsReview | RequirementStatus::Error
+        )
+    {
+        report.status = RequirementStatus::Pending;
+        report.reasons = vec![
+            "proxy simulation runs on demand until a measured cost estimate is supported".into(),
+        ];
+        report.show_previous = body.is_some();
+    }
     report.reasons.extend(p.notes.iter().cloned());
     let previous_field = |key: &str| previous.and_then(|v| v.get(key).cloned());
     let findings = match eval {
@@ -659,6 +1070,10 @@ pub struct AutoRunReport {
     pub ran: Vec<String>,
     /// Over budget: marked pending, run on demand.
     pub stale: Vec<StaleRequirement>,
+    /// Simulation requirements wait for an explicit run until a measured
+    /// simulation cost estimator is available.
+    #[serde(default)]
+    pub on_demand: Vec<String>,
     /// Could not evaluate (needs review, error); that status was stored.
     pub blocked: Vec<String>,
     /// Failed, was cancelled or timed out; the previous result was kept.
@@ -776,13 +1191,17 @@ impl Core {
             return Err(Error::domain("CANCELLED", "Requirement run cancelled"));
         }
         let models = referenced_models(&approved);
-        let live = self
+        let mut live = self
             .live_snapshot(
                 workspace,
                 actor,
                 (!models.is_empty()).then_some(models.as_slice()),
             )
             .await?;
+        super::tool::hydrate_history_features(self, actor, &mut live, &approved.requirement)
+            .await?;
+        live.snapshot
+            .attach_reference_signatures(&approved.manifest.signature_map());
         let prepared = prepare(id, &approved, edited, &live, &settings);
         Ok((owner, prepared, entry.last_result))
     }
@@ -864,11 +1283,41 @@ impl Core {
         let unsupported = prepared.approved.requirement.unsupported.len();
         let core = self.clone();
         let use_cache = opts.use_cache;
+        let mut simulation_revisions = BTreeMap::new();
+        for state in run.manifest.states.values().flatten() {
+            for value in &state.values {
+                let StateValue::Simulate { model, .. } = value else {
+                    continue;
+                };
+                if simulation_revisions.contains_key(model) {
+                    continue;
+                }
+                let view = prepared.views.get(&model_key(model)).ok_or_else(|| {
+                    Error::domain(
+                        "INVALID_SIMULATION",
+                        format!("No built view for simulated model {}", model_key(model)),
+                    )
+                })?;
+                let revision = self
+                    .requirement_revision(&view.workspace, &view.revision)
+                    .await?;
+                simulation_revisions.insert(model.clone(), revision);
+            }
+        }
         let outcome = tokio::task::spawn_blocking(move || {
             // The lease lives until the entered CPU work ends.
             let _lease = lease;
-            let mut exec = LiveExecutor::new(core, views, cancel, use_cache);
-            let raw = run_plan(&run.plan, &run.manifest, &mut exec, &chunk);
+            let mut exec = LiveExecutor::new(core, views, cancel.clone(), use_cache);
+            let raw = run_plan(&run.plan, &run.manifest, &mut exec, &chunk).and_then(|mut raw| {
+                fill_proxy_results(
+                    &run.plan,
+                    &run.manifest,
+                    &mut raw,
+                    &simulation_revisions,
+                    &cancel,
+                )?;
+                Ok(raw)
+            });
             (
                 raw.map(|raw| {
                     evaluate(&run.plan, &run.manifest, &raw, &settings, &id, unsupported)
@@ -1195,6 +1644,30 @@ impl Core {
             };
             let budget = f64::from(prepared.settings.auto_run_budget_secs);
             report.budget_s = prepared.settings.auto_run_budget_secs;
+            let has_simulation = prepared.run.as_ref().is_some_and(|run| {
+                run.manifest.states.values().flatten().any(|state| {
+                    state
+                        .values
+                        .iter()
+                        .any(|value| matches!(value, super::states::StateValue::Simulate { .. }))
+                })
+            });
+            if has_simulation {
+                let marks = Marks {
+                    on_demand: true,
+                    ..Default::default()
+                };
+                let stored = self
+                    .store_requirement_result(actor, workspace_id, &prepared, &idle_cancel, |p| {
+                        assemble(&prepared, None, p, &marks)
+                    })
+                    .await;
+                match stored {
+                    Ok(_) => report.on_demand.push(id),
+                    Err(error) => report.failed.push(failure(&id, &error)),
+                }
+                continue;
+            }
             let pool = pool_size(self, None);
             let Some(estimate) = estimate_cost_s(&prepared, previous.as_ref(), pool) else {
                 // Cannot evaluate: store needs_review / error without a run.

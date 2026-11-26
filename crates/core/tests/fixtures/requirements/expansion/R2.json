@@ -26,7 +26,7 @@
     "id": "c1.1",
     "origin": {
       "claim": "c1",
-      "library_version": "2dbb98b70b3093b9debf9fb33083a445fd2b6d9c30c5f86621aab7c2abca91dc",
+      "library_version": "33e5a9f2126b4bba814c1f007cbec3eb504f9ab8c9096f82b90a97ee0e5ee4d8",
       "rule": "moves_freely"
     },
     "pairing": "each_pair",

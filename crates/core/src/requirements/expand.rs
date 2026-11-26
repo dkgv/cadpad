@@ -103,6 +103,17 @@ impl Emit<'_> {
             .primitive(primitive)
             .expect("rule emits a library primitive");
         let n = self.out.len() + 1;
+        let quantifier = match &states {
+            StateSpace::Simulate {
+                when: super::ir::When::Always {},
+                ..
+            } => Quantifier::ForAll,
+            StateSpace::Simulate {
+                when: super::ir::When::Eventually {},
+                ..
+            } => Quantifier::Exists,
+            _ => self.claim.quantifier,
+        };
         self.out.push(PrimitiveClaim {
             id: format!("{}.{n}", self.claim.id),
             origin: Origin {
@@ -114,7 +125,7 @@ impl Emit<'_> {
             args: args.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
             pairing: pairing.unwrap_or_else(|| pairing_of(def)),
             states,
-            quantifier: self.claim.quantifier,
+            quantifier,
             cmp,
             strict,
             source: self.claim.source,
@@ -124,13 +135,27 @@ impl Emit<'_> {
     }
 }
 
-/// Pairing implied by a primitive's signature: one single-part argument means
-/// "each", two mean "each pair", none means the sets are measured whole.
+/// Pairing implied by a primitive's signature: `single` part or entity
+/// arguments mean "each" (one) or "each pair" (two); set arguments are
+/// measured whole.
+///
+/// `clearance_along` is the exception: it measures one side against every
+/// entity of the other and reports the tightest, so a multi-face feature
+/// selection stays one pairwise argument. Without this, allowing sets on both
+/// sides would downgrade it to `Each` and drop the second side from the job.
 fn pairing_of(def: &PrimitiveDef) -> Pairing {
+    if def.name == "clearance_along" {
+        return Pairing::EachPair;
+    }
     match def
         .args
         .iter()
-        .filter(|a| a.kind == ArgKind::Parts { single: true })
+        .filter(|a| {
+            matches!(
+                a.kind,
+                ArgKind::Parts { single: true } | ArgKind::Entities { single: true }
+            )
+        })
         .count()
     {
         0 => Pairing::Whole,
@@ -160,7 +185,7 @@ fn states_or_rest(claim: &Claim, name: &str) -> Vec<StateSpace> {
         .unwrap_or_else(|| vec![StateSpace::Rest {}])
 }
 
-fn expand_rule(e: &mut Emit) -> Result<(), Vec<Diagnostic>> {
+fn expand_rule(e: &mut Emit, at: &str) -> Result<(), Vec<Diagnostic>> {
     let claim = e.claim;
     let eps = e.eps();
     let le_eps = Comparator::Le { value: eps.clone() };
@@ -287,6 +312,285 @@ fn expand_rule(e: &mut Emit) -> Result<(), Vec<Diagnostic>> {
                 );
             }
         }
+        "aligned" => {
+            // The profile normal is `plane` when given, else B's own axis or
+            // plane normal (a feature face/edge axis, resolved by the worker).
+            let axis = claim
+                .args
+                .get("plane")
+                .cloned()
+                .unwrap_or_else(|| arg(claim, "b").clone());
+            let (Arg::Quantity(tol), Arg::Quantity(margin)) =
+                (arg(claim, "tol"), arg(claim, "margin"))
+            else {
+                unreachable!("tol/margin checked against the signature");
+            };
+            for s in states_or_rest(claim, "at") {
+                e.push(
+                    "profile_centre",
+                    vec![
+                        ("a", arg(claim, "a").clone()),
+                        ("b", arg(claim, "b").clone()),
+                        ("axis", axis.clone()),
+                    ],
+                    None,
+                    s.clone(),
+                    Comparator::Le { value: tol.clone() },
+                    false,
+                    Some("centre".into()),
+                );
+                e.push(
+                    "profile_size",
+                    vec![
+                        ("a", arg(claim, "a").clone()),
+                        ("b", arg(claim, "b").clone()),
+                        ("axis", axis.clone()),
+                    ],
+                    None,
+                    s,
+                    Comparator::Ge {
+                        value: margin.clone(),
+                    },
+                    false,
+                    Some("opening margin".into()),
+                );
+            }
+        }
+        "press_fit" => {
+            let Some(Arg::Compare(range)) = claim.args.get("range") else {
+                unreachable!("range checked against the signature");
+            };
+            // Coaxial: the axis offset must stay within half the smallest
+            // guaranteed radial engagement of the fit, i.e. half the smallest
+            // |diametral difference| the range allows. A range that reaches
+            // zero gives no scale for "coaxial" and is rejected.
+            let tol = coaxial_tolerance(range).ok_or_else(|| {
+                vec![Diagnostic::new(
+                    DiagnosticCode::ETypeKind,
+                    format!("{at}.args.range"),
+                    "press_fit needs a range bounded away from zero: the coaxial \
+                     check is scaled by the guaranteed diametral difference",
+                )]
+            })?;
+            for s in states_or_rest(claim, "at") {
+                e.push(
+                    "diameter_difference",
+                    vec![
+                        ("a", arg(claim, "pin").clone()),
+                        ("b", arg(claim, "hole").clone()),
+                    ],
+                    None,
+                    s.clone(),
+                    range.clone(),
+                    false,
+                    Some("diameter difference".into()),
+                );
+                e.push(
+                    "axis_offset",
+                    vec![
+                        ("a", arg(claim, "pin").clone()),
+                        ("b", arg(claim, "hole").clone()),
+                    ],
+                    None,
+                    s,
+                    Comparator::Le { value: tol.clone() },
+                    false,
+                    Some("coaxial".into()),
+                );
+            }
+        }
+        "fit" => {
+            let class_text = match arg(claim, "class") {
+                Arg::Token(t) => t.text.clone(),
+                _ => unreachable!("class checked against the signature"),
+            };
+            let nominal_mm = match arg(claim, "nominal") {
+                Arg::Quantity(l) => l
+                    .quantity()
+                    .expect(super::quantity::Dimension::Length)
+                    .map_err(|e| vec![e.diagnostic(format!("{at}.args.nominal"))])?,
+                Arg::Token(t) => super::fasteners::parse_size_label(&t.text).ok_or_else(|| {
+                    vec![Diagnostic::new(
+                        DiagnosticCode::ETypeKind,
+                        format!("{at}.args.nominal"),
+                        format!(
+                            "nominal must be a length or a fastener size like M8, not {:?}",
+                            t.text
+                        ),
+                    )]
+                })?,
+                _ => unreachable!("nominal checked against the signature"),
+            };
+            let Some(fit) = super::iso286::parse_fit_class(&class_text) else {
+                return Err(vec![Diagnostic::new(
+                    DiagnosticCode::ETypeKind,
+                    format!("{at}.args.class"),
+                    format!("{class_text:?} is not an ISO 286 tolerance class"),
+                )]);
+            };
+            let Some(dev) = super::iso286::deviation_um(fit, nominal_mm) else {
+                return Err(vec![Diagnostic::new(
+                    DiagnosticCode::ETypeKind,
+                    format!("{at}.args.class"),
+                    format!(
+                        "{class_text} is not tabulated at Ø{nominal_mm} mm (ISO 286 covers \
+                         holes H and shafts f/g/h/js/k/n/p/s at IT5–IT12, 0 < d ≤ 50 mm)"
+                    ),
+                )]);
+            };
+            let note = format!("ISO 286-2 {class_text} at Ø{nominal_mm} mm");
+            let lit = |mm: f64| Literal {
+                value: mm,
+                unit: Unit::Mm,
+                source: Source::Library,
+                note: Some(note.clone()),
+            };
+            let cmp = Comparator::In {
+                lo: lit(nominal_mm + dev.lower_um * 0.001),
+                hi: lit(nominal_mm + dev.upper_um * 0.001),
+            };
+            for s in states_or_rest(claim, "at") {
+                e.push(
+                    "diameter",
+                    vec![("a", arg(claim, "feature").clone())],
+                    None,
+                    s,
+                    cmp.clone(),
+                    false,
+                    Some(note.clone()),
+                );
+            }
+        }
+        "seated" => {
+            // No area given: any positive contact counts, so compare strictly.
+            let (contact, strict) = match claim.args.get("area") {
+                Some(Arg::Quantity(l)) => (Comparator::Ge { value: l.clone() }, false),
+                _ => (
+                    Comparator::Ge {
+                        value: Literal {
+                            value: 0.0,
+                            unit: Unit::Mm2,
+                            source: Source::Library,
+                            note: Some("any contact area".into()),
+                        },
+                    },
+                    true,
+                ),
+            };
+            for s in states_or_rest(claim, "at") {
+                e.push(
+                    "interference",
+                    vec![
+                        ("a", arg(claim, "a").clone()),
+                        ("b", arg(claim, "on").clone()),
+                    ],
+                    None,
+                    s.clone(),
+                    le_eps.clone(),
+                    false,
+                    Some("seated: no overlap".into()),
+                );
+                e.push(
+                    "contact_area",
+                    vec![
+                        ("a", arg(claim, "a").clone()),
+                        ("b", arg(claim, "on").clone()),
+                    ],
+                    // Whole: the summed common-face area of the sets, so one
+                    // seated member is enough when `area` is omitted.
+                    Some(Pairing::Whole),
+                    s,
+                    contact.clone(),
+                    strict,
+                    Some("seated: contact area".into()),
+                );
+            }
+        }
+        "bolted" => {
+            // Expansion per spec §4.1, limited to what whole-part primitives
+            // can measure (the holes themselves are not separate arguments):
+            // - hole Ø: the consistent bore diameter of each bolted part;
+            // - coaxial holes: enforced by the no-overlap checks — a straight
+            //   fastener through misaligned holes intersects the walls;
+            // - hardware overlaps no printed part: interference vs each side;
+            // - fasteners bear on both parts (nut seated, shank spans):
+            //   positive contact area vs each side;
+            // - parts bear on each other: contact_area within `bearing`;
+            // - nut engaged with thread_protrusion within `protrusion`.
+            let cmp = |name: &str| match arg(claim, name) {
+                Arg::Compare(c) => c.clone(),
+                _ => unreachable!("{name} checked against the signature"),
+            };
+            let hole = cmp("hole");
+            let protrusion = cmp("protrusion");
+            let bearing = cmp("bearing");
+            let any_contact = |note: &str| Literal {
+                value: 0.0,
+                unit: Unit::Mm2,
+                source: Source::Library,
+                note: Some(note.into()),
+            };
+            for side in ["p1", "p2"] {
+                e.push(
+                    "diameter",
+                    vec![("a", arg(claim, side).clone())],
+                    None,
+                    StateSpace::Rest {},
+                    hole.clone(),
+                    false,
+                    Some("hole diameter".into()),
+                );
+                e.push(
+                    "interference",
+                    vec![
+                        ("a", arg(claim, "fasteners").clone()),
+                        ("b", arg(claim, side).clone()),
+                    ],
+                    None,
+                    StateSpace::Rest {},
+                    le_eps.clone(),
+                    false,
+                    Some("hardware overlaps no printed part".into()),
+                );
+                e.push(
+                    "contact_area",
+                    vec![
+                        ("a", arg(claim, "fasteners").clone()),
+                        ("b", arg(claim, side).clone()),
+                    ],
+                    // Whole: total bearing area of the hardware on this side;
+                    // per-pair would demand every nut touch both parts.
+                    Some(Pairing::Whole),
+                    StateSpace::Rest {},
+                    Comparator::Ge {
+                        value: any_contact("fastener bears on the part"),
+                    },
+                    true,
+                    Some("fastener bears on the part".into()),
+                );
+            }
+            e.push(
+                "contact_area",
+                vec![
+                    ("a", arg(claim, "p1").clone()),
+                    ("b", arg(claim, "p2").clone()),
+                ],
+                Some(Pairing::Whole),
+                StateSpace::Rest {},
+                bearing,
+                false,
+                Some("parts bear on each other".into()),
+            );
+            e.push(
+                "thread_protrusion",
+                vec![("a", arg(claim, "fasteners").clone())],
+                None,
+                StateSpace::Rest {},
+                protrusion,
+                false,
+                Some("thread engagement".into()),
+            );
+        }
         "single_solid" => {
             let one = |note| Literal {
                 value: 1.0,
@@ -330,6 +634,43 @@ fn bed_limits(bed: &Arg) -> Vec<Literal> {
     }
 }
 
+/// Half the smallest |diametral difference| `range` guarantees, in mm — the
+/// coaxial tolerance for `press_fit` (a press fit needs the axes aligned to
+/// better than half the guaranteed radial engagement). `None` when the range
+/// permits a zero difference: there is then no engagement to scale by.
+fn coaxial_tolerance(range: &Comparator) -> Option<Literal> {
+    use super::quantity::Dimension;
+    let mm = |l: &Literal| l.quantity().expect(Dimension::Length).ok();
+    // The allowed interval [lo, hi]; an open end is unbounded.
+    let (lo, hi) = match range {
+        Comparator::Ge { value } => (mm(value)?, f64::INFINITY),
+        Comparator::Le { value } => (f64::NEG_INFINITY, mm(value)?),
+        Comparator::In { lo, hi } => (mm(lo)?, mm(hi)?),
+        Comparator::Approx { target, tol } => {
+            let (t, d) = (mm(target)?, mm(tol)?);
+            (t - d, t + d)
+        }
+        Comparator::IsTrue {} | Comparator::IsFalse {} => return None,
+    };
+    // Smallest |x| over the interval, or infinity when it contains no bound.
+    let min_abs = if lo <= 0.0 && 0.0 <= hi {
+        0.0
+    } else if lo > 0.0 {
+        lo
+    } else {
+        hi.abs()
+    };
+    if !(min_abs > 0.0) || !min_abs.is_finite() {
+        return None;
+    }
+    Some(Literal {
+        value: min_abs * 0.5,
+        unit: Unit::Mm,
+        source: Source::Library,
+        note: Some("half the guaranteed diametral difference".into()),
+    })
+}
+
 fn expand_measure(e: &mut Emit, at: &str) -> Result<(), Vec<Diagnostic>> {
     let claim = e.claim;
     let kind_err =
@@ -355,13 +696,18 @@ fn expand_measure(e: &mut Emit, at: &str) -> Result<(), Vec<Diagnostic>> {
             errors.extend(c.validate(&format!("{at}.args.cmp")));
             let want = def.result;
             match c.dimension() {
-                Some(d) if d != want => errors.push(
-                    super::quantity::DimensionMismatch {
-                        expected: want,
-                        found: d,
-                    }
-                    .diagnostic(format!("{at}.args.cmp")),
-                ),
+                Some(d)
+                    if (d != want
+                        && !(name == "joint" && d == super::quantity::Dimension::Angle)) =>
+                {
+                    errors.push(
+                        super::quantity::DimensionMismatch {
+                            expected: want,
+                            found: d,
+                        }
+                        .diagnostic(format!("{at}.args.cmp")),
+                    )
+                }
                 _ => {}
             }
             Some(c.clone())
@@ -389,10 +735,14 @@ fn expand_measure(e: &mut Emit, at: &str) -> Result<(), Vec<Diagnostic>> {
         .filter_map(|s| claim.args.get(s.name).map(|v| (s.name, v.clone())))
         .collect();
     for s in states_or_rest(claim, "at") {
+        let pairing = library()
+            .primitive(&def.name)
+            .is_some_and(|d| d.accuracy == super::library::Accuracy::Proxy)
+            .then_some(Pairing::Whole);
         e.push(
             def.name,
             args.clone(),
-            None,
+            pairing,
             s,
             cmp.clone().expect("checked"),
             false,
@@ -438,7 +788,7 @@ pub fn expand_claim(
         if !errors.is_empty() {
             return Err(errors);
         }
-        expand_rule(&mut emit)?;
+        expand_rule(&mut emit, at)?;
     }
     Ok(emit.out)
 }
@@ -641,13 +991,157 @@ mod tests {
         .unwrap();
         assert_eq!(out[0].primitive, "min_clearance");
         assert_eq!(out[0].origin.rule, "measure");
-        let err = expand(json!({"id": "c", "rule": "measure", "args": {"fn": {"text": "gap"}}}))
-            .unwrap_err();
+        let err =
+            expand(json!({"id": "c", "rule": "measure", "args": {"fn": {"text": "no_such_fn"}}}))
+                .unwrap_err();
         assert_eq!(err[0].at, "claims[0].args.fn");
         let err = expand(json!({"id": "c", "rule": "measure", "args": {
             "fn": {"text": "min_clearance"}, "a": part("a"), "b": part("b"),
             "cmp": {"compare": {"op": ">=", "value": {"value": 2.0, "unit": "deg"}}}}}))
         .unwrap_err();
         assert_eq!(err[0].code, DiagnosticCode::ETypeUnit);
+    }
+
+    #[test]
+    fn measure_accepts_feature_entities_direction_words_and_feature_axes() {
+        let feat = |n: &str| {
+            json!({"feature": {"kind": "explicit",
+                "part": {"model": {"entry": "m.py", "builder": "m"}, "part": {"name": "door"}},
+                "name": n}})
+        };
+        let cmp = json!({"compare": {"op": ">=", "value": {"value": 8.0, "unit": "mm"}}});
+        let out = expand(json!({"id": "c", "rule": "measure", "args": {
+            "fn": {"text": "diameter"}, "a": feat("bore"), "cmp": cmp}}))
+        .unwrap();
+        assert_eq!(out[0].primitive, "diameter");
+        assert!(matches!(out[0].args["a"], Arg::Feature(_)));
+        let out = expand(json!({"id": "c", "rule": "measure", "args": {
+            "fn": {"text": "clearance_along"}, "a": part("a"), "b": feat("walls"),
+            "directions": {"list": [{"text": "+x"}, {"text": "-y"}]}, "cmp": cmp}}))
+        .unwrap();
+        assert_eq!(out[0].primitive, "clearance_along");
+        // `along` takes a feature (its axis is measured), an axis or a word.
+        let out = expand(json!({"id": "c", "rule": "measure", "args": {
+            "fn": {"text": "overlap_depth"}, "a": feat("lip"), "b": feat("ledge"),
+            "along": feat("axis"), "cmp": cmp}}))
+        .unwrap();
+        assert_eq!(out[0].primitive, "overlap_depth");
+        assert!(matches!(out[0].args["along"], Arg::Feature(_)));
+    }
+
+    #[test]
+    fn aligned_expands_to_profile_claims_on_bs_axis() {
+        let q = |v: f64| json!({"quantity": {"value": v, "unit": "mm"}});
+        let out = expand(json!({"id": "c", "rule": "aligned", "args": {
+            "a": part("j1"), "b": part("cutout"),
+            "tol": q(0.2), "margin": q(0.3)}}))
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].primitive, "profile_centre");
+        assert_eq!(out[1].primitive, "profile_size");
+        // No `plane`: the axis argument is B itself (its own axis/normal).
+        assert!(matches!(out[0].args["axis"], Arg::Part(_)));
+        assert_eq!(
+            out[0].args["axis"],
+            out[0].args["b"].clone(),
+            "axis defaults to the b argument"
+        );
+        assert!(matches!(&out[0].cmp, Comparator::Le { value } if value.value == 0.2));
+        assert!(matches!(&out[1].cmp, Comparator::Ge { value } if value.value == 0.3));
+        // An explicit plane wins over the default.
+        let out = expand(json!({"id": "c", "rule": "aligned", "args": {
+            "a": part("j1"), "b": part("cutout"), "plane": {"axis": "z"},
+            "tol": q(0.2), "margin": q(0.3)}}))
+        .unwrap();
+        assert_eq!(out[0].args["axis"], Arg::Axis(AxisRef::Z));
+    }
+
+    #[test]
+    fn press_fit_scales_the_coaxial_check_to_the_range() {
+        let cmp = |lo: f64, hi: f64| {
+            json!({"compare": {"op": "in", "lo": {"value": lo, "unit": "mm"},
+                "hi": {"value": hi, "unit": "mm"}}})
+        };
+        let out = expand(json!({"id": "c", "rule": "press_fit", "args": {
+            "pin": part("pin"), "hole": part("bore"), "range": cmp(0.02, 0.05)}}))
+        .unwrap();
+        assert_eq!(out[0].primitive, "diameter_difference");
+        assert_eq!(out[1].primitive, "axis_offset");
+        // Half the smallest guaranteed |difference|: min(|0.02|,|0.05|)/2.
+        assert!(matches!(&out[1].cmp, Comparator::Le { value } if value.value == 0.01));
+        // A range reaching zero gives no engagement scale: signature-level error.
+        let err = expand(json!({"id": "c", "rule": "press_fit", "args": {
+            "pin": part("pin"), "hole": part("bore"), "range": cmp(-0.02, 0.05)}}))
+        .unwrap_err();
+        assert_eq!(err[0].at, "claims[0].args.range");
+    }
+
+    #[test]
+    fn fit_expands_to_a_diameter_in_the_iso286_zone() {
+        let out = expand(json!({"id": "c", "rule": "fit", "args": {
+            "feature": {"feature": {"kind": "explicit",
+                "part": {"model": {"entry": "h.py", "builder": "h"}, "part": {"name": "housing"}},
+                "name": "shaft_bore"}},
+            "class": {"token": {"text": "H7"}},
+            "nominal": {"quantity": {"value": 8.0, "unit": "mm"}}}}))
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].primitive, "diameter");
+        // H7 at Ø8 mm: +0/+15 µm -> [8.000, 8.015].
+        let Comparator::In { lo, hi } = &out[0].cmp else {
+            panic!()
+        };
+        assert!((lo.value - 8.0).abs() < 1e-9 && (hi.value - 8.015).abs() < 1e-9);
+        let err = expand(json!({"id": "c", "rule": "fit", "args": {
+            "feature": part("bore"), "class": {"token": {"text": "ZZ9"}},
+            "nominal": {"quantity": {"value": 8.0, "unit": "mm"}}}}))
+        .unwrap_err();
+        assert_eq!(err[0].at, "claims[0].args.class");
+    }
+
+    #[test]
+    fn seated_and_bolted_emit_their_documented_pieces() {
+        let q = |v: f64, u: &str| json!({"quantity": {"value": v, "unit": u}});
+        let out = expand(json!({"id": "c", "rule": "seated", "args": {
+            "a": part("lid"), "on": part("base")}}))
+        .unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].primitive, "interference");
+        assert_eq!(out[1].primitive, "contact_area");
+        assert_eq!(out[1].pairing, Pairing::Whole);
+        assert!(out[1].strict, "no area: any positive contact counts");
+        let out = expand(json!({"id": "c", "rule": "seated", "args": {
+            "a": part("lid"), "on": part("base"), "area": q(100.0, "mm2")}}))
+        .unwrap();
+        assert!(!out[1].strict);
+        assert!(matches!(&out[1].cmp, Comparator::Ge { value } if value.value == 100.0));
+
+        let cmp = |op: &str, v: f64, u: &str| json!({"compare": {"op": op, "value": {"value": v, "unit": u}}});
+        let out = expand(json!({"id": "c", "rule": "bolted", "args": {
+            "p1": part("slab"), "p2": part("cover"), "fasteners": part("bolt_1"),
+            "size": {"token": {"text": "M8"}},
+            "hole": {"compare": {"op": "in",
+                "lo": {"value": 8.4, "unit": "mm"}, "hi": {"value": 9.0, "unit": "mm"}}},
+            "protrusion": cmp(">=", 1.0, "mm"), "bearing": cmp(">=", 100.0, "mm2")}}))
+        .unwrap();
+        let prims: Vec<_> = out.iter().map(|p| p.primitive.as_str()).collect();
+        assert_eq!(
+            prims,
+            [
+                "diameter",
+                "interference",
+                "contact_area",
+                "diameter",
+                "interference",
+                "contact_area",
+                "contact_area",
+                "thread_protrusion",
+            ]
+        );
+        assert!(
+            out.iter()
+                .filter(|p| p.primitive == "contact_area")
+                .all(|p| p.pairing == Pairing::Whole)
+        );
     }
 }

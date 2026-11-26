@@ -246,7 +246,7 @@ impl Ctx<'_> {
 
     fn feature(&self, f: &FeatureRef) -> String {
         match f {
-            FeatureRef::Explicit { part, name } | FeatureRef::History { part, name } => {
+            FeatureRef::Explicit { part, name } | FeatureRef::History { part, name, .. } => {
                 format!("{name} of {}", self.part(part))
             }
             FeatureRef::Geometric { part, entity, hash } => format!(
@@ -304,6 +304,29 @@ impl Ctx<'_> {
                 joint.name,
                 fmt_range(&range.from, &range.to),
                 fmt_lit(&range.step)
+            ),
+            StateSpace::Simulate {
+                model,
+                simulation,
+                when,
+            } => format!(
+                "proxy simulation of {} ({} actions, {} ticks, {})",
+                model.entry,
+                simulation.actions.len(),
+                simulation.actions.iter().map(|a| a.ticks).sum::<u32>(),
+                match when {
+                    super::ir::When::End {} => "at end",
+                    super::ir::When::At { time } =>
+                        return format!(
+                            "proxy simulation of {} ({} actions, {} ticks, at {})",
+                            model.entry,
+                            simulation.actions.len(),
+                            simulation.actions.iter().map(|a| a.ticks).sum::<u32>(),
+                            fmt_lit(time)
+                        ),
+                    super::ir::When::Always {} => "always",
+                    super::ir::When::Eventually {} => "eventually",
+                }
             ),
             StateSpace::Product { factors } => factors
                 .iter()
@@ -596,6 +619,7 @@ fn chosen_from_states(out: &mut Vec<Chosen>, s: &StateSpace) {
             &range.step,
         ),
         StateSpace::Product { factors } => factors.iter().for_each(|f| chosen_from_states(out, f)),
+        StateSpace::Simulate { .. } => {}
     }
 }
 
@@ -725,17 +749,17 @@ pub fn print_requirement(
         ));
     }
     let used: BTreeSet<&str> = prims.iter().map(|p| p.primitive.as_str()).collect();
-    for acc in [Accuracy::Exact, Accuracy::Sampled] {
+    for acc in [Accuracy::Exact, Accuracy::Sampled, Accuracy::Proxy] {
         let names: Vec<&str> = used
             .iter()
             .copied()
             .filter(|n| lib.primitive(n).is_some_and(|d| d.accuracy == acc))
             .collect();
         if !names.is_empty() {
-            let label = if acc == Accuracy::Exact {
-                "exact"
-            } else {
-                "sampled"
+            let label = match acc {
+                Accuracy::Exact => "exact",
+                Accuracy::Sampled => "sampled",
+                Accuracy::Proxy => "proxy (simulation)",
             };
             details.push(format!("accuracy {label} ({})", names.join(", ")));
         }
@@ -802,13 +826,13 @@ pub fn print_expansion(
                 .as_deref()
                 .map(|n| format!(" [{n}]"))
                 .unwrap_or_default();
-            let acc = lib.primitive(&p.primitive).map_or("", |d| {
-                if d.accuracy == Accuracy::Exact {
-                    "exact"
-                } else {
-                    "sampled"
-                }
-            });
+            let acc = lib
+                .primitive(&p.primitive)
+                .map_or("", |d| match d.accuracy {
+                    Accuracy::Exact => "exact",
+                    Accuracy::Sampled => "sampled",
+                    Accuracy::Proxy => "proxy (simulation)",
+                });
             format!(
                 "{}: {what} is {cmp}{how}, {} [{acc}]{note}",
                 p.id,

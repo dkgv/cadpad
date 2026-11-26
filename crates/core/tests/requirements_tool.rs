@@ -154,18 +154,6 @@ async fn save_stores_a_draft_with_cas_and_replies_match_the_schema() {
     .unwrap_err();
     assert_eq!(err.code(), "REVISION_CONFLICT");
 
-    // Motion tests keep working in the same catalog.
-    let tests = core
-        .dispatch(
-            &context(),
-            "control_motion_tests",
-            json!({"workspace_id": ws, "revision": "", "expected_catalog": null, "command": {"action": "list"}}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(tests["tests"], json!([]));
-    assert_eq!(tests["catalog"], saved["catalog"]);
-
     let lib = call(&core, &ws, None, json!({"action": "library"}))
         .await
         .unwrap();

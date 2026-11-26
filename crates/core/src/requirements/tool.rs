@@ -4,7 +4,8 @@
 //! ([`Core::approve_requirement`]), which `tools::dispatch` cannot reach.
 use super::compile::{Compiled, compile};
 use super::diagnostics::Diagnostic;
-use super::ir::{ModelRef, Requirement};
+use super::dispatch::LiveSnapshot;
+use super::ir::{FeatureRef, ModelRef, PartName, Requirement};
 use super::library::{library, library_version, vague_table};
 use super::print::Print;
 use super::provenance::Downgrade;
@@ -12,6 +13,7 @@ use super::run::RunInfo;
 use super::settings::ProjectSettings;
 use super::snapshot::{WorkspaceSnapshot, snapshot_from_values};
 use super::storage::{RequirementInfo, StoredHashes, project_settings, reply as catalog};
+use super::suggestions::ShapeSignature;
 use crate::motion_tests::Saved;
 use crate::{Core, Error, Result};
 use schemars::JsonSchema;
@@ -121,13 +123,16 @@ pub(crate) async fn snapshot_for(
     core: &Core,
     workspace_id: &str,
     actor: &str,
+    requirement: &Requirement,
 ) -> Result<WorkspaceSnapshot> {
     // Bind against what the models build to now, from the project's sources.
     // A workspace that is not a project (or has no models) falls back to the
     // open model workspaces below.
-    if let Ok(live) = core.live_snapshot(workspace_id, actor, None).await
+    if let Ok(mut live) = core.live_snapshot(workspace_id, actor, None).await
         && !live.snapshot.models.is_empty()
     {
+        hydrate_history_features(core, actor, &mut live, requirement).await?;
+        attach_reference_signatures(core, workspace_id, requirement, &mut live.snapshot).await;
         return Ok(live.snapshot);
     }
     let owner = core.requirement_owner(workspace_id).await?;
@@ -177,7 +182,179 @@ pub(crate) async fn snapshot_for(
         };
         builds.entry(key).or_insert(built);
     }
-    Ok(snapshot_from_values(&catalog, &builds))
+    let mut snap = snapshot_from_values(&catalog, &builds);
+    attach_reference_signatures(core, workspace_id, requirement, &mut snap).await;
+    Ok(snap)
+}
+
+/// Give the snapshot the shape signatures this requirement's approved
+/// manifest recorded, so `bind` can rank signature candidates for broken
+/// references (spec §3.1). Drafts and requirements never approved get none.
+/// Reads the stored catalog directly: `requirement_catalog` migrates motion
+/// tests, and migration itself compiles through `snapshot_for`.
+async fn attach_reference_signatures(
+    core: &Core,
+    workspace_id: &str,
+    requirement: &Requirement,
+    snap: &mut WorkspaceSnapshot,
+) {
+    let Ok(owner) = core.requirement_owner(workspace_id).await else {
+        return;
+    };
+    let Ok(all) = core.workspace(&owner).await else {
+        return;
+    };
+    let signatures = all
+        .get(&owner)
+        .and_then(|ws| ws.stored.motion_tests.get(&requirement.id))
+        .and_then(Saved::requirement)
+        .and_then(|entry| entry.approved.as_ref())
+        .map(|approved| approved.manifest.signature_map())
+        .unwrap_or_default();
+    snap.attach_reference_signatures(&signatures);
+}
+
+pub(super) async fn hydrate_history_features(
+    core: &Core,
+    actor: &str,
+    live: &mut LiveSnapshot,
+    requirement: &Requirement,
+) -> Result<()> {
+    let mut refs: BTreeMap<ModelRef, Vec<(String, Value)>> = BTreeMap::new();
+    super::refs::walk(requirement, &mut |site| {
+        let super::refs::Ref::Feature(feature) = site.reference else {
+            return;
+        };
+        let (part, query) = match feature {
+            FeatureRef::History { part, name, .. } => {
+                (part, json!({"kind":"history", "name":name}))
+            }
+            FeatureRef::Geometric { part, entity, hash } => (
+                part,
+                json!({"kind":"geometric", "entity":entity, "hash":hash}),
+            ),
+            FeatureRef::Explicit { .. } => return,
+        };
+        let PartName::Name(part_name) = &part.part else {
+            return;
+        };
+        let mut query = query;
+        query["part"] = json!(part_name);
+        refs.entry(part.model.clone())
+            .or_default()
+            .push((part_name.clone(), query));
+    });
+    for (model, references) in refs {
+        let Some(view) = live.views.get(&model) else {
+            continue;
+        };
+        let response = core
+            .query_as_actor(
+                actor,
+                &view.workspace,
+                &view.revision,
+                "resolve_features",
+                json!({"references": references.iter().map(|(_, r)| r).collect::<Vec<_>>()}),
+            )
+            .await?;
+        let Some(rows) = response["references"].as_array() else {
+            continue;
+        };
+        let Some(built) = live
+            .snapshot
+            .models
+            .iter_mut()
+            .find(|m| m.model == model)
+            .and_then(|m| m.built.as_mut())
+        else {
+            continue;
+        };
+        for ((part, request), resolved) in references.iter().zip(rows) {
+            if resolved["status"] != "resolved" && resolved["status"] != "ambiguous" {
+                continue;
+            }
+            let kind = match resolved["entity"].as_str() {
+                Some("edge") => super::ir::EntityKind::Edge,
+                Some("face") => super::ir::EntityKind::Face,
+                _ => continue,
+            };
+            let history = request["kind"] == "history";
+            let name = if history {
+                request["name"].as_str().unwrap_or_default().to_owned()
+            } else {
+                format!(
+                    "geometric:{}:{}",
+                    request["entity"].as_str().unwrap_or(""),
+                    request["hash"].as_str().unwrap_or("")
+                )
+            };
+            let positional = resolved["positional"].as_bool().unwrap_or(false);
+            let source = if history {
+                super::snapshot::FeatureSource::History
+            } else {
+                super::snapshot::FeatureSource::Geometric
+            };
+            let count = resolved["count"].as_u64().unwrap_or(0);
+            let info = super::snapshot::FeatureInfo {
+                part: part.clone(),
+                name,
+                entity: kind,
+                count,
+                hash: resolved["hash"].as_str().unwrap_or_default().to_owned(),
+                source,
+                positional,
+            };
+            if built.features.iter().any(|f| {
+                f.part == info.part
+                    && f.name == info.name
+                    && f.source == info.source
+                    && f.hash == info.hash
+            }) {
+                continue;
+            }
+            built.feature_signatures.insert(
+                format!("{part}#{}", info.link_suffix()),
+                ShapeSignature::entity_count(kind, count),
+            );
+            built.features.push(info);
+        }
+        for (part, entries) in response["history_index"].as_object().into_iter().flatten() {
+            for item in entries.as_array().into_iter().flatten() {
+                let entity = match item["entity"].as_str() {
+                    Some("edge") => super::ir::EntityKind::Edge,
+                    Some("face") => super::ir::EntityKind::Face,
+                    _ => continue,
+                };
+                let Some(name) = item["name"].as_str() else {
+                    continue;
+                };
+                let hash = item["hash"].as_str().unwrap_or_default().to_owned();
+                if built.features.iter().any(|f| {
+                    f.part == *part
+                        && f.name == name
+                        && f.source == super::snapshot::FeatureSource::History
+                }) {
+                    continue;
+                }
+                let count = item["count"].as_u64().unwrap_or(0);
+                let info = super::snapshot::FeatureInfo {
+                    part: part.to_owned(),
+                    name: name.to_owned(),
+                    entity,
+                    count,
+                    hash,
+                    source: super::snapshot::FeatureSource::History,
+                    positional: item["positional"].as_bool().unwrap_or(false),
+                };
+                built.feature_signatures.insert(
+                    format!("{part}#{}", info.link_suffix()),
+                    ShapeSignature::entity_count(entity, count),
+                );
+                built.features.push(info);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn library_value(settings: &ProjectSettings) -> Value {
@@ -272,7 +449,7 @@ impl Core {
                 None,
             ),
             Command::Compile { ir } => {
-                let snapshot = snapshot_for(self, workspace_id, actor).await?;
+                let snapshot = snapshot_for(self, workspace_id, actor, &ir).await?;
                 let compiled = compile(&ir, &snapshot, &super::storage::settings_in(&current));
                 let report = CompileReport::new(compiled);
                 self.requirement_reply(&owner, &current, Some(report), None, None)
@@ -284,7 +461,7 @@ impl Core {
                         "Save needs expected_catalog from list",
                     ));
                 }
-                let snapshot = snapshot_for(self, workspace_id, actor).await?;
+                let snapshot = snapshot_for(self, workspace_id, actor, &ir).await?;
                 let compiled = compile(&ir, &snapshot, &super::storage::settings_in(&current));
                 let stored = self
                     .store_requirement_draft(

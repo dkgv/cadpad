@@ -171,6 +171,13 @@ class Part:
     # Enclosing project function of the publishing show() call; None at module level.
     function: str | None = None
     fastener: dict | None = None
+    # How the part was positioned (place()/position/assembly/source); see
+    # cadpad_worker.placement. Emitted in the build result's `placements` map.
+    placement: dict | None = None
+    # Source STEP assets used to make this published part. Path + digest lets
+    # requirement relinking distinguish an imported-file replacement from an
+    # ordinary geometry edit.
+    source_assets: list[dict] | None = None
 
 
 class Model:
@@ -196,6 +203,7 @@ class Model:
         self._history_features = None
         # Scalar results only; bounded across poses in this immutable revision.
         self._interference_results = OrderedDict()
+        self._source_assets = {}
 
     def artifact(self, data: bytes, suffix: str):
         digest = hashlib.sha256(data).hexdigest()
@@ -283,8 +291,53 @@ class Model:
                 frame = frame.f_back
             return None
 
+        def record_step_source(path):
+            site = call_site()
+            if site is None:
+                return
+            key = (site["file"], site.get("function"))
+            item = {
+                "path": path.relative_to(source_root).as_posix(),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+            assets = self._source_assets.setdefault(key, {})
+            assets[item["path"]] = item
+
+        def _origin_ref(value):
+            """`origin="entry.py#builder"` provenance for chip→part mapping."""
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise DomainError("INVALID_PARAMETER", "origin must be 'entry.py#builder'")
+            entry, sep, builder = value.rpartition("#")
+            if not sep or not entry.endswith(".py") or not builder or ":" in builder or builder.startswith("$"):
+                raise DomainError("INVALID_PARAMETER", "origin must be 'entry.py#builder'")
+            if not (source_root / entry).is_file():
+                raise DomainError("INVALID_PARAMETER", f"origin entry does not exist: {entry}")
+            return {"entry": entry, "builder": builder}
+
+        def _placement_record(marks, position, origin):
+            """Resolve how a published shape was positioned."""
+            present = [mark for mark in marks if mark]
+            if present and len(present) != len(marks):
+                raise DomainError("INVALID_GEOMETRY",
+                                  "Published shape mixes placed and unplaced geometry; show the placed part separately")
+            distinct = {json.dumps(mark, sort_keys=True) for mark in present}
+            if len(distinct) > 1:
+                raise DomainError("INVALID_GEOMETRY", "Conflicting place() records on one published shape")
+            record = json.loads(distinct.pop()) if distinct else None
+            if record is None:
+                record = {"method": "position" if tuple(position) != (0.0, 0.0, 0.0) else "source"}
+            if not isinstance(record, dict) or not isinstance(record.get("method"), str):
+                raise DomainError("INVALID_GEOMETRY", "Invalid placement record")
+            record = dict(record)
+            origin_ref = _origin_ref(origin) if origin is not None else record.get("origin")
+            if origin_ref is not None:
+                record["origin"] = origin_ref
+            return record
+
         def show(obj, *, name, position=(0, 0, 0), features=None, density=None, kind=None,
-                 fastener=None, _source=None):
+                 fastener=None, origin=None, _source=None, _placement=None):
             source = _source or call_site()
             if not isinstance(name, str) or not name or name in self.parts:
                 raise DomainError("INVALID_GEOMETRY", f"Published name must be unique: {name!r}")
@@ -295,16 +348,23 @@ class Model:
                     location = parent_location * assembly.loc
                     if assembly.obj is not None:
                         shape = assembly.obj.val() if isinstance(assembly.obj, cq.Workplane) else assembly.obj
-                        show(shape.moved(location), name=prefix, position=position, _source=source)
+                        mark = getattr(shape, "_cadpad_placement", None)
+                        placed = shape.moved(location)
+                        show(placed, name=prefix, position=position, _source=source,
+                             _placement={"method": "assembly",
+                                         **({"placed": mark} if mark else {})})
                     for child in assembly.children:
                         publish_assembly(child, f"{prefix}/{child.name}", location)
                 publish_assembly(obj, name, cq.Location())
                 return
+            marks = []
             if isinstance(obj, cq.Workplane):
                 shapes = [s for s in obj.vals() if isinstance(s, cq.Shape)]
+                marks = [getattr(s, "_cadpad_placement", None) for s in shapes]
                 shape = cq.Compound.makeCompound(shapes) if len(shapes) > 1 else shapes[0] if shapes else None
             else:
                 shape = obj
+                marks = [getattr(shape, "_cadpad_placement", None)] if isinstance(shape, cq.Shape) else []
             if not isinstance(shape, cq.Shape) or shape.isNull() or not shape.isValid():
                 raise DomainError("INVALID_GEOMETRY", f"Invalid published shape: {name}")
             if kind is not None and (kind not in ("solid", "surface", "wire") or
@@ -319,9 +379,116 @@ class Model:
                 raise DomainError("INVALID_PARAMETER", "Density must be positive kg/m³")
             fastener = validate_fastener(fastener)
             function = source.get("function") if source else None
+            source_assets = (list(self._source_assets.get((source["file"], function), {}).values())
+                             if source else [])
             source = dict(file=source["file"], line=source["line"]) if source else None
+            if _placement is not None:
+                marks = [_placement]
             self.parts[name] = Part(name, shape, tuple(position), features or {}, density,
-                                    source=source, function=function, fastener=fastener)
+                                    source=source, function=function, fastener=fastener,
+                                    placement=_placement_record(marks, position, origin),
+                                    source_assets=copy.deepcopy(source_assets) or None)
+
+        def _selection_shapes(value):
+            """cq entities inside a feature selection or Workplane."""
+            if isinstance(value, cq.Workplane):
+                items = value.vals()
+            elif isinstance(value, (list, tuple)):
+                items = value
+            else:
+                items = [value]
+            return [item for item in items if isinstance(item, cq.Shape)]
+
+        def _world(entity, part):
+            """Published-part-local entity in assembly coordinates."""
+            return entity.moved(cq.Location(cq.Vector(*part.position)))
+
+        def _placement_target(on):
+            from . import placement
+            if on is None:
+                raise DomainError("INVALID_PARAMETER", "place() needs on= (a face, edge, part or 'part#feature')")
+            if isinstance(on, str):
+                name, sep, feature = on.rpartition("#")
+                if not sep:
+                    name, feature = on, None
+                host = self.parts.get(name)
+                if host is None:
+                    raise DomainError("INVALID_PARAMETER", f"place() target part is not published yet: {name!r}")
+                if feature is None:
+                    entity = _world(host.shape, host)
+                    kind = "part"
+                else:
+                    if feature not in host.features:
+                        raise DomainError("INVALID_PARAMETER",
+                                          f"place() target {name!r} has no feature {feature!r}")
+                    entities = _selection_shapes(host.features[feature])
+                    if len(entities) != 1:
+                        raise DomainError("INVALID_PARAMETER",
+                                          f"place() target {name}#{feature} selects {len(entities)} entities; "
+                                          "publish a single face or edge for placement")
+                    entity = _world(entities[0], host)
+                    kind = ("face" if isinstance(entity, cq.Face)
+                            else "edge" if isinstance(entity, cq.Edge) else "part")
+                description = {"kind": kind, "part": name}
+                if feature is not None:
+                    description["feature"] = feature
+                return placement.target_from_entity(entity, description)
+            if isinstance(on, cq.Assembly):
+                raise DomainError("INVALID_PARAMETER", "place() on= does not accept an assembly")
+            if isinstance(on, cq.Workplane):
+                entities = _selection_shapes(on)
+                if len(entities) != 1:
+                    raise DomainError("INVALID_PARAMETER",
+                                      f"place() on= selects {len(entities)} entities; "
+                                      "select exactly one face, edge or part")
+                on = entities[0]
+            return placement.target_from_entity(on)
+
+        def _placement_mate(mate):
+            if mate is None:
+                return None
+            if isinstance(mate, cq.Face):
+                return mate
+            if isinstance(mate, cq.Workplane):
+                faces = [item for item in mate.vals() if isinstance(item, cq.Face)]
+                if len(faces) == 1:
+                    return faces[0]
+            raise DomainError("INVALID_PARAMETER",
+                              "place() mate= must be a single cadquery face of the part being placed")
+
+        def place(part, on=None, align="center", mate=None, offset=0.0, origin=None):
+            """Position `part` on a target feature and return the placed shape.
+
+            `on` is a planar `cq.Face`/`cq.Workplane` face selection, a `cq.Edge`
+            (centres the part on the edge line, e.g. a bore over an axle), a
+            whole `cq.Shape` (bounding-box top), or `"part#feature"` /
+            `"part"` naming an already-published part and one of its
+            `features=` selections. `align` is "center" (default), "min" or
+            "max" inside the target's extent; `offset` lifts the part along
+            the target normal in mm; `mate=` seats a specific face of the
+            part onto the target with a rigid transform. Show the result
+            directly: `show(place(lid, on="box#top"), name="lid")`.
+            """
+            from . import placement
+            if isinstance(part, cq.Assembly):
+                raise DomainError("INVALID_PARAMETER", "place() does not accept an assembly")
+            if isinstance(part, cq.Workplane):
+                shapes = [s for s in part.vals() if isinstance(s, cq.Shape)]
+                shape = cq.Compound.makeCompound(shapes) if len(shapes) > 1 else shapes[0] if shapes else None
+            else:
+                shape = part
+            if not isinstance(shape, cq.Shape) or shape.isNull() or not shape.isValid():
+                raise DomainError("INVALID_GEOMETRY", "place() needs valid cadquery geometry")
+            target = _placement_target(on)
+            mate_face = _placement_mate(mate)
+            location, record = placement.compute(shape, target, mate_face,
+                                                 align=align, offset=offset)
+            origin_ref = _origin_ref(origin)
+            if origin_ref is not None:
+                record["origin"] = origin_ref
+            placed = shape.moved(location)
+            placed._cadpad_placement = record
+            return placed
 
         def dimension(name, part, start, end, *, label=None, parameter=None):
             if not isinstance(name, str) or not name or name.startswith(("saved:", "overall:")):
@@ -345,12 +512,14 @@ class Model:
             path = (source_root / "assets" / asset).resolve(strict=True)
             if not path.is_relative_to(source_root / "assets"):
                 raise DomainError("BUILD_FAILED", "Imported assets must stay inside assets/")
+            record_step_source(path)
             return cq.importers.importStep(str(path))
 
         def import_step_named(asset, name="imported"):
             path = (source_root / "assets" / asset).resolve(strict=True)
             if not path.is_relative_to(source_root / "assets"):
                 raise DomainError("BUILD_FAILED", "Imported assets must stay inside assets/")
+            record_step_source(path)
             from .step_import import import_named_step
             return import_named_step(path, name)
 
@@ -384,7 +553,7 @@ class Model:
         helpers = dict(
             show=show, show_object=show_object, parameter=parameter, dimension=dimension, angle=angle,
             import_step=import_step, import_step_named=import_step_named,
-            import_stl=import_stl, fit_part=fit_part,
+            import_stl=import_stl, fit_part=fit_part, place=place,
             cached_shape=self._geometry_cache.shape,
         )
         context = SimpleNamespace(parameters=values, **helpers)
@@ -481,6 +650,11 @@ class Model:
         # Omit when unused so recovery contracts stay identical for ordinary projects.
         if fit_results:
             result["fit_results"] = fit_results
+        # Placement evidence for requirements (spec §3.2/§6.4): only emitted
+        # once `place()` is used, so rebuilding older sources stays identical.
+        placements = {part.name: part.placement for part in self.parts.values() if part.placement}
+        if any(record.get("method") == "place" for record in placements.values()):
+            result["placements"] = placements
         self._publication_result = finite(result)
         self._mesh_reuse = {}
         return self._publication_result
@@ -541,6 +715,8 @@ class Model:
                       geometry_fingerprint=dict(format=FINGERPRINT_FORMAT, sha256=part.fingerprint))
         if part.source is not None:
             result["source"] = dict(part.source)
+        if part.source_assets:
+            result["source_assets"] = sorted(part.source_assets, key=lambda item: item["path"])
         if part.function is not None:
             result["builder_function"] = part.function
         if part.fastener is not None:
@@ -853,6 +1029,51 @@ class Model:
                                         **({"reason": "not_traced"} if self._history_names is None else {})}
         return finite(result)
 
+    def resolve_features(self, args):
+        """Resolve named history or exact geometric references on this build."""
+        references = args.get("references", [])
+        if not isinstance(references, list) or len(references) > 64:
+            raise DomainError("INVALID_REQUEST", "references must be an array of at most 64 items")
+        if any(not isinstance(ref, dict) for ref in references):
+            raise DomainError("INVALID_REQUEST", "Each feature reference must be an object")
+        if any(ref.get("kind") == "history" for ref in references) and self._history_names is None:
+            self._trace_history_names()
+        history = self._history_feature_index() if self._history_names is not None else {}
+        traced_parts = sorted({ref.get("part") for ref in references if ref.get("kind") == "history"})
+        resolved = []
+        for ref in references:
+            part_name = ref.get("part")
+            part = self.parts.get(part_name)
+            if part is None:
+                resolved.append(dict(status="missing_part"))
+                continue
+            if ref.get("kind") == "history":
+                name = ref.get("name")
+                feature = history.get(part_name, {}).get(name)
+                if feature is None:
+                    resolved.append(dict(status="unavailable", reason="no_reliable_name"))
+                    continue
+                resolved.append(dict(status="resolved", entity=feature["kind"], count=feature["count"],
+                                     hash=feature["set_hash"], positional=feature["positional"]))
+            elif ref.get("kind") == "geometric":
+                entity_kind, expected_hash = ref.get("entity"), ref.get("hash")
+                if entity_kind not in ("face", "edge") or not isinstance(expected_hash, str):
+                    raise DomainError("INVALID_REQUEST", "Geometric feature needs face/edge and exact hash")
+                shapes = part.shape.Faces() if entity_kind == "face" else part.shape.Edges()
+                matches = [shape for shape in shapes if geometry_fingerprint(shape) == expected_hash]
+                status = "resolved" if len(matches) == 1 else "ambiguous" if matches else "missing"
+                resolved.append(dict(status=status, entity=entity_kind, count=len(matches), hash=expected_hash,
+                                     positional=False))
+            else:
+                raise DomainError("INVALID_REQUEST", "Feature reference kind must be history or geometric")
+        history_index = {
+            part: [dict(name=name, entity=value["kind"], count=value["count"],
+                        hash=value["set_hash"], positional=value["positional"])
+                   for name, value in sorted(history.get(part, {}).items())]
+            for part in traced_parts
+        }
+        return finite(dict(references=resolved, history_index=history_index, revision=self.revision))
+
     def _trace_history_names(self):
         """Replay this build with tracing and accept names only for identical BReps."""
         if self._build_args is None or self._publication_result is None:
@@ -922,6 +1143,7 @@ class Model:
                     hashes = sorted(group["hashes"])
                     canonical = json.dumps([group["kind"], hashes], separators=(",", ":")).encode()
                     index[part.name][name] = {
+                        "kind": group["kind"],
                         "count": len(hashes),
                         "set_hash": hashlib.sha256(canonical).hexdigest(),
                         "positional": group["positional"],

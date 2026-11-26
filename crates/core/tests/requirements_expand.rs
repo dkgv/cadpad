@@ -9,9 +9,9 @@ macro_rules! fixture {
     };
 }
 
-/// Appendix A cases that use only v1 rules and primitives, with the golden
+/// Appendix A cases covered by the implemented library, with the golden
 /// expansion beside each in `fixtures/requirements/expansion/`.
-const GOLDEN: [(&str, &str, &str); 5] = [
+const GOLDEN: [(&str, &str, &str); 10] = [
     (
         "R1",
         fixture!("R1"),
@@ -28,14 +28,39 @@ const GOLDEN: [(&str, &str, &str); 5] = [
         include_str!("fixtures/requirements/expansion/R4.json"),
     ),
     (
+        "E1",
+        fixture!("E1"),
+        include_str!("fixtures/requirements/expansion/E1.json"),
+    ),
+    (
         "E3",
         fixture!("E3"),
         include_str!("fixtures/requirements/expansion/E3.json"),
     ),
     (
+        "E4",
+        fixture!("E4"),
+        include_str!("fixtures/requirements/expansion/E4.json"),
+    ),
+    (
         "E5",
         fixture!("E5"),
         include_str!("fixtures/requirements/expansion/E5.json"),
+    ),
+    (
+        "R3",
+        fixture!("R3"),
+        include_str!("fixtures/requirements/expansion/R3.json"),
+    ),
+    (
+        "E2",
+        fixture!("E2"),
+        include_str!("fixtures/requirements/expansion/E2.json"),
+    ),
+    (
+        "E6",
+        fixture!("E6"),
+        include_str!("fixtures/requirements/expansion/E6.json"),
     ),
 ];
 
@@ -98,20 +123,18 @@ fn counts_match_the_spec_expansions() {
     assert_eq!(count(fixture!("R1")), 1); // interference per pair
     assert_eq!(count(fixture!("R2")), 1);
     assert_eq!(count(fixture!("R4")), 2); // moves_freely + clear_of
+    assert_eq!(count(fixture!("E1")), 2); // gap + interference
     assert_eq!(count(fixture!("E3")), 1);
+    assert_eq!(count(fixture!("E4")), 1); // overlap_depth
     assert_eq!(count(fixture!("E5")), 4); // 3 extents + 1 solid count
+    assert_eq!(count(fixture!("R3")), 9); // bolted: 2×(diameter+interference+contact) + bearing + protrusion, plus the crush-rib no_overlap
+    assert_eq!(count(fixture!("E2")), 4); // no_overlap + measure + aligned(centre+size)
+    assert_eq!(count(fixture!("E6")), 1); // fit: diameter in the ISO 286 zone
 }
 
 #[test]
 fn cases_needing_later_library_entries_fail_cleanly() {
-    for (name, requirement) in [
-        ("R3", fixture!("R3")),
-        ("E1", fixture!("E1")),
-        ("E2", fixture!("E2")),
-        ("E4", fixture!("E4")),
-        ("E6", fixture!("E6")),
-        ("X1", fixture!("X1")),
-    ] {
+    for (name, requirement) in [("X1", fixture!("X1"))] {
         let req: Requirement = serde_json::from_str(requirement).unwrap();
         let errors = expand_requirement(&req, &ProjectSettings::default()).unwrap_err();
         assert!(!errors.is_empty(), "{name}");

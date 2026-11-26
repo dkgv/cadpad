@@ -32,7 +32,7 @@ export function moveDimensionStroke(mesh:ReturnType<typeof dimensionStroke>,segm
 // projection. Unlike native GL lines, width does not depend on driver limits,
 // world scale or devicePixelRatio. Depth testing is intentionally disabled:
 // these are x-ray reference dimensions, not hidden-line model edges.
-export function dimensionStroke(segments:DimensionSegment[]):THREE.Mesh<THREE.BufferGeometry,THREE.ShaderMaterial>{
+export function strokeGeometry(segments:DimensionSegment[]):THREE.BufferGeometry{
   const positions:number[]=[],peers:number[]=[],offsets:number[]=[],ends:number[]=[],clamps:number[]=[];
   const vertex=(base:THREE.Vector3,peer:THREE.Vector3,along:number,across:number,end:number)=>{
     positions.push(...base.toArray());peers.push(...peer.toArray());offsets.push(along,across);ends.push(end);
@@ -52,7 +52,10 @@ export function dimensionStroke(segments:DimensionSegment[]):THREE.Mesh<THREE.Bu
   geometry.setAttribute('pixelOffset',new THREE.Float32BufferAttribute(offsets,2));
   geometry.setAttribute('endpoint',new THREE.Float32BufferAttribute(ends,1));
   geometry.setAttribute('clampHead',new THREE.Float32BufferAttribute(clamps,1));
-  const material=new THREE.ShaderMaterial({depthTest:false,depthWrite:false,transparent:true,side:THREE.DoubleSide,forceSinglePass:true,
+  return geometry;
+}
+export function strokeMaterial(){
+  return new THREE.ShaderMaterial({depthTest:false,depthWrite:false,transparent:true,side:THREE.DoubleSide,forceSinglePass:true,
     uniforms:{resolution:{value:new THREE.Vector2(1,1)},endOffset:{value:new THREE.Vector2()},enabled:{value:1},width:{value:1},color:{value:new THREE.Color('#256d80')}},
     vertexShader:`
       attribute vec3 peer;
@@ -81,9 +84,14 @@ export function dimensionStroke(segments:DimensionSegment[]):THREE.Mesh<THREE.Bu
         gl_FragColor=vec4(color,0.85);
         #include <colorspace_fragment>
       }`});
+}
+export function strokeMesh(geometry:THREE.BufferGeometry,material=strokeMaterial()):THREE.Mesh<THREE.BufferGeometry,THREE.ShaderMaterial>{
   const mesh=new THREE.Mesh(geometry,material);mesh.frustumCulled=false;mesh.renderOrder=100;mesh.raycast=()=>{};
   mesh.onBeforeRender=renderer=>{renderer.getSize(material.uniforms.resolution.value);};
   return mesh;
+}
+export function dimensionStroke(segments:DimensionSegment[]){
+  return strokeMesh(strokeGeometry(segments));
 }
 
 

@@ -134,7 +134,9 @@
                         "name": "arm"
                       }
                     },
-                    "name": "make_arm/hole#1/wall"
+                    "name": "make_arm/hole#1/wall",
+                    "hash": "x1-history-group-hash",
+                    "positional": false
                   }
                 },
                 "range": {

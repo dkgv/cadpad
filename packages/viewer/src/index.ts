@@ -1,7 +1,7 @@
 import { Display, Viewer, type Shape, type Shapes } from 'three-cad-viewer';
 import 'three-cad-viewer/css';
 import * as THREE from 'three';
-import {dimensionStroke,moveDimensionStroke,placeDimensionLabels,angleGeometry,dimensionText,placeAnnotation} from './dimension-display';
+import {dimensionStroke,strokeGeometry,strokeMesh,strokeMaterial,moveDimensionStroke,placeDimensionLabels,angleGeometry,dimensionText,placeAnnotation} from './dimension-display';
 export {dimensionText} from './dimension-display';
 import {entityDimensions} from './entity-dimensions';
 import {setRenderedVisibility} from './visibility';
@@ -10,7 +10,7 @@ import {sceneEntity,sameEntity,referenceLetter} from './entities';
 export {sceneEntity,sameEntity,referenceLetter} from './entities';
 import {revisionBuffers,type BufferDescriptor} from './buffers';
 import {shareRenderBuffers,revisionRenderBuffers} from './render-buffers';
-import {PickGeometry,scenePicking,pickTopology,pickTopologyInRect,geometryCenter,type SelectionMode,type MeshBuffers} from './picking';
+import {PickGeometry,scenePicking,pickTopology,pickTopologyInRect,type SelectionMode,type MeshBuffers} from './picking';
 export type {SelectionMode} from './picking';
 import { partMotion, manipulationJoint, interpolateSimulation, previewJoint, applyRequirementMoves, sliderDelta, hingeDelta, unwrapStep, pathCoordinate, sliderScreenMap, hingeScreenMap, type MotionSnapshot, type JointState, type Ray, type RequirementMove, type Pose } from './motion';
 export type {MotionSnapshot,JointState} from './motion';
@@ -62,15 +62,27 @@ function pairFloats(values:ArrayLike<number>){
 function faceBoundary(geometry:THREE.BufferGeometry){
   const index=geometry.getIndex(),position=geometry.getAttribute('position');
   if(!index||!position)return [];
-  const edges=new Map<string,[number,number]>();
   // Key by position: STL faces repeat each vertex per triangle, so index keys
-  // would outline every internal diagonal.
-  const at=(vertex:number)=>`${position.getX(vertex)},${position.getY(vertex)},${position.getZ(vertex)}`;
+  // would outline every internal diagonal. Weld into numeric ids once, then
+  // toggle numeric edge keys. String keys made each hover rebuild thousands
+  // of coordinate strings and dominated pointer latency on dense faces.
+  const ids=new Map<number,number>(),buckets=new Map<number,number[]>();
+  const x:number[]=[],y:number[]=[],z:number[]=[],representative:number[]=[];
+  const idOf=(vertex:number)=>{
+    let id=ids.get(vertex);if(id!==undefined)return id;
+    const qx=Math.round(position.getX(vertex)*1e4),qy=Math.round(position.getY(vertex)*1e4),qz=Math.round(position.getZ(vertex)*1e4);
+    const hash=(Math.imul(qx,73856093)^Math.imul(qy,19349663)^Math.imul(qz,83492791))>>>0;
+    let bucket=buckets.get(hash);if(!bucket){bucket=[];buckets.set(hash,bucket);}
+    for(const candidate of bucket)if(x[candidate]===qx&&y[candidate]===qy&&z[candidate]===qz){ids.set(vertex,candidate);return candidate;}
+    id=representative.length;x.push(qx);y.push(qy);z.push(qz);representative.push(vertex);bucket.push(id);ids.set(vertex,id);return id;
+  };
+  for(let i=0;i<index.count;i++)idOf(index.getX(i));
+  const span=representative.length,edges=new Map<number,[number,number]>();
   for(let i=0;i+2<index.count;i+=3){
-    const tri=[index.getX(i),index.getX(i+1),index.getX(i+2)];
+    const tri=[idOf(index.getX(i)),idOf(index.getX(i+1)),idOf(index.getX(i+2))];
     for(let edge=0;edge<3;edge++){
-      const a=tri[edge],b=tri[(edge+1)%3],ka=at(a),kb=at(b),id=ka<kb?`${ka}|${kb}`:`${kb}|${ka}`;
-      if(edges.has(id))edges.delete(id);else edges.set(id,[a,b]);
+      const a=tri[edge],b=tri[(edge+1)%3],key=a<b?a*span+b:b*span+a;
+      if(edges.has(key))edges.delete(key);else edges.set(key,[representative[a],representative[b]]);
     }
   }
   return [...edges.values()].flatMap(([a,b])=>{
@@ -103,12 +115,22 @@ export class CadViewport {
   private resize: ResizeObserver;
   private parts: Part[] = [];
   private paths = new Map<string, Part>();
+  private instancePaths = new Map<string,string>();
   private pickGeometry = new Map<string, PickGeometry>();
   private selectionMode:SelectionMode='face';
   private fillFaces=false;
   private selectedEntity:Entity|null=null;
   private hovered:Entity|null=null;
-  private highlights:{object:THREE.Mesh;kind:HighlightKind}[]=[];
+  private highlights:{object:THREE.Mesh;kind:HighlightKind;owned:boolean}[]=[];
+  // Highlight materials outlive individual hover moves. Disposing and recreating
+  // them every frame released their shader programs, forcing a recompile per hover.
+  private materials=new Map<string,THREE.Material>();
+  // One persistent, dynamically updated mesh services the orange hover fill.
+  // Allocating a geometry per hovered face churned GL buffers and dominated
+  // pointer latency on meshes with tens of thousands of surfaces.
+  private hoverGeometry=new THREE.BufferGeometry();
+  private hoverAttribute:THREE.BufferAttribute|null=null;
+  private hoverMesh:THREE.Mesh|null=null;
   private references:Entity[]=[];
   private unlettered:Entity[]=[];
   private badgeLayer=document.createElement('div');
@@ -255,7 +277,7 @@ export class CadViewport {
     if(this.presented)this.rememberCamera();
     this.suspended=true;this.presented=false;this.cancelLoad();this.cancelCameraFrame();
     this.clearPressMarker();this.cancelDrag();this.cancelSimulationFrame();this.cancelHover();
-    this.hovered=null;this.clearHighlights();this.clearBadges();this.clearAnnotations();
+    this.hovered=null;this.clearHighlights();this.releaseHoverOverlay();this.clearBadges();this.clearAnnotations();
     this.renderStorage?.dispose();this.renderStorage=null;
     this.renderedBuffers?.dispose();this.renderedBuffers=null;
     for(const geometry of this.pickGeometry.values())geometry.dispose();
@@ -314,7 +336,7 @@ export class CadViewport {
       paths.set(path, part);
       return { version: 3, id: path, name: part.name, type: 'shapes', subtype: 'solid',
         shape: { ...buffers, edge_types: Array.from(buffers.edge_types || []) } as Shape,
-        state: [1, 1], color: ['#b7c8d2', '#e5ae69', '#94baa6'][index % 3], alpha: 1,
+        state: [1, 1], color: ['#b7c8d2', '#e5ae69', '#94baa6'][index % 3], alpha: 1, width: 0.9,
         loc: [part.position, [0, 0, 0, 1]] };
     })).catch(error=>{bufferPlan.discard();throw error;});
     if (sequence !== this.loadSequence || this.disposed){bufferPlan.discard();return;}
@@ -344,6 +366,7 @@ export class CadViewport {
     this.parts = model.parts;
     this.model = model;
     this.paths = paths;
+    this.instancePaths = new Map([...paths].map(([path,part])=>[part.instance_id,path]));
     this.pickGeometry = picking;
     this.pickingPool=preparePicking;this.pickingWorkspace=workspace;
     this.revision = revision;
@@ -354,7 +377,7 @@ export class CadViewport {
     if (!shapes.length){this.renderStorage?.finishSwap();this.setAdvancedTools(this.advancedTools);bufferPlan.commit();bufferPlan.discard();if(this.cancelBufferPlan===releasePlan)this.cancelBufferPlan=null;return;}
     this.preparingRender=true;
     try{this.viewer.render({ version: 3, id: '/model', name: 'Model', parts: shapes,
-      loc: [[0, 0, 0], [0, 0, 0, 1]] }, { metalness: 0.15, roughness: 0.65 },
+      loc: [[0, 0, 0], [0, 0, 0, 1]] }, { edgeColor: 0x8a9099, metalness: 0.15, roughness: 0.65 },
       { up: 'Z', ortho: true, control: 'orbit', axes: false, grid: [false, false, false] });
     }catch(error){bufferPlan.discard();throw error;}finally{this.preparingRender=false;this.renderStorage?.finishSwap();}
     if(this.contextLost){bufferPlan.discard();throw new Error('The graphics connection was interrupted while preparing the view.');}
@@ -411,22 +434,77 @@ export class CadViewport {
     if(this.selectedEntity&&!this.selectedEntity.entity_id.startsWith(`${mode}:`)){this.selectEntity(null);this.onSelect(null,'mode');}
   }
   private clearHighlights(kind?:HighlightKind){
+    if(kind===undefined||kind==='hover')this.hideHoverOverlay();
     this.highlights=this.highlights.filter(item=>{
       if(kind!==undefined&&item.kind!==kind)return true;
-      item.object.removeFromParent();item.object.geometry.dispose();
-      for(const material of Array.isArray(item.object.material)?item.object.material:[item.object.material])material.dispose();
+      item.object.removeFromParent();
+      // Cached overlays and materials are shared across hover moves and owned
+      // elsewhere; only per-highlight views are disposable.
+      if(item.owned){
+        item.object.geometry.dispose();
+        for(const material of Array.isArray(item.object.material)?item.object.material:[item.object.material])material.dispose();
+      }
       return false;
     });
   }
-  private selectionStroke(segments:{start:THREE.Vector3;end:THREE.Vector3}[],color:string,width:number){
-    if(!segments.length)return null;
-    const mesh=dimensionStroke(segments);
-    mesh.material.uniforms.color.value.set(color);mesh.material.uniforms.width.value=width;mesh.renderOrder=20;
+  private cachedMaterial<T extends THREE.Material>(key:string,create:()=>T):T{
+    const existing=this.materials.get(key);if(existing)return existing as T;
+    const material=create();this.materials.set(key,material);return material;
+  }
+  private hideHoverOverlay(){this.hoverMesh?.removeFromParent();}
+  private releaseHoverOverlay(){
+    this.hideHoverOverlay();this.hoverMesh=null;this.hoverAttribute=null;
+    this.hoverGeometry.dispose();this.hoverGeometry=new THREE.BufferGeometry();
+  }
+  private ensureHoverCapacity(floats:number){
+    if(this.hoverAttribute&&this.hoverAttribute.array.length>=floats)return;
+    let capacity=Math.max(1024,this.hoverAttribute?.array.length??0);
+    while(capacity<floats)capacity*=2;
+    this.hoverGeometry.dispose();
+    const geometry=new THREE.BufferGeometry();
+    const attribute=new THREE.BufferAttribute(new Float32Array(capacity),3).setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute('position',attribute);
+    this.hoverGeometry=geometry;this.hoverAttribute=attribute;
+    if(this.hoverMesh)this.hoverMesh.geometry=geometry;
+  }
+  private drawHoverOverlay(items:Entity[]){
+    const first=items.length?this.highlightTarget(items[0]):null;if(!first)return;
+    const {kind}=first;
+    if(kind==='edge'||kind==='part'&&!first.geometry.buffers.triangles?.length){
+      for(const item of items)this.drawEntity(item,'hover');return;
+    }
+    const prefix=kind==='face'?'face:':'part:';
+    const same=items.every(item=>item.instance_id===items[0].instance_id&&item.entity_id.startsWith(prefix));
+    if(!same){for(const item of items)this.drawEntity(item,'hover');return;}
+    // A fill region shares one instance/geometry; parsing ids avoids repeating
+    // the path lookup for every face in a large region.
+    const overlays=items.map(item=>({geometry:first.geometry,index:Number(item.entity_id.slice(prefix.length))}));
+    let vertices=0;for(const overlay of overlays)vertices+=overlay.geometry.overlayVertexCount(kind,overlay.index);
+    if(!vertices)return;
+    this.ensureHoverCapacity(vertices*3);
+    const array=this.hoverAttribute!.array as Float32Array;let written=0;
+    for(const overlay of overlays)written+=overlay.geometry.copyOverlay(kind,overlay.index,array.subarray(written*3));
+    if(written!==vertices)return;
+    this.hoverGeometry.setDrawRange(0,written);
+    this.hoverAttribute!.clearUpdateRanges();this.hoverAttribute!.addUpdateRange(0,written*3);this.hoverAttribute!.needsUpdate=true;
+    const entity=items[0],capability=this.motion?partMotion(this.motion,entity.instance_id):null;
+    const color=this.manipulate?(capability?.kind==='draggable'?'#0b9b83':capability?.kind==='linked'?'#b88830':'#8591a0'):'#f4c76c';
+    const opacity=kind==='face'?0.38:0.22;
+    const material=this.cachedMaterial(`fill:${color}:${opacity}`,()=>new THREE.MeshBasicMaterial({color,transparent:true,opacity,depthWrite:false,side:THREE.DoubleSide,polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2}));
+    if(!this.hoverMesh){this.hoverMesh=new THREE.Mesh(this.hoverGeometry,material);this.hoverMesh.raycast=()=>{};this.hoverMesh.frustumCulled=false;}
+    this.hoverMesh.material=material;this.hoverMesh.renderOrder=10;
+    if(this.hoverMesh.parent!==first.parent)first.parent.add(this.hoverMesh);
+  }
+  private overlayStroke(geometry:THREE.BufferGeometry|null,color:string,width:number){
+    if(!geometry)return null;
+    const material=this.cachedMaterial(`stroke:${color}:${width}`,strokeMaterial);
+    material.uniforms.color.value.set(color);material.uniforms.width.value=width;
+    const mesh=strokeMesh(geometry,material);mesh.renderOrder=20;
     return mesh;
   }
-  private addHighlight(parent:THREE.Object3D,object:THREE.Mesh|null,kind:HighlightKind){
+  private addHighlight(parent:THREE.Object3D,object:THREE.Mesh|null,kind:HighlightKind,owned=true){
     if(!object)return;
-    object.raycast=()=>{};parent.add(object);this.highlights.push({object,kind});
+    object.raycast=()=>{};parent.add(object);this.highlights.push({object,kind,owned});
     if(kind!=='hover'){
       // Badges track camera and pose changes from whichever selected highlight
       // draws first in a frame; never culled so offscreen badges still hide.
@@ -437,9 +515,9 @@ export class CadViewport {
   }
   private highlightTarget(entity:Entity|null){
     if(!this.presented||!entity||entity.revision!==this.revision||!this.visible.has(entity.instance_id))return null;
-    const entry=[...this.paths].find(([,part])=>part.instance_id===entity.instance_id);
-    const geometry=this.pickGeometry.get(entity.instance_id);if(!entry||!geometry)return null;
-    const parent=this.viewer.nestedGroup.groups[entry[0]];if(!parent)return null;
+    const path=this.instancePaths.get(entity.instance_id);
+    const geometry=this.pickGeometry.get(entity.instance_id);if(!path||!geometry)return null;
+    const parent=this.viewer.nestedGroup.groups[path];if(!parent)return null;
     const [kind,indexText]=entity.entity_id.split(':');
     return {parent,geometry,kind:kind as SelectionMode,index:Number(indexText)};
   }
@@ -448,17 +526,26 @@ export class CadViewport {
     const target=this.highlightTarget(entity);if(!target)return null;
     const {parent,geometry,kind,index}=target,hover=kindOf==='hover',motionHint=kindOf==='motion';
     const capability=entity&&this.motion?partMotion(this.motion,entity.instance_id):null;
-    const color=motionHint?'#0b9b83':hover&&this.manipulate?(capability?.kind==='draggable'?'#0b9b83':capability?.kind==='linked'?'#b88830':'#8591a0'):hover?'#eab85d':'#2484c5';
-    const mesh=geometry.highlight(kind,index);if(!mesh)return null;
-    const anchor=geometryCenter(mesh);
+    const color=motionHint?'#0b9b83':hover&&this.manipulate?(capability?.kind==='draggable'?'#0b9b83':capability?.kind==='linked'?'#b88830':'#8591a0'):hover?'#f4c76c':'#2484c5';
+    const mesh=geometry.overlay(kind,index);if(!mesh)return null;
+    // Hover is a per-frame preview across potentially tens of thousands of
+    // surfaces. Anchors and boundary strokes are only consumed by committed
+    // highlights, so skip both to keep the orange preview immediate.
+    const anchor=hover?new THREE.Vector3():geometry.center(kind,index)??new THREE.Vector3();
     if(kind==='edge'||kind==='part'&&!geometry.buffers.triangles?.length){
-      this.addHighlight(parent,this.selectionStroke(segmentPairs(mesh.getAttribute('position') as THREE.BufferAttribute),color,kind==='edge'?3.2:2.2),kindOf);
-      mesh.dispose();
+      // Edges and wires have no fill, so hover still needs their stroke.
+      const stroke=geometry.outline(kind,index,fill=>fill?strokeGeometry(segmentPairs(fill.getAttribute('position') as THREE.BufferAttribute)):null);
+      this.addHighlight(parent,this.overlayStroke(stroke,color,kind==='edge'?3.2:2.2),kindOf,false);
       return {parent,anchor};
     }
-    const fill=new THREE.Mesh(mesh,new THREE.MeshBasicMaterial({color,transparent:true,opacity:motionHint?0.10:kind==='face'?(hover?0.38:0.5):(hover?0.22:0.32),depthWrite:false,side:THREE.DoubleSide,polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2}));
-    fill.renderOrder=motionHint?8:10;this.addHighlight(parent,fill,kindOf);
-    this.addHighlight(parent,this.selectionStroke(kind==='face'?faceBoundary(mesh):pairFloats(geometry.buffers.edges??[]),color,kind==='face'?2.2:1.7),kindOf);
+    const opacity=motionHint?0.10:kind==='face'?(hover?0.38:0.5):(hover?0.22:0.32);
+    const material=this.cachedMaterial(`fill:${color}:${opacity}`,()=>new THREE.MeshBasicMaterial({color,transparent:true,opacity,depthWrite:false,side:THREE.DoubleSide,polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2}));
+    const fill=new THREE.Mesh(mesh,material);
+    fill.renderOrder=motionHint?8:10;this.addHighlight(parent,fill,kindOf,false);
+    if(!hover){
+      const stroke=geometry.outline(kind,index,fill=>strokeGeometry(kind==='face'?(fill?faceBoundary(fill):[]):pairFloats(geometry.buffers.edges??[])));
+      this.addHighlight(parent,this.overlayStroke(stroke,color,kind==='face'?2.2:1.7),kindOf,false);
+    }
     return {parent,anchor};
   }
   private drawMotionHints(){
@@ -480,9 +567,9 @@ export class CadViewport {
   private highlight(entity:Entity|null,hover:boolean){
     this.clearHighlights(hover?'hover':'selected');
     // Hover previews the whole fill region; selections arrive as references.
-    if(hover){for(const item of this.fillRegion(entity))if(!this.references.some(reference=>sameEntity(reference,item)))this.drawEntity(item,'hover');return;}
+    if(hover){this.drawHoverOverlay(this.fillRegion(entity).filter(item=>!this.references.some(reference=>sameEntity(reference,item))));return;}
     const drawn=this.drawEntity(entity,'selected');
-    if(!hover){this.primaryAnchor=drawn;this.drawReferences();}
+    this.primaryAnchor=drawn;this.drawReferences();
   }
   /**
    * References are everything the user has selected for the assistant. The
@@ -546,7 +633,7 @@ export class CadViewport {
     this.cancelHover();
     if(this.hovered)this.setHover(null,this.queueCameraFrame);
   };
-  private setHover(entity:Entity|null,paint=()=>this.viewer.update(true)){
+  private setHover(entity:Entity|null,paint=()=>this.viewer.update(true,false)){
     if(entity?.instance_id===this.hovered?.instance_id&&entity?.entity_id===this.hovered?.entity_id)return;
     this.hovered=entity;this.updateMotionStatus(entity);this.highlight(sameEntity(entity,this.selectedEntity)||this.references.some(item=>sameEntity(item,entity))?null:entity,true);if(this.presented)paint();
   }
@@ -753,6 +840,16 @@ export class CadViewport {
       names[part.instance_id]=part.name;
     }
     this.applyPoses(applyRequirementMoves(poses,names,moves));
+  }
+
+  /** Apply one Rust dynamics sample, keyed by the published body names. */
+  applyRequirementPoses(poses:Record<string,Pose>){
+    const byInstance:Record<string,Pose>={};
+    for(const part of this.parts){
+      const pose=poses[part.instance_id]??poses[part.name];
+      if(pose)byInstance[part.instance_id]=pose;
+    }
+    this.applyPoses(byInstance);
   }
 
   select(instance: string | null) {this.selectEntity(instance?{revision:this.revision,instance_id:instance,entity_id:'part:0'}:null);}
@@ -1028,7 +1125,8 @@ export class CadViewport {
     this.renderStorage?.dispose();this.renderStorage=null;
     this.disposed = true;this.presented=false;this.repairCamera=null; this.loadSequence++;this.cancelSimulationFrame();this.cancelHover();
     this.renderedBuffers?.dispose();this.renderedBuffers=null;
-    this.clearHighlights();for(const item of this.pickGeometry.values())item.dispose();this.pickGeometry.clear();
+    this.clearHighlights();this.releaseHoverOverlay();for(const item of this.pickGeometry.values())item.dispose();this.pickGeometry.clear();
+    for(const material of this.materials.values())material.dispose();this.materials.clear();
     this.resize.disconnect(); this.clearAnnotations();
     this.cancelDrag();this.cancelMarquee();
     this.detachListeners();

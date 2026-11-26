@@ -1,6 +1,7 @@
 //! The whole compiler on one requirement (spec §2): bind, check provenance,
 //! typecheck, coverage, expand, link, plan, print. Pure: the build snapshot
 //! and settings come in, everything else comes out.
+use super::assembly::{assembly_report, verify_covers};
 use super::bind::{Bindings, bind};
 use super::coverage::{check_coverage, check_vague};
 use super::diagnostics::Diagnostic;
@@ -53,9 +54,14 @@ pub fn compile(
     let (bindings, mut diagnostics) = bind(req, snap);
     let (requirement, downgrades) = check_provenance(req, &bindings, snap, settings);
     diagnostics.extend(settings.validate());
-    diagnostics.extend(typecheck(&requirement, &bindings, settings));
+    diagnostics.extend(typecheck(&requirement, &bindings, snap, settings));
     diagnostics.extend(check_vague(&requirement));
     diagnostics.extend(check_coverage(&requirement, &bindings));
+    // Assemblies (spec §3.2): chip mappings are verified against the build,
+    // and placements the claims rely on are re-checked as inferred seating.
+    diagnostics.extend(verify_covers(&requirement, &bindings, snap));
+    let assembly = assembly_report(&requirement, &bindings, snap);
+    diagnostics.extend(assembly.diagnostics.clone());
     // A diagnostic can come from two stages (e.g. a missing set): keep one.
     let mut seen = std::collections::BTreeSet::new();
     diagnostics.retain(|d| seen.insert((d.code, d.at.clone(), d.message.clone())));
@@ -74,6 +80,9 @@ pub fn compile(
     if out.has_errors() {
         return out;
     }
+    // Compiler-added claims are part of the IR the user reviews and approves
+    // (spec §2.2 "automate and hide; never unrecord").
+    out.requirement.claims.extend(assembly.claims);
     match expand_requirement(&out.requirement, settings) {
         Ok(p) => out.primitives = p,
         Err(e) => {

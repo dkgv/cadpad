@@ -1,0 +1,18 @@
+{
+  "ir_version": 1,
+  "id": "pf1",
+  "name": "Pin press fit",
+  "text": "The pin has a press fit in the bore with 0.02 mm to 0.05 mm diametral difference",
+  "claims": [
+    {
+      "id": "c1",
+      "rule": "press_fit",
+      "span": [0, 80],
+      "args": {
+        "pin": { "part": { "model": { "entry": "fit.py", "builder": "fit" }, "part": { "name": "pin" } } },
+        "hole": { "part": { "model": { "entry": "fit.py", "builder": "fit" }, "part": { "name": "hole" } } },
+        "range": { "compare": { "op": "in", "lo": { "value": 0.02, "unit": "mm", "source": "text" }, "hi": { "value": 0.05, "unit": "mm", "source": "text" } } }
+      }
+    }
+  ]
+}
