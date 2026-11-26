@@ -183,17 +183,6 @@ pub async fn playback(
         .map_err(error)
 }
 
-#[tauri::command]
-pub async fn motion_tests(
-    core: State<'_, Core>,
-    request: cadpad_core::motion_tests::Control,
-) -> Result<Value, Value> {
-    core.control_motion_tests("local-user", request)
-        .await
-        .map(|reply| json!(reply))
-        .map_err(error)
-}
-
 /// The user's view of the requirement catalog: list, compile, save, library
 /// (the commands agents have, run as the local user).
 #[tauri::command]

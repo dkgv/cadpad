@@ -1,3 +1,6 @@
+scratch/
+.claude/worktrees
+
 # --- OS ---
 .DS_Store
 .AppleDouble

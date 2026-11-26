@@ -6,21 +6,19 @@ mod frontend_assets;
 mod menus;
 use builtin::{
     agent_chat, agent_conversation, agent_models, agent_settings, agent_start, agent_stop,
-    agent_turn, cloud_generate, cloud_account, cloud_generate_into_workspace, cloud_settings, cloud_sign_in,
-    cloud_stage_variant,
-    configure_agent, connect_agent, forget_agent_key, forget_cloud_key,
+    agent_turn, cloud_account, cloud_generate, cloud_generate_into_workspace, cloud_settings,
+    cloud_sign_in, cloud_stage_variant, configure_agent, connect_agent, forget_agent_key,
+    forget_cloud_key,
 };
 mod files;
 mod git_status;
 mod project_watch;
 mod subscriptions;
 use agents::{
-    approve_requirement, clean_cache, complete_view, connect_activity, connect_motion,
-    connect_view, cross_check_requirement, delete_requirement, disconnect_external, interference,
-    joint_coordinate,
-    mcp_settings, motion, motion_tests, playback, rebuild, repair_display, requirement_replay,
-    close_requirement_replay,
-    requirements, set_requirement_settings, set_selection, simulation,
+    approve_requirement, clean_cache, close_requirement_replay, complete_view, connect_activity,
+    connect_motion, connect_view, cross_check_requirement, delete_requirement, disconnect_external,
+    interference, joint_coordinate, mcp_settings, motion, playback, rebuild, repair_display,
+    requirement_replay, requirements, set_requirement_settings, set_selection, simulation,
 };
 use cadpad_core::{Core, error_value, worker::WorkerConfig};
 use files::{
@@ -337,7 +335,6 @@ fn main() {
             joint_coordinate,
             simulation,
             playback,
-            motion_tests,
             requirements,
             cross_check_requirement,
             approve_requirement,
