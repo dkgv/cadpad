@@ -333,7 +333,7 @@ impl Core {
         if let Some(result) = self.scan_python_origin(workspace_id).await? {
             return Ok(result);
         }
-        let (binding, revision, inputs) = {
+        let (binding, revision, inputs, model_view) = {
             let workspaces = self.workspace(workspace_id).await?;
             let ws = workspaces
                 .get(workspace_id)
@@ -345,10 +345,14 @@ impl Core {
                 binding,
                 ws.stored.current.clone(),
                 ws.stored.current_revision().inputs.clone(),
+                ws.stored.model_parent.is_some(),
             )
         };
         let directory = binding.directory.clone();
-        let loaded = blocking(move || portable::read_project_metadata(&directory)).await?;
+        let mut loaded = blocking(move || portable::read_project_metadata(&directory)).await?;
+        if model_view {
+            crate::project_entry::keep_model_view_entry(&inputs, &mut loaded.inputs);
+        }
         let changed = loaded.fingerprint != binding.fingerprint;
         let mut changes = BTreeMap::new();
         for path in inputs.files.keys().chain(loaded.inputs.files.keys()) {
@@ -480,6 +484,12 @@ impl Core {
             ));
         }
         let mut inputs = loaded.inputs;
+        if ws.stored.model_parent.is_some() {
+            crate::project_entry::keep_model_view_entry(
+                &ws.stored.current_revision().inputs,
+                &mut inputs,
+            );
+        }
         crate::project_entry::reset_missing_model_entry(&mut inputs);
         let mut draft = Self::input_draft(inputs, base, actor);
         draft.external_fingerprint = Some(loaded.fingerprint);

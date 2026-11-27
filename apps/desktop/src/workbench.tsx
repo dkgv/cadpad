@@ -145,6 +145,8 @@ export function Workbench(){
   const memoryPolicy=useRef(Promise.resolve());
   const menuBridge=useRef<Channel<string>|null>(null),viewBridge=useRef<Channel<any>|null>(null);
   const modelViews=useRef(new Map<string,{workspace:string;sourceRevision:string}>());
+  /** Model-view workspaces already sent for repair, so a failed repair cannot loop. */
+  const repairedViews=useRef(new Set<string>());
   function host(id:string){if(!hosts.current.has(id)){const node=document.createElement('div');node.className='dock-content-host';hosts.current.set(id,node);}return hosts.current.get(id)!;}
   const header=host('$header'),rail=host('$rail'),notices=host('$notices');
   function pickChrome(documents:DocumentTab[],projectWorkspace:string|undefined){
@@ -308,7 +310,7 @@ export function Workbench(){
     }
     throw new Error('The model is still building; try again shortly');
   }
-  async function openModel(document:string,entry:string,builder:string,sourceReload?:Promise<void>){
+  async function openModel(document:string,entry:string,builder:string,sourceReload?:Promise<void>,repair=false){
     const started=performance.now();
     const current=state.current,source=current?.documents.find(doc=>doc.id===document)
       ??(chromeDocument.current?.document.id===document?chromeDocument.current.document:undefined);
@@ -334,8 +336,8 @@ export function Workbench(){
     if(existing){
       focusDocument(existing.id);
       const view=projects.current.get(existing.workspace);
-      if(builder!=='$file'||!/\.stl$/i.test(entry)||!initialSource.external_tracking||
-        existing.opening||existing.dirty||!view||view.activity.some(job=>job.state==='queued'||job.state==='running'))return;
+      const busy=!view||view.activity.some(job=>job.state==='queued'||job.state==='running');
+      if(repair?busy:builder!=='$file'||!/\.stl$/i.test(entry)||!initialSource.external_tracking||existing.opening||existing.dirty||busy)return;
     }
     const open:ModelOpen={identity,cancelled:false,dropped:false,reused:false,docClosed:false,workspace:'',jobId:'',docId:'',promise:Promise.resolve()};
     const timing=measureModelOpen(entry,builder,started,()=>open.reused);
@@ -366,7 +368,7 @@ export function Workbench(){
         const cached=modelViews.current.get(identity);
         const cachedWorkspace=existing?.workspace??(cached?.sourceRevision===sourceProject.revision?cached.workspace:undefined);
         let result:{project:Project;job?:unknown}|undefined;
-        if(cached?.sourceRevision===sourceProject.revision&&!sourceProject.external_tracking){
+        if(!repair&&cached?.sourceRevision===sourceProject.revision&&!sourceProject.external_tracking){
           try{result={project:await invoke<Project>('project',{workspace:cached.workspace})};}
           catch{modelViews.current.delete(identity);}
         }
@@ -378,7 +380,7 @@ export function Workbench(){
         open.jobId=job?.id??'';
         const live=state.current?.documents.find(doc=>doc.id===open.docId);
         if(open.cancelled||state.current?.projectWorkspace!==project||!live||
-          (existing&&(live.workspace!==existing.workspace||live.dirty))){
+          (existing&&(live.workspace!==existing.workspace||live.dirty&&!repair))){
           if(existing)open.docClosed=true;
           releaseOpen(open);
           return;
@@ -402,6 +404,20 @@ export function Workbench(){
     })();
     open.promise=task;
     return task;
+  }
+  /** A model tab whose workspace stopped building its model (an older external reload
+   * swapped in the project's own entry) reopens the model into a fresh view. */
+  function repairModelView(id:string,project:Project){
+    const doc=state.current?.documents.find(item=>item.id===id);
+    const target=doc?.modelEntry;
+    if(!doc||!target||target.builder==='$group'||doc.pending||doc.opening||doc.checkingSource||!project.model_parent||doc.workspace!==project.workspace_id)return;
+    if(project.model_entry?.entry===target.entry&&project.model_entry.builder===target.builder)return;
+    if(project.activity.some(job=>job.state==='queued'||job.state==='running'))return;
+    if(repairedViews.current.has(project.workspace_id))return;
+    repairedViews.current.add(project.workspace_id);
+    // The broken view cannot be reused, so drop it from the reuse cache before reopening.
+    modelViews.current.delete(JSON.stringify([target.project,target.entry,target.builder]));
+    queueMicrotask(()=>void openModel(id,target.entry,target.builder,undefined,true));
   }
   async function openWorkspace(workspace:string){try{openProject(await invoke<Project>('project',{workspace}),{replace:true});}catch(error){setFailure(describeError(error));}}
   async function forgetRecent(workspace:string){
@@ -696,6 +712,7 @@ export function Workbench(){
         onProject:project=>{
           projects.current.set(project.workspace_id,project);
           if(project.project_directory&&!doc.modelEntry)rememberProject(project);
+          repairModelView(doc.id,project);
           update(current=>{
             const prior=current.documents.find(item=>item.id===doc.id);
             if(!prior)return current;

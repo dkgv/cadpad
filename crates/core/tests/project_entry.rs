@@ -1334,3 +1334,61 @@ async fn project_requirements_are_shared_by_model_tabs_and_bound_to_their_model(
             .any(|r| r["id"] == "plate-volume")
     );
 }
+
+#[tokio::test]
+async fn external_reload_in_a_model_tab_keeps_building_that_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("design");
+    std::fs::create_dir(&root).unwrap();
+    let source = "import cadquery as cq\ndef plate(): return cq.Workplane().box(2,3,4)\ndef pin(): return cq.Workplane().box(1,1,8)\n";
+    std::fs::write(root.join("geometry.py"), source).unwrap();
+    portable::initialize_project_browser(&root).unwrap();
+    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
+    let project = core.open_project(root.clone(), "user").await.unwrap();
+    let (plate, job) = core
+        .open_project_model(
+            &project.workspace_id,
+            &project.base_revision,
+            "geometry.py",
+            "plate",
+            "user",
+        )
+        .await
+        .unwrap();
+    assert_eq!(done(&core, &plate, job).await.state, JobState::Succeeded);
+    // An agent edits the shared source outside Cadpad.
+    std::fs::write(
+        root.join("geometry.py"),
+        source.replace("box(2,3,4)", "box(5,3,4)"),
+    )
+    .unwrap();
+    let scan = core.scan_external_changes(&plate).await.unwrap();
+    assert_eq!(scan["changed"], true);
+    assert_eq!(scan["changes"]["geometry.py"], "modified");
+    assert_eq!(
+        scan["changes"]["cadpad_view_0.py"],
+        Value::Null,
+        "the tab's generated adapter is not an external change"
+    );
+    let revision = core.get_project(&plate).await.unwrap()["revision"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let draft = core
+        .stage_external_changes(
+            &plate,
+            &revision,
+            scan["fingerprint"].as_str().unwrap(),
+            "user",
+        )
+        .await
+        .unwrap();
+    let job = core.build(&plate, &revision, &draft.id, "user").await.unwrap();
+    assert_eq!(done(&core, &plate, job).await.state, JobState::Succeeded);
+    let model = core.get_project(&plate).await.unwrap();
+    assert_eq!(model["model_entry"]["builder"], "plate");
+    assert_eq!(
+        model["model"]["parts"][0]["bounds"]["size"],
+        serde_json::json!([5.0, 3.0, 4.0])
+    );
+}

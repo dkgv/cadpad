@@ -124,6 +124,33 @@ pub(crate) fn inputs_model_entry(inputs: &crate::Inputs) -> Option<(String, Stri
         .and_then(|source| generated_model_entry(source))
 }
 
+/// A model tab shares the project folder, but its entry is a generated adapter
+/// that is not the folder's entry point. Reloading external edits must keep
+/// that adapter, or the tab would rebuild the project's own entry instead.
+pub(crate) fn keep_model_view_entry(current: &crate::Inputs, loaded: &mut crate::Inputs) {
+    let Some(source) = current.files.get(&current.entry_point) else {
+        return;
+    };
+    if !portable::is_generated_entry(source) {
+        return;
+    }
+    loaded
+        .files
+        .insert(current.entry_point.clone(), source.clone());
+    loaded.entry_point = current.entry_point.clone();
+    // Project model files are imported as managed assets that the folder does not hold.
+    if let Some((entry, builder)) = generated_model_entry(source)
+        && builder == MODEL_FILE_BUILDER
+    {
+        let asset = model_file_asset(&entry);
+        if let Some(digest) = current.assets.get(&asset)
+            && !loaded.assets.contains_key(&asset)
+        {
+            loaded.assets.insert(asset, digest.clone());
+        }
+    }
+}
+
 /// A generated entry can outlive its source after a project is reorganized on disk.
 /// Keep the imported files browsable instead of executing a dangling adapter.
 pub(crate) fn reset_missing_model_entry(inputs: &mut crate::Inputs) {
