@@ -340,23 +340,18 @@ pub fn bind_model<'a>(
 ) -> Result<&'a BuiltModel, Diagnostic> {
     let Some(m) = snap.model(model) else {
         let wanted = model_key(model);
-        // Same builder in another file, or a near name, first.
-        let mut options = suggest(
-            &model.builder,
-            &snap
-                .models
-                .iter()
-                .map(|m| m.model.builder.clone())
-                .collect::<Vec<_>>(),
-        )
-        .into_iter()
-        .filter_map(|b| {
-            snap.models
-                .iter()
-                .find(|m| m.model.builder == b)
-                .map(|m| model_key(&m.model))
-        })
-        .collect::<Vec<_>>();
+        let wanted_dir = model.entry.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        // Prefer models in the same directory/file, then fall back to full `entry#builder` similarity.
+        let same_dir: Vec<String> = snap
+            .models
+            .iter()
+            .filter(|m| {
+                let dir = m.model.entry.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                dir == wanted_dir
+            })
+            .map(|m| model_key(&m.model))
+            .collect();
+        let mut options = suggest(&wanted, &same_dir);
         if options.is_empty() {
             options = suggest(&wanted, &model_names(snap));
         }
@@ -366,9 +361,18 @@ pub fn bind_model<'a>(
             format!("@{wanted} is not a model of this project"),
         );
         if !options.is_empty() {
+            let file = model.entry.rsplit('/').next().unwrap_or(&model.entry);
+            let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+            let label = if model.builder == "$file" || model.builder == stem {
+                file.to_string()
+            } else {
+                format!("{file} ({})", model.builder)
+            };
             d = d.with_fix(Fix::AskUser {
                 options,
-                question: Some("Which model did you mean?".into()),
+                question: Some(format!(
+                    "{label} isn't a model in this project. Which model did you mean?"
+                )),
             });
         }
         return Err(d);

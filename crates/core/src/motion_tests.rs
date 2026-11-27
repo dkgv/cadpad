@@ -571,7 +571,7 @@ impl Core {
                 ws.stored = stored;
                 let _ = self.activity.send(crate::events::Activity {
                     workspace_id: view.owner.clone(),
-                    kind: "motion_tests_changed".into(),
+                    kind: "requirements_changed".into(),
                     job: None,
                     actor: Some(actor.into()),
                     tool: Some("control_requirements".into()),
@@ -714,15 +714,13 @@ impl Core {
         ws.stored = stored;
         drop(workspaces);
         for workspace_id in std::collections::BTreeSet::from([owner, workspace_id]) {
-            for kind in ["motion_tests_changed", "requirements_changed"] {
-                let _ = self.activity.send(crate::events::Activity {
-                    workspace_id: workspace_id.to_owned(),
-                    kind: kind.into(),
-                    job: None,
-                    actor: Some(actor.into()),
-                    tool: Some("control_requirements".into()),
-                });
-            }
+            let _ = self.activity.send(crate::events::Activity {
+                workspace_id: workspace_id.to_owned(),
+                kind: "requirements_changed".into(),
+                job: None,
+                actor: Some(actor.into()),
+                tool: Some("control_requirements".into()),
+            });
         }
         Ok(())
     }

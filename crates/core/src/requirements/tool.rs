@@ -3,7 +3,7 @@
 //! no `approve` command: approval is a user action
 //! ([`Core::approve_requirement`]), which `tools::dispatch` cannot reach.
 use super::compile::{Compiled, compile};
-use super::diagnostics::Diagnostic;
+use super::diagnostics::{Diagnostic, DiagnosticCode};
 use super::dispatch::LiveSnapshot;
 use super::ir::{FeatureRef, ModelRef, PartName, Requirement};
 use super::library::{library, library_version, vague_table};
@@ -12,7 +12,7 @@ use super::provenance::Downgrade;
 use super::run::RunInfo;
 use super::settings::ProjectSettings;
 use super::snapshot::{WorkspaceSnapshot, snapshot_from_values};
-use super::storage::{RequirementInfo, StoredHashes, project_settings, reply as catalog};
+use super::storage::{Approval, RequirementInfo, StoredHashes, project_settings, reply as catalog};
 use super::suggestions::ShapeSignature;
 use crate::motion_tests::Saved;
 use crate::{Core, Error, Result};
@@ -37,6 +37,9 @@ pub enum Command {
     },
     /// Rules, primitives, defaults, print templates and the vague-word table.
     Library,
+    /// The IR JSON schema and command actions, for clients that hide this
+    /// tool's input schema.
+    Schema,
     /// Evaluate an approved requirement and wait for the result.
     Run {
         id: String,
@@ -128,7 +131,10 @@ pub(crate) async fn snapshot_for(
     // Bind against what the models build to now, from the project's sources.
     // A workspace that is not a project (or has no models) falls back to the
     // open model workspaces below.
-    if let Ok(mut live) = core.live_snapshot(workspace_id, actor, None).await
+    let referenced = requirement_models(requirement);
+    if let Ok(mut live) = core
+        .live_snapshot(workspace_id, actor, Some(&referenced))
+        .await
         && !live.snapshot.models.is_empty()
     {
         hydrate_history_features(core, actor, &mut live, requirement).await?;
@@ -360,12 +366,50 @@ pub(super) async fn hydrate_history_features(
 fn library_value(settings: &ProjectSettings) -> Value {
     json!({
         "library_version": library_version(),
+        "ir_schema": super::ir_schema(),
         "rules": library().rules,
         "primitives": library().primitives,
         "settings_defaults": project_settings(),
         "settings": settings,
         "vague_words": vague_table(),
     })
+}
+
+/// Models an IR can bind against: its text chips and every reference in its
+/// sets, covers, claims and allowances. Building only these keeps compile
+/// responsive in projects with many models.
+fn requirement_models(requirement: &Requirement) -> Vec<ModelRef> {
+    let mut models = std::collections::BTreeSet::new();
+    for chip in super::bind::parse_chips(&requirement.text) {
+        models.insert(chip.model);
+    }
+    super::refs::walk(requirement, &mut |site| match site.reference {
+        super::refs::Ref::Model(model) => {
+            models.insert(model.clone());
+        }
+        super::refs::Ref::Part(part) => {
+            models.insert(part.model.clone());
+        }
+        super::refs::Ref::Param(param) => {
+            if let Some(model) = &param.model {
+                models.insert(model.clone());
+            }
+        }
+        super::refs::Ref::Joint(joint) => {
+            models.insert(joint.model.clone());
+        }
+        super::refs::Ref::Feature(feature) => {
+            let part = match feature {
+                FeatureRef::Explicit { part, .. }
+                | FeatureRef::History { part, .. }
+                | FeatureRef::Geometric { part, .. } => part,
+            };
+            models.insert(part.model.clone());
+        }
+        // Set members and covers are visited separately by `walk`.
+        super::refs::Ref::Set(_) | super::refs::Ref::Others => {}
+    });
+    models.into_iter().collect()
 }
 
 /// Put the project's run state on the requirement it belongs to.
@@ -435,17 +479,75 @@ impl Core {
         let (owner, current) = self.requirement_catalog(actor, workspace_id).await?;
         match args.command {
             Command::List => {
+                let settings = super::storage::settings_in(&current);
+                let mut expected = crate::motion_tests::fingerprint(&current)?;
+                let mut refreshed = false;
+                for entry in current.values().filter_map(Saved::requirement) {
+                    if entry.approval() == Approval::Approved
+                        || !entry
+                            .draft_diagnostics
+                            .iter()
+                            .any(|d| d.code == DiagnosticCode::EBuild)
+                    {
+                        continue;
+                    }
+                    if let Ok(snapshot) =
+                        snapshot_for(self, workspace_id, actor, &entry.draft).await
+                    {
+                        let compiled = compile(&entry.draft, &snapshot, &settings);
+                        let next_hashes = compiled.hashes.as_ref().map(StoredHashes::from);
+                        if compiled.diagnostics != entry.draft_diagnostics
+                            || next_hashes != entry.draft_hashes
+                        {
+                            let stored = self
+                                .store_requirement_draft(
+                                    actor,
+                                    workspace_id,
+                                    Some(&expected),
+                                    &compiled,
+                                )
+                                .await?;
+                            expected = stored.catalog;
+                            refreshed = true;
+                        }
+                    }
+                }
+                let (owner, latest) = if refreshed {
+                    self.requirement_catalog(actor, workspace_id).await?
+                } else {
+                    (owner, current)
+                };
                 let run = self
                     .requirement_run_status(&owner)
                     .filter(|r| r.state.active())
                     .map(|r| json!(r));
-                self.requirement_reply(&owner, &current, None, None, run)
+                self.requirement_reply(&owner, &latest, None, None, run)
             }
             Command::Library => self.requirement_reply(
                 &owner,
                 &current,
                 None,
                 Some(library_value(&super::storage::settings_in(&current))),
+                None,
+            ),
+            Command::Schema => self.requirement_reply(
+                &owner,
+                &current,
+                None,
+                Some(json!({
+                    "ir_version": super::IR_VERSION,
+                    "ir_schema": super::ir_schema(),
+                    "actions": [
+                        "list",
+                        "schema",
+                        "compile",
+                        "save",
+                        "library",
+                        "run",
+                        "start_run",
+                        "cancel_run",
+                    ],
+                })),
                 None,
             ),
             Command::Compile { ir } => {
@@ -499,5 +601,42 @@ impl Core {
                 self.requirement_reply(&owner, &current, None, None, status.map(|r| json!(r)))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn machine() -> ModelRef {
+        ModelRef {
+            entry: "machine.py".into(),
+            builder: "machine".into(),
+        }
+    }
+
+    #[test]
+    fn requirement_models_covers_sets_and_claims() {
+        let requirement: Requirement =
+            serde_json::from_str(include_str!("../../tests/fixtures/requirements/R1.json"))
+                .unwrap();
+        assert_eq!(requirement_models(&requirement), vec![machine()]);
+    }
+
+    #[test]
+    fn requirement_models_keeps_text_chips_without_claims() {
+        let mut requirement: Requirement =
+            serde_json::from_str(include_str!("../../tests/fixtures/requirements/R1.json"))
+                .unwrap();
+        requirement.sets.clear();
+        requirement.claims.clear();
+        requirement.text = "@[Frame](parts/frame.py#frame) attaches".into();
+        assert_eq!(
+            requirement_models(&requirement),
+            vec![ModelRef {
+                entry: "parts/frame.py".into(),
+                builder: "frame".into(),
+            }]
+        );
     }
 }

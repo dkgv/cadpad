@@ -1328,3 +1328,92 @@ async fn auto_run_stores_needs_review_without_running() {
     let listed = p.list().await;
     assert_eq!(listed["requirements"][0]["status"], "needs_review");
 }
+
+#[tokio::test]
+async fn unsaved_source_in_child_view_is_visible_to_compile() {
+    let p = open("turntable").await;
+    let info = p.core.get_project(&p.workspace).await.unwrap();
+    let base = info["revision"].as_str().unwrap();
+    let (tab, job) = p
+        .core
+        .open_project_model(&p.workspace, base, "machine.py", "machine", "user")
+        .await
+        .unwrap();
+    let job = loop {
+        let current = p.core.get_job(&tab, &job.id).await.unwrap();
+        if !matches!(current.state, JobState::Queued | JobState::Running) {
+            break current;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    if job.state != JobState::Succeeded {
+        panic!("child view build failed: {:?}", job.diagnostics);
+    }
+    let mut tab_rev = job.resulting_revision.unwrap();
+    let mut changes = std::collections::BTreeMap::new();
+    changes.insert(
+        "extra_assembly.py".to_string(),
+        "import cadquery as cq\n\ndef block(context):\n    context.show(cq.Workplane('XY').box(10, 10, 10), name='block')\n"
+            .to_string(),
+    );
+    let draft = p
+        .core
+        .update_source(&tab, &tab_rev, None, changes, "agent")
+        .await
+        .unwrap();
+    let build_job = p
+        .core
+        .build(&tab, &tab_rev, &draft.id, "agent")
+        .await
+        .unwrap();
+    let finished = loop {
+        let current = p.core.get_job(&tab, &build_job.id).await.unwrap();
+        if !matches!(current.state, JobState::Queued | JobState::Running) {
+            break current;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        finished.state,
+        JobState::Succeeded,
+        "{:?}",
+        finished.diagnostics
+    );
+    tab_rev = finished.resulting_revision.unwrap();
+    assert!(!tab_rev.is_empty());
+
+    let ir = json!({
+        "ir_version": 1,
+        "id": "extra-block-valid",
+        "name": "Block is valid",
+        "text": "@[Block](extra_assembly.py#block) is a single solid",
+        "claims": [{
+            "id": "c1",
+            "rule": "single_solid",
+            "span": [0, 51],
+            "args": {
+                "a": {
+                    "part": {
+                        "model": {"entry": "extra_assembly.py", "builder": "block"},
+                        "part": {"name": "block"}
+                    }
+                }
+            }
+        }]
+    });
+    let reply = p
+        .core
+        .dispatch(
+            &tools::ToolContext {
+                actor: "agent".into(),
+            },
+            "control_requirements",
+            json!({
+                "workspace_id": tab,
+                "command": {"action": "compile", "ir": ir}
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply["compiled"]["ok"], json!(true), "{reply}");
+}

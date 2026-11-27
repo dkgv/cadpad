@@ -48,6 +48,7 @@ fn approve_is_not_an_agent_command() {
         "compile",
         "save",
         "library",
+        "schema",
         "run",
         "start_run",
         "cancel_run",
@@ -63,6 +64,36 @@ fn approve_is_not_an_agent_command() {
         tools::definitions()
             .iter()
             .all(|t| !t.name.contains("approve"))
+    );
+}
+
+#[tokio::test]
+async fn library_includes_the_ir_schema() {
+    let (_temp, core, ws) = open().await;
+    let reply = call(&core, &ws, None, json!({"action": "library"}))
+        .await
+        .unwrap();
+    let schema = &reply["library"]["ir_schema"];
+    assert_eq!(schema["title"], json!("Requirement"));
+    assert!(schema["properties"]["ir_version"].is_object());
+    assert!(schema["$defs"]["Claim"].is_object());
+}
+
+#[tokio::test]
+async fn schema_command_returns_the_ir_schema_alone() {
+    let (_temp, core, ws) = open().await;
+    let reply = call(&core, &ws, None, json!({"action": "schema"}))
+        .await
+        .unwrap();
+    let schema = &reply["library"]["ir_schema"];
+    assert_eq!(schema["title"], json!("Requirement"));
+    assert_eq!(reply["library"]["ir_version"], json!(1));
+    assert!(
+        reply["library"]["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "compile")
     );
 }
 

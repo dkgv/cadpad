@@ -76,8 +76,9 @@ impl Core {
             let all = self.workspace_metadata(&project).await?;
             all[&project].stored.current.clone()
         };
+        let overrides = self.unsaved_source_overrides(workspace).await?;
         let catalog = self
-            .project_source_catalog(&project, &revision, None)
+            .project_source_catalog_with_overrides(&project, &revision, None, &overrides)
             .await?;
         let current_model = self.requirement_view_model(workspace).await?;
         let mut builds = BTreeMap::new();
@@ -97,6 +98,7 @@ impl Core {
                         &model.builder,
                         actor,
                         cached_views.get(&model).map(String::as_str),
+                        &overrides,
                     )
                     .await;
                 match opened {
