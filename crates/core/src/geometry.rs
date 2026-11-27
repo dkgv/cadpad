@@ -61,6 +61,16 @@ pub struct HistoryReference {
     pub set_hash: String,
     pub positional: bool,
     pub basis: String,
+    /// The operation call that created the entity, then up to four callers;
+    /// project-relative files, innermost first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source: Vec<HistorySource>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct HistorySource {
+    pub file: String,
+    pub line: u64,
+    pub function: String,
 }
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct SelectedHistory {

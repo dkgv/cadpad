@@ -88,6 +88,9 @@ def adapter_source(entry, name, context=False, variable=False, producer=None, gr
             "    sys.modules[spec.name] = module\n"
             "    root = Path(__file__).parent\n"
             "    sys.path[:0] = [str(parent) for parent in path.parents if parent.is_relative_to(root)]\n"
+            "    for _name, _fn in vars(context).items():\n"
+            "        if _name != 'parameters':\n"
+            "            module.__dict__.setdefault(_name, _fn)\n"
             "    spec.loader.exec_module(module)\n")
     argument = f"getattr(module, {json.dumps(producer)})()" if producer else "context" if context else ""
     expression = f"getattr(module, {json.dumps(name)})" + ("" if variable else f"({argument})")

@@ -66,3 +66,44 @@ def test_parts_report_builder_function_features_and_constants(tmp_path):
     assert all(len(part['geometry_fingerprint']['sha256']) == 64 for part in parts.values())
     constants = {item['name']: item['values'] for item in result['constants']}
     assert constants == {'WIDTH': [30.0], 'RATIOS': [0.5, 2.0]}
+
+
+def test_generated_entry_points_credit_the_builder_not_the_adapter(tmp_path):
+    from cadpad_worker.entrypoint import adapter_source
+    directory = tmp_path / 'source'
+    (directory / 'parts').mkdir(parents=True)
+    (directory / 'parts' / 'mount.py').write_text(
+        'import cadquery as cq\n\n\n'
+        'def mount():\n'
+        '    return cq.Workplane().box(10, 10, 10).union(cq.Workplane().box(2, 2, 2).translate((20, 0, 0)))\n'
+        '    \n'
+        'def pair():\n'
+        '    return [cq.Workplane().box(1, 1, 1), cq.Workplane().box(2, 2, 2)]\n')
+    (directory / 'cadpad_view_0.py').write_text(adapter_source('parts/mount.py', 'pair'))
+    result = Model(tmp_path / 'cache').build(dict(source_root=str(directory), entry_point='cadpad_view_0.py'), 'r1')
+    assert all(source == {'file': 'parts/mount.py', 'line': 7} for source in sources(result).values())
+    assert len(result['parts']) == 2
+
+
+def test_traced_faces_report_the_operation_that_created_them(tmp_path):
+    directory = tmp_path / 'source'
+    directory.mkdir()
+    (directory / 'model.py').write_text(
+        'import cadquery as cq\n\n'
+        'def tab(x):\n'
+        '    return cq.Workplane().box(2, 2, 2).translate((x, 0, 3))\n\n'
+        'def frame():\n'
+        '    body = cq.Workplane().box(20, 20, 4)\n'
+        '    body = body.union(tab(5))\n'
+        '    return body\n\n'
+        'show(frame(), name="frame")\n')
+    model = Model(tmp_path / 'cache')
+    model.build(dict(source_root=str(directory)), 'r1')
+    faces = len(model.parts['frame'].shape.Faces())
+    reply = model.inspect(dict(history_names=True, entities=[
+        dict(revision='r1', instance_id='frame', entity_id=f'face:{index}') for index in range(faces)]))
+    calls = [reference['source'] for item in reply['entities']
+             for reference in item.get('history_references', []) if 'source' in reference]
+    assert [dict(file='model.py', line=4, function='tab'), dict(file='model.py', line=8, function='frame')] in \
+        [call[:2] for call in calls]
+    assert any(call[0] == dict(file='model.py', line=7, function='frame') for call in calls)

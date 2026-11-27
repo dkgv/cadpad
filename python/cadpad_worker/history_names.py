@@ -163,6 +163,9 @@ class Namer:
         self.dead = False
         self.positional_names = set()
         self.history_names = set()
+        # opkey -> source frames that ran the operation, innermost first:
+        # [{file, line, function}]; lets callers point at the creating code.
+        self.op_sources = {}
         # Keep trace_cad_edge response shape compatible on opt-in traced builds.
         self.edges = {}
 
@@ -344,12 +347,14 @@ class Namer:
         sid = (rel, scope, opname, ordinal)
         suffix = ""
         frame_up, depth, parts = caller.f_back, 0, []
+        sources = [dict(file=rel, line=p[0], function=scope)]
         while frame_up is not None and depth < 4 and frame_up.f_code.co_filename.startswith(self.prefix):
             if frame_up.f_code.co_name != "<module>":
                 r2, _, p2 = self.site_key(frame_up)
                 call = self.files[frame_up.f_code.co_filename].calls.get((p2[0], p2[1], p2[2], p2[3]))
                 if call:
                     parts.append(f"{call[0]}>{call[1]}#{call[2]}")
+                sources.append(dict(file=r2, line=p2[0], function=frame_up.f_code.co_qualname))
                 depth += 1
             frame_up = frame_up.f_back
         suffix = "".join(f"@{x}" for x in parts)
@@ -357,6 +362,7 @@ class Namer:
         occ = self.site_counts.get(key, 0)
         self.site_counts[key] = occ + 1
         opkey = f"{rel}:{scope}/{opname}#{ordinal}" + (f".{occ}" if occ else "") + suffix
+        self.op_sources[opkey] = sources
 
         inputs = set()
         for s in self.operand_shapes(frame):
@@ -422,6 +428,18 @@ class Namer:
                     self.positional_names.add(name)
                 new_edges += 1
         self.ops.append((opkey, new_faces, new_edges))
+
+    def source_of(self, name):
+        """Source frames of the operation that created a name, innermost first.
+
+        Names are `<opkey>/<role>`; roles may themselves contain '/', so the
+        longest recorded opkey that prefixes the name wins.
+        """
+        best = None
+        for opkey in self.op_sources:
+            if name.startswith(opkey + "/") and (best is None or len(opkey) > len(best)):
+                best = opkey
+        return [dict(item) for item in self.op_sources[best]] if best else []
 
     # ------------------------------------------------------------ resolution
     def snapshot(self, final):

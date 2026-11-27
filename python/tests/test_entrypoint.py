@@ -158,6 +158,37 @@ def build():
     assert all(abs(part['volume'] - 24) < 1e-8 for part in result['parts'])
 
 
+def test_adapted_builder_receives_cadpad_helpers_like_import_stl(tmp_path):
+    from cadpad_worker.model import Model
+    import cadquery as cq
+    assets = tmp_path / 'assets'
+    assets.mkdir()
+    cq.exporters.export(cq.Workplane('XY').box(2, 3, 4).val(), str(assets / 'box.stl'))
+    source = 'def assembly():\n    return import_stl("box.stl")\n'
+    (tmp_path / 'assembly_mod.py').write_text(source)
+    plan = analyze(dict(entry='assembly_mod.py', source=source, builder='assembly'))
+    (tmp_path / 'model.py').write_text(plan['options'][0]['source'])
+    result = Model(tmp_path / 'cache').build(dict(source_root=str(tmp_path)), 'import-stl-adapter-test')
+    assert len(result['parts']) == 12
+
+
+def test_imported_module_can_call_import_stl(tmp_path, monkeypatch):
+    import sys
+    from cadpad_worker.model import Model
+    import cadquery as cq
+    monkeypatch.setattr(sys, 'path', sys.path[:])
+    assets = tmp_path / 'assets'
+    assets.mkdir()
+    cq.exporters.export(cq.Workplane('XY').box(2, 3, 4).val(), str(assets / 'box.stl'))
+    (tmp_path / 'sub_stl_helper.py').write_text('def load():\n    return import_stl("box.stl")\n')
+    (tmp_path / 'model.py').write_text('from sub_stl_helper import load\nshow(load(), name="mesh", kind="surface")\n')
+    try:
+        result = Model(tmp_path / 'cache').build(dict(source_root=str(tmp_path)), 'import-stl-submodule-test')
+        assert len(result['parts']) == 1
+    finally:
+        sys.modules.pop('sub_stl_helper', None)
+
+
 def test_workplane_stack_is_published_without_losing_shapes(tmp_path):
     from cadpad_worker.model import Model
     source = '''import cadquery as cq

@@ -272,15 +272,69 @@ class Model:
             self.parameters[name] = dict(value=value, unit=unit, minimum=minimum, maximum=maximum, description=description)
             return value
 
-        def call_site():
+        adapter_targets = {}
+
+        def adapter_site(path, published):
+            import inspect
+            import re
+            # A generated entry point loads the user's file as `cadpad_source` and
+            # publishes what its builder returned, so the builder never shows up on
+            # the stack. Credit the builder definition, not the adapter's show().
+            if path not in adapter_targets:
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    text = ""
+                adapter_targets[path] = (text.startswith("# Generated Cadpad entry point."),
+                                         re.findall(r'getattr\(module, "([^"\\]+)"\)', text))
+            generated, symbols = adapter_targets[path]
+            if not generated:
+                return None, False
+            module = sys.modules.get("cadpad_source")
+            module_file = getattr(module, "__file__", None)
+            if not symbols or module_file is None:
+                return None, True
+            # Grouped builders publish `model_<symbol>`; otherwise the first
+            # getattr is the builder (compositions wrap the producer call).
+            symbol = next((item for item in symbols if isinstance(published, str)
+                           and (published == f"model_{item}" or published.startswith(f"model_{item}/"))), symbols[0])
+            target = getattr(module, symbol, None)
+            code = getattr(inspect.unwrap(target), "__code__", None) if callable(target) else None
+            try:
+                file = Path(code.co_filename if code else module_file).resolve()
+            except (OSError, ValueError):
+                return None, True
+            if not file.is_relative_to(source_root):
+                return None, True
+            line = code.co_firstlineno if code else 1
+            if code is None:
+                try:
+                    lines = file.read_text(encoding="utf-8").splitlines()
+                    line = next((index for index, text in enumerate(lines, 1)
+                                 if re.match(rf"{re.escape(symbol)}\s*(:[^=]*)?=", text)), 1)
+                except OSError:
+                    pass
+            return dict(file=file.relative_to(source_root).as_posix(), line=line,
+                        function=symbol if code else None), True
+
+        def call_site(published=None):
             # The innermost project-source frame is the component file that published the part.
             frame = sys._getframe(1)
+            adapter = None
             while frame is not None:
                 try:
                     path = Path(frame.f_code.co_filename).resolve()
                 except (OSError, ValueError):
                     path = None
                 if path is not None and path.is_relative_to(source_root) and path.suffix == ".py":
+                    site, generated = adapter_site(path, published)
+                    if site is not None:
+                        return site
+                    if generated:
+                        # Unresolvable adapter: fall back to its own frame below.
+                        adapter = adapter or frame
+                        frame = frame.f_back
+                        continue
                     # Comprehensions and lambdas belong to the function around them.
                     outer = frame
                     while outer is not None and outer.f_code.co_name.startswith("<") and outer.f_code.co_name != "<module>":
@@ -289,6 +343,10 @@ class Model:
                     return dict(file=path.relative_to(source_root).as_posix(), line=frame.f_lineno,
                                 function=None if name.startswith("<") else name)
                 frame = frame.f_back
+            if adapter is not None:
+                path = Path(adapter.f_code.co_filename).resolve()
+                return dict(file=path.relative_to(source_root).as_posix(), line=adapter.f_lineno,
+                            function=None if adapter.f_code.co_name.startswith("<") else adapter.f_code.co_name)
             return None
 
         def record_step_source(path):
@@ -338,7 +396,7 @@ class Model:
 
         def show(obj, *, name, position=(0, 0, 0), features=None, density=None, kind=None,
                  fastener=None, origin=None, _source=None, _placement=None):
-            source = _source or call_site()
+            source = _source or call_site(name)
             if not isinstance(name, str) or not name or name in self.parts:
                 raise DomainError("INVALID_GEOMETRY", f"Published name must be unique: {name!r}")
             if isinstance(obj, cq.Assembly):
@@ -573,8 +631,13 @@ class Model:
         old_profile = sys.getprofile()
         if history_names and old_profile is not None:
             raise DomainError("HISTORY_TRACE_UNAVAILABLE", "History naming requires an exclusive worker trace hook")
+        import builtins
+        _SENTINEL = object()
+        saved_builtins = {name: getattr(builtins, name, _SENTINEL) for name in helpers}
         old_path, old_cwd = sys.path[:], Path.cwd()
         try:
+            for name, fn in helpers.items():
+                setattr(builtins, name, fn)
             sys.path.insert(0, str(source_root))
             if entry_path.parent != source_root:
                 sys.path.insert(0, str(entry_path.parent))
@@ -587,6 +650,12 @@ class Model:
             if not self.parts and isinstance(namespace.get("result"), (cq.Workplane, cq.Shape, cq.Assembly)):
                 show(namespace["result"], name="result")
         finally:
+            for name, previous in saved_builtins.items():
+                if previous is _SENTINEL:
+                    if hasattr(builtins, name):
+                        delattr(builtins, name)
+                else:
+                    setattr(builtins, name, previous)
             if old_profile is None and sys.getprofile() is profile:
                 sys.setprofile(None)
             os.chdir(old_cwd)
@@ -994,13 +1063,18 @@ class Model:
                         feature = features[name]
                         positional = (positional_name(name)
                                       or name in self._history_namer.positional_names)
-                        item["history_references"].append(dict(
+                        reference = dict(
                             name=name, entity_kind=kind, exact_hash=exact_hash,
                             count=feature["count"], set_hash=feature["set_hash"],
                             positional=positional,
                             basis=("positional_fallback" if positional else
                                    "occt_history" if name in self._history_namer.history_names
-                                   else "source_role")))
+                                   else "source_role"))
+                        # The operation call that created the entity, then its callers.
+                        source = self._history_namer.source_of(name)
+                        if source:
+                            reference["source"] = source
+                        item["history_references"].append(reference)
                     item["history_references_status"] = "available" if names else "unavailable"
                     if not names:
                         item["history_references_reason"] = "no_reliable_name"
