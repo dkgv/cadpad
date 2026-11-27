@@ -485,10 +485,13 @@ async fn model_tabs_keep_independent_geometry_inside_one_project_without_writing
         std::fs::read_to_string(root.join("geometry.py")).unwrap(),
         source
     );
+    // The browser entry is Cadpad plumbing: it lives in `.cadpad/entries/`,
+    // never beside the user's source.
     assert_eq!(
-        std::fs::read_to_string(root.join("cadpad_view_0.py")).unwrap(),
+        std::fs::read_to_string(root.join(".cadpad/entries/cadpad_view_0.py")).unwrap(),
         portable::PROJECT_BROWSER_SOURCE
     );
+    assert!(!root.join("cadpad_view_0.py").exists());
     let changed = source.replace("box(2,3,4)", "box(3,3,4)");
     let base = plate_model["revision"].as_str().unwrap();
     let draft = core

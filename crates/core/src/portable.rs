@@ -12,6 +12,16 @@ use std::{
 
 pub const SOURCE_FILE_LIMIT: usize = 4096;
 pub const PROJECT_BROWSER_SOURCE: &str = "# Cadpad project browser. Select a part in Explorer.\n";
+pub const GENERATED_ENTRY_HEADER: &str = "# Generated Cadpad entry point.";
+/// Folder projects keep generated entry points under `.cadpad/entries/` so
+/// they do not clutter the user's source tree. Revisions still key them by
+/// their plain file name, so builds, fingerprints and history are unchanged.
+const ENTRIES_DIRECTORY: &str = "entries";
+
+/// Entry points Cadpad wrote itself: build adapters and the project browser.
+pub fn is_generated_entry(source: &str) -> bool {
+    source.starts_with(GENERATED_ENTRY_HEADER) || source == PROJECT_BROWSER_SOURCE
+}
 pub const SOURCE_LIMIT: usize = 1024 * 1024;
 pub const ASSET_LIMIT: usize = 64 * 1024 * 1024;
 const TOTAL_LIMIT: usize = 256 * 1024 * 1024;
@@ -508,46 +518,63 @@ pub fn python_entry_points(directory: &Path) -> Result<Vec<String>> {
     paths.sort();
     Ok(paths)
 }
+/// A generated entry name that collides with no project source file:
+/// `cadpad_entry.py`, `cadpad_entry_1.py`, … or `cadpad_view_0.py`, ….
+pub(crate) fn unused_entry_name(root: &Path, prefix: &str) -> Result<String> {
+    let taken = python_entry_points(root)?;
+    let entries = checked_path(root, ".cadpad")?.join(ENTRIES_DIRECTORY);
+    let bare = prefix == "cadpad_entry";
+    (0..SOURCE_FILE_LIMIT)
+        .map(|index| {
+            if bare && index == 0 {
+                format!("{prefix}.py")
+            } else {
+                format!("{prefix}_{index}.py")
+            }
+        })
+        .find(|name| !taken.contains(name) && !entries.join(name).exists())
+        .ok_or_else(|| Error::domain("INVALID_REQUEST", "Project has too many source files"))
+}
+
 /// Add only Cadpad configuration; existing source and unrelated files stay in place.
 pub fn initialize_project_browser(directory: &Path) -> Result<()> {
     let root = directory.canonicalize()?;
-    for index in 0..SOURCE_FILE_LIMIT {
-        let name = format!("cadpad_view_{index}.py");
-        let path = checked_path(&root, &name)?;
-        let mut file = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let result = (|| {
-            file.write_all(PROJECT_BROWSER_SOURCE.as_bytes())?;
-            file.sync_all()?;
-            initialize_folder(&root, &name)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(path);
-        }
-        return result;
-    }
-    Err(Error::domain(
-        "INVALID_REQUEST",
-        "Project has too many source files",
-    ))
+    let name = unused_entry_name(&root, "cadpad_view")?;
+    initialize_folder_with(&root, &name, Some(PROJECT_BROWSER_SOURCE))
 }
 
 pub fn initialize_folder(directory: &Path, entry: &str) -> Result<()> {
-    let root = directory.canonicalize()?;
+    initialize_folder_with(&directory.canonicalize()?, entry, None)
+}
+
+/// Creates `.cadpad`. A `generated` entry source is stored under
+/// `.cadpad/entries/` instead of the project root.
+pub(crate) fn initialize_folder_with(
+    root: &Path,
+    entry: &str,
+    generated: Option<&str>,
+) -> Result<()> {
+    let root = root.canonicalize()?;
     validate_path(entry)?;
-    let paths = python_entry_points(&root)?;
-    if !paths.contains(&entry.to_string()) {
-        return Err(Error::domain(
-            "INVALID_REQUEST",
-            "Choose a Python entry file inside the project folder",
-        ));
+    let mut paths = python_entry_points(&root)?;
+    match generated {
+        Some(source) if is_generated_entry(source) && !paths.contains(&entry.to_string()) => {
+            paths.push(entry.into());
+            paths.sort();
+        }
+        Some(_) => {
+            return Err(Error::domain(
+                "INVALID_REQUEST",
+                "Generated entry points need an unused name and generated content",
+            ));
+        }
+        None if !paths.contains(&entry.to_string()) => {
+            return Err(Error::domain(
+                "INVALID_REQUEST",
+                "Choose a Python entry file inside the project folder",
+            ));
+        }
+        None => {}
     }
     let config = checked_path(&root, ".cadpad")?;
     if config.exists() {
@@ -559,6 +586,13 @@ pub fn initialize_folder(directory: &Path, entry: &str) -> Result<()> {
     let staging = root.join(format!(".cadpad-{}.tmp", id()));
     let result = (|| -> Result<()> {
         fs::create_dir(&staging)?;
+        if let Some(source) = generated {
+            atomic_write(
+                &staging,
+                &format!("{ENTRIES_DIRECTORY}/{entry}"),
+                source.as_bytes(),
+            )?;
+        }
         let defaults = Inputs::default();
         for (name, value) in [
             ("parameters.json", &defaults.parameters),
@@ -670,6 +704,14 @@ fn read_project_with_assets(directory: &Path, retain_blobs: bool) -> Result<Load
             .map_err(|_| Error::domain("INVALID_REQUEST", "Python source must be UTF-8"))?;
         inputs.files.insert(path, source);
     }
+    // Root copies of generated entries predate `.cadpad/entries/`; the
+    // relocated copy wins and the next save removes the root one.
+    if metadata != root {
+        for (path, source) in read_generated_entries(&metadata)? {
+            total += source.len();
+            inputs.files.insert(path, source);
+        }
+    }
     let mut blobs = BTreeMap::new();
     let mut asset_paths = Vec::new();
     let assets_root = checked_path(&root, "assets")?;
@@ -728,6 +770,64 @@ fn read_project_with_assets(directory: &Path, retain_blobs: bool) -> Result<Load
         manifest,
     })
 }
+fn read_generated_entries(metadata: &Path) -> Result<BTreeMap<String, String>> {
+    let directory = checked_path(metadata, ENTRIES_DIRECTORY)?;
+    let mut entries = BTreeMap::new();
+    if !directory.is_dir() {
+        return Ok(entries);
+    }
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !entry.file_type()?.is_file() || !name.ends_with(".py") || name.starts_with('.') {
+            continue;
+        }
+        validate_path(&name)?;
+        let bytes = read_bounded(&checked_path(&directory, &name)?, SOURCE_LIMIT)?;
+        let source = String::from_utf8(bytes)
+            .map_err(|_| Error::domain("INVALID_REQUEST", "Python source must be UTF-8"))?;
+        // Anything else in this directory was not written by Cadpad.
+        if is_generated_entry(&source) {
+            entries.insert(name, source);
+        }
+    }
+    Ok(entries)
+}
+
+/// Writes generated root-level entries under `.cadpad/entries/`, removes
+/// relocated or stale ones, and deletes root copies only while they still hold
+/// generated content.
+fn write_generated_entries(root: &Path, metadata: &Path, inputs: &Inputs) -> Result<()> {
+    let generated = inputs
+        .files
+        .iter()
+        .filter(|(path, source)| !path.contains('/') && is_generated_entry(source))
+        .collect::<BTreeMap<_, _>>();
+    for (path, source) in &generated {
+        atomic_write(
+            metadata,
+            &format!("{ENTRIES_DIRECTORY}/{path}"),
+            source.as_bytes(),
+        )?;
+        let legacy = checked_path(root, path)?;
+        if legacy.is_file()
+            && String::from_utf8(read_bounded(&legacy, SOURCE_LIMIT)?)
+                .is_ok_and(|text| is_generated_entry(&text))
+        {
+            fs::remove_file(legacy)?;
+        }
+    }
+    for (name, _) in read_generated_entries(metadata)? {
+        if !generated.contains_key(&name) {
+            fs::remove_file(checked_path(
+                metadata,
+                &format!("{ENTRIES_DIRECTORY}/{name}"),
+            )?)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_inputs(inputs: &Inputs) -> Result<()> {
     crate::annotations::decode(&inputs.annotations)?;
     crate::kinematics::decode(&inputs.mechanism)?;
@@ -876,8 +976,20 @@ fn write_inputs(
             }
         }
     }
+    let metadata = if folder {
+        checked_path(root, ".cadpad")?
+    } else {
+        root.to_path_buf()
+    };
+    fs::create_dir_all(&metadata)?;
     for (path, source) in &inputs.files {
+        if folder && !path.contains('/') && is_generated_entry(source) {
+            continue;
+        }
         atomic_write(root, path, source.as_bytes())?;
+    }
+    if folder {
+        write_generated_entries(root, &metadata, inputs)?;
     }
     for (name, hash) in &inputs.assets {
         let bytes = read_bounded(&blobs.join(hash), ASSET_LIMIT)?;
@@ -889,12 +1001,6 @@ fn write_inputs(
         }
         atomic_write(root, &format!("assets/{name}"), &bytes)?;
     }
-    let metadata = if folder {
-        checked_path(root, ".cadpad")?
-    } else {
-        root.to_path_buf()
-    };
-    fs::create_dir_all(&metadata)?;
     for (name, value) in [
         ("parameters.json", &inputs.parameters),
         ("annotations.json", &inputs.annotations),

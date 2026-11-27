@@ -1,10 +1,7 @@
 //! Desktop-authorized entry adapters. Analysis parses source without running it.
 use crate::{Core, Error, Result, portable, worker::Worker};
 use serde_json::{Value, json};
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 const MODEL_FILE_BUILDER: &str = "$file";
 const MODEL_FILE_COMMENT: &str = "# Project model file: ";
@@ -195,8 +192,21 @@ impl Core {
         Ok(plan)
     }
     pub async fn index_project_sources(&self, workspace: &str, revision: &str) -> Result<Value> {
+        self.index_project_sources_with_overrides(
+            workspace,
+            revision,
+            &std::collections::BTreeMap::new(),
+        )
+        .await
+    }
+    async fn index_project_sources_with_overrides(
+        &self,
+        workspace: &str,
+        revision: &str,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Value> {
         let _memory = self.pin_workspace(workspace).await?;
-        let sources = {
+        let mut sources = {
             let all = self.workspace(workspace).await?;
             let ws = all
                 .get(workspace)
@@ -217,6 +227,7 @@ impl Core {
                 .map(|(path, source)| (path.clone(), source.clone()))
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
+        sources.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
         self.entry_analysis_request("index_sources", json!({"sources": sources}))
             .await
     }
@@ -262,6 +273,48 @@ impl Core {
             "max": summary.max,
             "size": summary.size,
         }))
+    }
+    pub(crate) async fn unsaved_source_overrides(
+        &self,
+        workspace: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        let _memory = self.pin_workspace(workspace).await?;
+        let all = self.workspace(workspace).await?;
+        let ws = all
+            .get(workspace)
+            .ok_or_else(|| Error::domain("APP_UNAVAILABLE", "Unknown workspace"))?;
+        let baseline_id = if let Some(binding) = ws.stored.project.as_ref() {
+            binding.saved_revision.clone()
+        } else if ws.stored.model_parent.is_some() {
+            let Some(root) = ws
+                .stored
+                .revisions
+                .headers()
+                .find(|(_, header)| header.parent.is_none())
+                .map(|(id, _)| id.clone())
+            else {
+                return Ok(Default::default());
+            };
+            root
+        } else {
+            return Ok(Default::default());
+        };
+        if ws.stored.current == baseline_id {
+            return Ok(Default::default());
+        }
+        let baseline = ws.stored.revisions.load(&baseline_id).await?;
+        let current = ws.stored.current_revision();
+        Ok(current
+            .inputs
+            .files
+            .iter()
+            .filter(|(_, source)| {
+                !source.starts_with("# Generated Cadpad entry point.")
+                    && source.as_str() != portable::PROJECT_BROWSER_SOURCE
+            })
+            .filter(|(path, source)| baseline.inputs.files.get(*path) != Some(*source))
+            .map(|(path, source)| (path.clone(), source.clone()))
+            .collect())
     }
     pub async fn model_parent(&self, workspace: &str) -> Option<String> {
         self.workspaces
@@ -343,6 +396,7 @@ impl Core {
             cached_view,
             preview,
             true,
+            &Default::default(),
         )
         .await
     }
@@ -355,6 +409,7 @@ impl Core {
         builder: &str,
         actor: &str,
         cached_view: Option<&str>,
+        overrides: &std::collections::BTreeMap<String, String>,
     ) -> Result<(String, crate::Job)> {
         self.open_project_model_view(
             workspace,
@@ -365,6 +420,7 @@ impl Core {
             cached_view,
             None,
             false,
+            overrides,
         )
         .await
     }
@@ -379,6 +435,7 @@ impl Core {
         cached_view: Option<&str>,
         preview: Option<crate::StlPreviewSink>,
         check_requirements: bool,
+        overrides: &std::collections::BTreeMap<String, String>,
     ) -> Result<(String, crate::Job)> {
         let _memory = self.pin_workspace(workspace).await?;
         let standalone_stl =
@@ -432,7 +489,9 @@ impl Core {
                 .map(|(_, fingerprint)| fingerprint)
                 .or_else(|| disk.as_ref().map(|loaded| &loaded.fingerprint))
                 .unwrap();
-            if let Some(view) = cached_view.filter(|view| *view != workspace) {
+            if let Some(view) =
+                cached_view.filter(|view| overrides.is_empty() && *view != workspace)
+            {
                 let out_of_tree_asset =
                     builder == MODEL_FILE_BUILDER && !entry.starts_with("assets/");
                 let asset_hash = if let Some((hash, _)) = &mesh_file {
@@ -591,10 +650,13 @@ impl Core {
                 motion_tests: Default::default(),
                 geometry_cache: serde_json::Value::Null,
             };
-            let (inputs, disk_fingerprint) = match disk {
+            let (mut inputs, disk_fingerprint) = match disk {
                 Some(disk) => (disk.inputs, Some(disk.fingerprint)),
                 None => (source.current_revision().inputs.clone(), None),
             };
+            inputs
+                .files
+                .extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
             let initial = crate::Revision {
                 id: base.clone(),
                 parent: None,
@@ -605,7 +667,9 @@ impl Core {
             };
             if let Some(binding) = &mut stored.project {
                 binding.saved_revision = base.clone();
-                if let Some(fingerprint) = disk_fingerprint {
+                if !overrides.is_empty() {
+                    binding.fingerprint.clear();
+                } else if let Some(fingerprint) = disk_fingerprint {
                     binding.fingerprint = fingerprint;
                 }
             }
@@ -847,6 +911,21 @@ impl Core {
         revision: &str,
         fingerprint: Option<&str>,
     ) -> Result<Value> {
+        self.project_source_catalog_with_overrides(
+            workspace,
+            revision,
+            fingerprint,
+            &Default::default(),
+        )
+        .await
+    }
+    pub(crate) async fn project_source_catalog_with_overrides(
+        &self,
+        workspace: &str,
+        revision: &str,
+        fingerprint: Option<&str>,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Value> {
         let directory = {
             let all = self.workspaces.lock().await;
             let ws = all
@@ -873,12 +952,13 @@ impl Core {
             }
         };
         if let Some(directory) = directory {
-            let (sources, models) =
+            let (mut sources, models) =
                 tokio::try_join!(Self::catalog_sources(directory.clone()), async move {
                     tokio::task::spawn_blocking(move || portable::list_model_files(&directory))
                         .await
                         .map_err(|_| Error::domain("IO_ERROR", "Could not list project models"))?
                 })?;
+            sources.extend(overrides.iter().map(|(k, v)| (k.clone(), v.clone())));
             let observed = crate::hash(&serde_json::to_string(&(&sources, &models))?);
             if fingerprint == Some(observed.as_str()) {
                 return Ok(json!({"unchanged":true,"fingerprint":observed}));
@@ -909,7 +989,8 @@ impl Core {
             index["fingerprint"] = json!(observed);
             return Ok(index);
         }
-        self.index_project_sources(workspace, revision).await
+        self.index_project_sources_with_overrides(workspace, revision, overrides)
+            .await
     }
     pub async fn index_project_folder(&self, directory: PathBuf) -> Result<Value> {
         let sources = Self::catalog_sources(directory).await?;
@@ -1013,6 +1094,7 @@ pub fn configure_entry(
     }
     crate::validate_path(entry)?;
     let mut created: Option<PathBuf> = None;
+    let mut generated: Option<&str> = None;
     let selected = if let Some((hash, code)) = adapter {
         let original = portable::read_bounded(
             &portable::checked_path(&root, entry)?,
@@ -1024,51 +1106,29 @@ pub fn configure_entry(
                 "Python source changed. Select it again to refresh the adapter preview.",
             ));
         }
-        let mut name = String::new();
-        for suffix in 0..1000 {
-            name = if suffix == 0 {
-                "cadpad_entry.py".into()
-            } else {
-                format!("cadpad_entry_{suffix}.py")
-            };
-            let path = portable::checked_path(&root, &name)?;
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    if let Err(error) = file
-                        .write_all(code.as_bytes())
-                        .and_then(|_| file.sync_all())
-                    {
-                        drop(file);
-                        let _ = std::fs::remove_file(&path);
-                        return Err(error.into());
-                    }
-                    created = Some(path);
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
-        if created.is_none() {
+        if !portable::is_generated_entry(code) {
             return Err(Error::domain(
                 "INVALID_REQUEST",
-                "Choose another name for the Cadpad entry file",
+                "The Cadpad entry adapter must be generated by Cadpad",
             ));
         }
-        name
+        generated = Some(code);
+        // Adapters live in `.cadpad/entries/`, never beside the user's source.
+        portable::unused_entry_name(&root, "cadpad_entry")?
     } else {
         entry.into()
     };
     let result = (|| -> Result<()> {
         if expected_manifest.is_none() {
-            return portable::initialize_folder(&root, &selected);
+            return portable::initialize_folder_with(&root, &selected, generated);
         }
         let mut manifest = portable::read_manifest(&root)?;
-        if !portable::python_entry_points(&root)?.contains(&selected) {
+        let metadata = portable::metadata_directory(&root)?;
+        if let Some(code) = generated {
+            let relative = format!("entries/{selected}");
+            portable::atomic_write(&metadata, &relative, code.as_bytes())?;
+            created = Some(portable::checked_path(&metadata, &relative)?);
+        } else if !portable::python_entry_points(&root)?.contains(&selected) {
             return Err(Error::domain(
                 "INVALID_REQUEST",
                 "Choose a Python file in this project folder",
@@ -1079,7 +1139,6 @@ pub fn configure_entry(
         if !manifest.source_files.contains(&selected) {
             manifest.source_files.push(selected.clone());
         }
-        let metadata = portable::metadata_directory(&root)?;
         portable::atomic_write(
             &metadata,
             "project.json",

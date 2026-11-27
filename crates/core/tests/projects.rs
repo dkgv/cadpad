@@ -1112,3 +1112,76 @@ async fn reload_with_deleted_generated_target_stages_a_browsable_project() {
             .contains("old/model.py")
     );
 }
+
+#[tokio::test]
+async fn saving_moves_generated_entries_out_of_the_source_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("legacy");
+    std::fs::create_dir_all(&directory).unwrap();
+    let user_file = "# The user's own module that happens to share the name.\n";
+    std::fs::write(directory.join("main.py"), "import cadquery as cq\n").unwrap();
+    std::fs::write(directory.join("cadpad_view_1.py"), user_file).unwrap();
+    // Projects opened before `.cadpad/entries/` kept the browser entry in the root.
+    std::fs::write(
+        directory.join("cadpad_view_0.py"),
+        portable::PROJECT_BROWSER_SOURCE,
+    )
+    .unwrap();
+    portable::initialize_folder(&directory, "cadpad_view_0.py").unwrap();
+    let core = Core::open(temp.path().join("app"), config()).await.unwrap();
+    let opened = core.open_project(directory.clone(), "user").await.unwrap();
+    assert_eq!(opened.draft.inputs.entry_point, "cadpad_view_0.py");
+    core.save_project(&opened.workspace_id, &opened.base_revision, None)
+        .await
+        .unwrap();
+    assert!(!directory.join("cadpad_view_0.py").exists());
+    assert_eq!(
+        std::fs::read_to_string(directory.join(".cadpad/entries/cadpad_view_0.py")).unwrap(),
+        portable::PROJECT_BROWSER_SOURCE
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.join("cadpad_view_1.py")).unwrap(),
+        user_file
+    );
+    assert!(!directory.join(".cadpad/entries/cadpad_view_1.py").exists());
+    // The relocated entry reads back as the same inputs: no phantom external edit.
+    assert_eq!(
+        core.scan_external_changes(&opened.workspace_id)
+            .await
+            .unwrap()["changed"],
+        false
+    );
+    let reloaded = portable::read_project(&directory).unwrap();
+    assert_eq!(reloaded.inputs.entry_point, "cadpad_view_0.py");
+    assert_eq!(
+        reloaded.inputs.files["cadpad_view_0.py"],
+        portable::PROJECT_BROWSER_SOURCE
+    );
+    assert!(
+        !portable::python_entry_points(&directory)
+            .unwrap()
+            .contains(&"cadpad_view_0.py".to_string())
+    );
+}
+
+#[test]
+fn new_project_browsers_never_write_into_the_source_tree() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("cadpad_view_0.py"), "# user code\n").unwrap();
+    portable::initialize_project_browser(temp.path()).unwrap();
+    assert_eq!(
+        portable::python_entry_points(temp.path()).unwrap(),
+        vec!["cadpad_view_0.py"]
+    );
+    let loaded = portable::read_project(temp.path()).unwrap();
+    assert_eq!(loaded.inputs.entry_point, "cadpad_view_1.py");
+    assert_eq!(
+        loaded.inputs.files["cadpad_view_1.py"],
+        portable::PROJECT_BROWSER_SOURCE
+    );
+    assert!(
+        temp.path()
+            .join(".cadpad/entries/cadpad_view_1.py")
+            .is_file()
+    );
+}
