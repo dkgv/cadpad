@@ -185,6 +185,17 @@ pub struct DimensionsReply {
     pub visible: bool,
     pub scope: DimensionScope,
 }
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedrawCanvas {
+    pub workspace_id: String,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RedrawReply {
+    pub workspace_id: String,
+    pub revision: String,
+}
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ViewRequest {
     pub id: String,
@@ -806,6 +817,47 @@ impl Core {
             return Err(Error::domain(
                 "STALE_ENTITY",
                 "Dimension acknowledgment belongs to an obsolete revision",
+            ));
+        }
+        Ok(json!(reply))
+    }
+    /// Re-present the displayed scene and ask the app to re-check the saved
+    /// project folder, so a redraw also surfaces externally edited files.
+    pub async fn redraw_canvas(&self, actor: &str, args: RedrawCanvas) -> Result<Value> {
+        let _memory = self.pin_workspace(&args.workspace_id).await?;
+        self.ensure_actor_active(actor)?;
+        let project = self.get_project(&args.workspace_id).await?;
+        let revision = project["revision"].as_str().unwrap().to_string();
+        let data = self
+            .views
+            .request(
+                &args.workspace_id,
+                &revision,
+                "redraw",
+                serde_json::to_value(&args)?,
+                self.actor_signal(actor),
+            )
+            .await?;
+        let reply: RedrawReply = serde_json::from_value(data).map_err(|_| {
+            Error::domain(
+                "INVALID_REQUEST",
+                "Viewport returned an invalid redraw acknowledgment",
+            )
+        })?;
+        if reply.workspace_id != args.workspace_id || reply.revision != revision {
+            return Err(Error::domain(
+                "STALE_ENTITY",
+                "Redraw acknowledgment belongs to another workspace or revision",
+            ));
+        }
+        let workspaces = self.workspace(&args.workspace_id).await?;
+        if workspaces
+            .get(&args.workspace_id)
+            .is_none_or(|ws| ws.stored.current != revision)
+        {
+            return Err(Error::domain(
+                "STALE_ENTITY",
+                "Redraw acknowledgment belongs to an obsolete revision",
             ));
         }
         Ok(json!(reply))

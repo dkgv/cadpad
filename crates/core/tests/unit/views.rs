@@ -132,6 +132,45 @@ async fn selection_capture_and_dimension_requests_keep_explicit_revision_scope()
     )
     .unwrap();
     assert_eq!(task.await.unwrap().unwrap()["visible"], true);
+    let task_core = core.clone();
+    let ws_copy = ws.clone();
+    let task = tokio::spawn(async move {
+        task_core
+            .dispatch(
+                &ToolContext {
+                    actor: "agent".into(),
+                },
+                "redraw_canvas",
+                json!({"workspace_id":ws_copy}),
+            )
+            .await
+    });
+    let request = requests.recv().await.unwrap();
+    assert_eq!(request.command, "redraw");
+    assert_eq!(request.workspace_id, ws);
+    core.complete_view(
+        &token,
+        &request.id,
+        ViewReply {
+            data: Some(json!({"workspace_id":request.workspace_id,"revision":request.revision})),
+            error: None,
+        },
+    )
+    .unwrap();
+    let redrawn = task.await.unwrap().unwrap();
+    assert_eq!(redrawn["workspace_id"], ws);
+    assert_eq!(redrawn["revision"], revision);
+    assert!(
+        jsonschema::validator_for(
+            crate::tools::definition("redraw_canvas")
+                .unwrap()
+                .output_schema
+                .as_ref()
+                .unwrap()
+        )
+        .unwrap()
+        .is_valid(&redrawn)
+    );
     let mut oversized = capture(&ws, &revision);
     oversized.width = Some(10000);
     assert_eq!(

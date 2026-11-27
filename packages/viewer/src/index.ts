@@ -270,6 +270,8 @@ export class CadViewport {
     return !this.disposed&&this.parts.length>0&&workspace===this.pickingWorkspace&&revision===this.revision?{selection:this.selectedEntity?{...this.selectedEntity}:null,hidden:this.parts.filter(part=>!this.visible.has(part.instance_id)).map(part=>part.instance_id)}:null;
   }
   cancelLoad(){this.loadSequence++;this.cancelBufferPlan?.();this.cancelBufferPlan=null;}
+  /** Re-present the current scene without reloading its artifacts. */
+  redraw(){if(!this.disposed&&this.presented)this.viewer.update(true);}
 
   /** Hidden tabs retain interaction state, not mesh arrays, BVHs or GPU geometry. */
   suspend(){

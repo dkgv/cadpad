@@ -4380,6 +4380,13 @@
               },
               "set_hash": {
                 "type": "string"
+              },
+              "source": {
+                "description": "The operation call that created the entity, then up to four callers;\nproject-relative files, innermost first.",
+                "items": {
+                  "$ref": "#/$defs/HistorySource"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -4415,6 +4422,27 @@
             "required": [
               "status",
               "entities"
+            ],
+            "type": "object"
+          },
+          "HistorySource": {
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "function": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "file",
+              "line",
+              "function"
             ],
             "type": "object"
           },
@@ -7068,6 +7096,73 @@
       }
     },
     {
+      "description": "Re-present the connected viewport for the current workspace revision and ask the app to re-check the saved project folder for externally edited files. Edits to project Python sources or managed STL assets are detected and reloaded through the normal external-change path, so the canvas updates once the resulting build commits; conflicting files are reported for review rather than overwritten. The acknowledgement only confirms the scene was re-presented, not that a reload finished: poll get_project for a new revision and use capture_views to verify the visible result. Use update_source and build for model edits made through Cadpad tools; this tool never changes the design revision itself.",
+      "input_schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id"
+        ],
+        "title": "RedrawCanvas",
+        "type": "object"
+      },
+      "name": "redraw_canvas",
+      "output_schema": {
+        "$defs": {
+          "RedrawReply": {
+            "additionalProperties": false,
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "workspace_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "workspace_id",
+              "revision"
+            ],
+            "type": "object"
+          },
+          "ToolFailure": {
+            "description": "Machine-readable execution failure. Non-domain errors omit details.",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "details": true,
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/RedrawReply"
+          },
+          {
+            "$ref": "#/$defs/ToolFailure"
+          }
+        ],
+        "description": "MCP keeps isError outside structuredContent; both structured variants must\nsatisfy outputSchema. Native dispatch still returns Result, without wrapping.",
+        "title": "StructuredResult",
+        "type": "object"
+      }
+    },
+    {
       "description": "Read a project-relative Python file from a revision, editable draft, or immutable job snapshot, with its content hash. With no paging options, return the full file. For large files or a known line, set paged=true or pass start_line, max_lines, or byte_offset to read up to 8 KiB (default starting line 1 and 80 lines, maximum 200 lines). Continue with next_line as start_line and next_byte_offset as byte_offset; null next_line means the end. Use search_source to locate literal text first.",
       "input_schema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -9338,6 +9433,13 @@
               },
               "set_hash": {
                 "type": "string"
+              },
+              "source": {
+                "description": "The operation call that created the entity, then up to four callers;\nproject-relative files, innermost first.",
+                "items": {
+                  "$ref": "#/$defs/HistorySource"
+                },
+                "type": "array"
               }
             },
             "required": [
@@ -9348,6 +9450,27 @@
               "set_hash",
               "positional",
               "basis"
+            ],
+            "type": "object"
+          },
+          "HistorySource": {
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "function": {
+                "type": "string"
+              },
+              "line": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "file",
+              "line",
+              "function"
             ],
             "type": "object"
           },
@@ -15187,7 +15310,7 @@
       }
     },
     {
-      "description": "Compiled, checkable design requirements for a project: statements like \"the lid never touches the base through its whole travel\" that are compiled into an exact plan of geometric checks, reviewed and approved by the user, and re-run as the design changes. Requirements belong to the project; any of its workspaces addresses the same catalog. Commands: list (catalog with status, print, diagnostics and results; returns the catalog CAS), compile {ir} (full compile, saves nothing), save {ir} (compile and store as a DRAFT; needs expected_catalog from list), library (rules, primitives, defaults, print templates, vague-word table), run / start_run {id} / cancel_run {run_id} (evaluate an approved requirement). There is no approve command: only the user approves, in the app. Loop: turn the user's prose into IR against the schema, keeping @[Label](entry#builder) chips as written, with `source` on every number (text, model, library or inferred); compile; fix every diagnostic whose fix is edit_ir by applying its edits; for ask_user and E_VAGUE save the draft with its diagnostics so the app can show each question and its suggested answers; record the user's answers in the IR; for edit_source propose the source change (a claim that names parts of more than one model gets an assembly skeleton: it lists each tagged model's parts and features, the origin= each part must record and the show(place(...), origin=...) form, so create that assembly and then retarget the claim to its parts); when compile is ok, save, then tell the user to review the print and approve it. Chips map to assembly parts and are verified on every build: the covered part must record the tagged entry#builder as its origin and agree on shared parameters, so a missing or wrong origin is E_BIND_CHIP_MISMATCH with the origin= argument to add. A referenced place()ment becomes an inferred seated claim in the print; a raw-transform placement that no contact claim verifies warns W_PLACEMENT_UNVERIFIED. Never invent numbers: a clearance, tolerance or size comes from the user's text, the model or the library, otherwise propose it marked inferred and say so. Explain a requirement only from its print and results, never from the IR or your own reading. A build job's diagnostics.auto_edit says whether the source edit was naming/metadata only: decision apply means every part's geometry hash is unchanged, so a renamed part, added features= name or fastener metadata may be kept without asking; needs_review names the part whose geometry moved, so present that edit as a normal code change. When a requirement fails or needs review during design work, report it plainly and propose fixes; do not change geometry just to make a requirement pass unless the user asks, and never edit, approve or weaken an approved requirement: saving over an approved requirement only creates a draft that stays needs_review until the user approves it, and the approved version keeps running. Results: run and start_run evaluate the approved version. Approval is required for the first run. Inconclusive means nothing is claimed for a check that hit its time limit. Up to 64 requirements, 1 MiB each, within the 8 MiB catalog shared with motion tests; requirements travel with Save/Open and imported results must be re-run. Geometry only; this is not a certification.",
+      "description": "Compiled, checkable design requirements for a project: statements like \"the lid never touches the base through its whole travel\" that are compiled into an exact plan of geometric checks, reviewed and approved by the user, and re-run as the design changes. Requirements belong to the project; any of its workspaces addresses the same catalog. Commands: list (catalog with status, print, diagnostics and results; returns the catalog CAS), compile {ir} (full compile, saves nothing), save {ir} (compile and store as a DRAFT; needs expected_catalog from list), library (rules, primitives, defaults, print templates, vague-word table and the IR JSON schema as ir_schema), schema (the IR JSON schema and actions; use this when the client hides this tool's input schema), run / start_run {id} / cancel_run {run_id} (evaluate an approved requirement). Each command is an object under `command` with an `action` field (for example `{\"action\":\"compile\",\"ir\":{...}}`) and the fields listed for it. There is no approve command: only the user approves, in the app. Loop: turn the user's prose into IR against the schema (if the client hides this tool's input schema, call schema and use ir_schema), keeping @[Label](entry#builder) chips as written, with `source` on every number (text, model, library or inferred); compile; fix every diagnostic whose fix is edit_ir by applying its edits; for ask_user and E_VAGUE save the draft with its diagnostics so the app can show each question and its suggested answers; record the user's answers in the IR; for edit_source propose the source change (a claim that names parts of more than one model gets an assembly skeleton: it lists each tagged model's parts and features, the origin= each part must record and the show(place(...), origin=...) form, so create that assembly and then retarget the claim to its parts); when compile is ok, save, then tell the user to review the print and approve it. Chips map to assembly parts and are verified on every build: the covered part must record the tagged entry#builder as its origin and agree on shared parameters, so a missing or wrong origin is E_BIND_CHIP_MISMATCH with the origin= argument to add. A referenced place()ment becomes an inferred seated claim in the print; a raw-transform placement that no contact claim verifies warns W_PLACEMENT_UNVERIFIED. Never invent numbers: a clearance, tolerance or size comes from the user's text, the model or the library, otherwise propose it marked inferred and say so. Explain a requirement only from its print and results, never from the IR or your own reading. A build job's diagnostics.auto_edit says whether the source edit was naming/metadata only: decision apply means every part's geometry hash is unchanged, so a renamed part, added features= name or fastener metadata may be kept without asking; needs_review names the part whose geometry moved, so present that edit as a normal code change. When a requirement fails or needs review during design work, report it plainly and propose fixes; do not change geometry just to make a requirement pass unless the user asks, and never edit, approve or weaken an approved requirement: saving over an approved requirement only creates a draft that stays needs_review until the user approves it, and the approved version keeps running. Results: run and start_run evaluate the approved version. Approval is required for the first run. Inconclusive means nothing is claimed for a check that hit its time limit. Up to 64 requirements, 1 MiB each, within the 8 MiB catalog; requirements travel with Save/Open and imported results must be re-run. Geometry only; this is not a certification.",
       "input_schema": {
         "$defs": {
           "Action": {
@@ -15722,6 +15845,20 @@
                 "properties": {
                   "action": {
                     "const": "library",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The IR JSON schema and command actions, for clients that hide this\ntool's input schema.",
+                "properties": {
+                  "action": {
+                    "const": "schema",
                     "type": "string"
                   }
                 },
