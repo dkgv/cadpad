@@ -1,5 +1,9 @@
 //! Immutable snapshot bodies remain in journal byte ranges. Only the current
 //! revision is cached; historical reads own their payload for one operation.
+//! Bodies written by this version keep their sources in the workspace's
+//! content-addressed [`SourceStore`]; older inline bodies stay readable and are
+//! compacted the next time the journal is written.
+use crate::source_store::SourceStore;
 use crate::{Draft, Error, Inputs, Result, Revision, SourceFiles, StoredWorkspace, portable};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -23,6 +27,9 @@ pub(crate) struct Summary {
     pub entry_point: String,
     pub generated: bool,
     pub source_hashes: SourceFiles,
+    /// Digest of `source_hashes` as stored in the workspace source store.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_hashes_digest: String,
     pub assets: BTreeMap<String, String>,
     pub parameters: Value,
     pub part_names: Vec<String>,
@@ -51,6 +58,12 @@ pub(crate) trait Snapshot:
     fn summary(&self) -> Summary;
 }
 fn input_summary(id: &str, actor: &str, inputs: &Inputs) -> Summary {
+    let source_hashes: SourceFiles = inputs
+        .files
+        .iter()
+        .map(|(name, source)| (name.clone(), crate::hash(source)))
+        .collect::<BTreeMap<_, _>>()
+        .into();
     Summary {
         id: id.into(),
         actor: actor.into(),
@@ -61,12 +74,10 @@ fn input_summary(id: &str, actor: &str, inputs: &Inputs) -> Summary {
             s.starts_with("# Generated Cadpad entry point.")
                 || s == portable::PROJECT_BROWSER_SOURCE
         }),
-        source_hashes: inputs
-            .files
-            .iter()
-            .map(|(name, source)| (name.clone(), crate::hash(source)))
-            .collect::<BTreeMap<_, _>>()
-            .into(),
+        source_hashes_digest: portable::bytes_hash(
+            &serde_json::to_vec(&source_hashes).expect("serializable hashes"),
+        ),
+        source_hashes,
         assets: inputs.assets.clone(),
         parameters: inputs.parameters.clone(),
         has_content: *inputs != Inputs::default(),
@@ -133,6 +144,10 @@ struct Range {
     file: Arc<File>,
     start: u64,
     bytes: u64,
+    /// The workspace store its references resolve against (journal bodies).
+    store: Option<Arc<SourceStore>>,
+    /// The body is fully compact and may be copied verbatim within `store`.
+    compact: bool,
 }
 struct RangeReader {
     range: Range,
@@ -168,6 +183,20 @@ impl Range {
             range: self.clone(),
             offset: 0,
         }
+    }
+    /// Decodes the body, expanding store references, and reports whether it
+    /// was fully compact.
+    fn decode<T: Snapshot>(&self) -> Result<(T, bool)> {
+        let mut bytes = Vec::with_capacity(self.bytes as usize);
+        self.reader().read_to_end(&mut bytes)?;
+        // Inline (pre-store) bodies parse directly without a Value tree.
+        if let Ok(value) = serde_json::from_slice::<T>(&bytes) {
+            return Ok((value, false));
+        }
+        let mut value: Value = serde_json::from_slice(&bytes)?;
+        let compact = SourceStore::is_compact(&value);
+        SourceStore::expand(self.store.as_deref(), &mut value)?;
+        Ok((serde_json::from_value(value)?, compact))
     }
 }
 #[derive(Clone)]
@@ -261,7 +290,7 @@ impl<T: Snapshot> Snapshots<T> {
             .unwrap()
             .clone()
             .ok_or_else(|| Error::domain("IO_ERROR", "Snapshot has no durable body"))?;
-        let value: T = serde_json::from_reader(BufReader::new(range.reader()))?;
+        let (value, _) = range.decode::<T>()?;
         if value.snapshot_id() != id {
             return Err(Error::domain(
                 "INVALID_REQUEST",
@@ -328,6 +357,8 @@ impl<T: Snapshot> Snapshots<T> {
                     file: file.clone(),
                     start,
                     bytes,
+                    store: None,
+                    compact: false,
                 }))),
             },
         );
@@ -396,11 +427,22 @@ impl<'de, T: Snapshot> Deserialize<'de> for Snapshots<T> {
     }
 }
 
+/// Sources, asset maps, draft hashes and models all live in the store.
+const FORMAT: u32 = 2;
 #[derive(Serialize, Deserialize)]
 struct IndexedEntry {
     summary: Summary,
     start: u64,
     bytes: u64,
+    /// Body layout; only [`FORMAT`] bodies are copied verbatim.
+    #[serde(default)]
+    format: u32,
+    /// Store digest of `summary.source_hashes`, which is then left empty.
+    #[serde(default)]
+    source_hashes: Option<String>,
+    /// Store digest of `summary.assets`, which is then left empty.
+    #[serde(default)]
+    assets: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 struct Index {
@@ -411,31 +453,44 @@ struct Index {
     drafts: BTreeMap<String, IndexedEntry>,
     job_snapshots: BTreeMap<String, IndexedEntry>,
 }
-fn restore<T: Snapshot>(entries: BTreeMap<String, IndexedEntry>, file: &Arc<File>) -> Snapshots<T> {
-    Snapshots {
-        parking: None,
-        entries: entries
-            .into_iter()
-            .map(|(id, e)| {
-                (
-                    id,
-                    Entry {
-                        summary: e.summary,
-                        value: None,
-                        location: Arc::new(RwLock::new(Some(Range {
-                            file: file.clone(),
-                            start: e.start,
-                            bytes: e.bytes,
-                        }))),
-                    },
-                )
-            })
-            .collect(),
+fn restore<T: Snapshot>(
+    entries: BTreeMap<String, IndexedEntry>,
+    file: &Arc<File>,
+    store: &Arc<SourceStore>,
+) -> Result<Snapshots<T>> {
+    let mut restored = BTreeMap::new();
+    for (id, mut e) in entries {
+        if let Some(digest) = e.source_hashes {
+            e.summary.source_hashes = store.get_map(&digest)?.into();
+            e.summary.source_hashes_digest = digest;
+        }
+        if let Some(digest) = e.assets {
+            e.summary.assets = store.get_map(&digest)?;
+        }
+        restored.insert(
+            id,
+            Entry {
+                summary: e.summary,
+                value: None,
+                location: Arc::new(RwLock::new(Some(Range {
+                    file: file.clone(),
+                    start: e.start,
+                    bytes: e.bytes,
+                    store: Some(store.clone()),
+                    compact: e.format == FORMAT,
+                }))),
+            },
+        );
     }
+    Ok(Snapshots {
+        parking: None,
+        entries: restored,
+    })
 }
 fn indexed<T: Snapshot>(
     entries: &Snapshots<T>,
     file: &Arc<File>,
+    store: &SourceStore,
 ) -> Result<BTreeMap<String, IndexedEntry>> {
     entries
         .headers()
@@ -451,12 +506,31 @@ fn indexed<T: Snapshot>(
                     "Snapshot index references another journal",
                 ));
             }
+            let mut summary = entry.summary.clone();
+            let source_hashes = Some(
+                store.store_hashes(
+                    &summary.source_hashes,
+                    (!summary.source_hashes_digest.is_empty())
+                        .then_some(summary.source_hashes_digest.as_str()),
+                )?,
+            );
+            summary.source_hashes = SourceFiles::default();
+            let assets = Some(store.store_hashes(&std::mem::take(&mut summary.assets), None)?);
             Ok((
                 id.clone(),
                 IndexedEntry {
-                    summary: entry.summary.clone(),
+                    summary,
                     start: range.start,
                     bytes: range.bytes,
+                    format: if range.compact
+                        && range.store.as_deref().is_some_and(|s| s.same(store))
+                    {
+                        FORMAT
+                    } else {
+                        0
+                    },
+                    source_hashes,
+                    assets,
                 },
             ))
         })
@@ -470,13 +544,14 @@ fn metadata(stored: &StoredWorkspace) -> StoredWorkspace {
     result
 }
 fn write_index(directory: &Path, stored: &StoredWorkspace, file: &Arc<File>) -> Result<()> {
+    let store = SourceStore::for_workspace(directory);
     let index = Index {
         version: 1,
         stamp: crate::workspace_memory::Stamp::of(file)?,
         metadata: metadata(stored),
-        revisions: indexed(&stored.revisions, file)?,
-        drafts: indexed(&stored.drafts, file)?,
-        job_snapshots: indexed(&stored.job_snapshots, file)?,
+        revisions: indexed(&stored.revisions, file, &store)?,
+        drafts: indexed(&stored.drafts, file, &store)?,
+        job_snapshots: indexed(&stored.job_snapshots, file, &store)?,
     };
     let temporary = directory.join(format!("{}.tmp", crate::id()));
     let mut writer = io::BufWriter::new(File::create(&temporary)?);
@@ -603,7 +678,11 @@ impl Scanner {
             )),
         }
     }
-    fn map<T: Snapshot>(&mut self, file: &Arc<File>) -> Result<Snapshots<T>> {
+    fn map<T: Snapshot>(
+        &mut self,
+        file: &Arc<File>,
+        store: &Arc<SourceStore>,
+    ) -> Result<Snapshots<T>> {
         self.expect(b'{')?;
         self.ws()?;
         let mut entries = BTreeMap::new();
@@ -617,12 +696,15 @@ impl Scanner {
         loop {
             let id = self.key()?;
             let (start, bytes) = self.span()?;
-            let range = Range {
+            let mut range = Range {
                 file: file.clone(),
                 start,
                 bytes,
+                store: Some(store.clone()),
+                compact: false,
             };
-            let value: T = serde_json::from_reader(BufReader::new(range.reader()))?;
+            let (value, compact) = range.decode::<T>()?;
+            range.compact = compact;
             let summary = value.summary();
             if summary.id != id || entries.contains_key(&id) {
                 return Err(Error::domain(
@@ -652,15 +734,26 @@ impl Scanner {
 pub(crate) fn open(path: &Path) -> Result<StoredWorkspace> {
     let file = Arc::new(File::open(path)?);
     let stamp = crate::workspace_memory::Stamp::of(&file)?;
-    if let Ok(index_file) = File::open(path.with_file_name("workspace.index.json")) {
-        if let Ok(index) = serde_json::from_reader::<_, Index>(BufReader::new(index_file)) {
-            if index.version == 1 && index.stamp == stamp {
-                let mut stored = index.metadata;
-                stored.revisions = restore(index.revisions, &file);
-                stored.drafts = restore(index.drafts, &file);
-                stored.job_snapshots = restore(index.job_snapshots, &file);
-                return Ok(stored);
-            }
+    let store = SourceStore::for_workspace(path.parent().unwrap());
+    if let Ok(index_file) = File::open(path.with_file_name("workspace.index.json"))
+        && let Ok(index) = serde_json::from_reader::<_, Index>(BufReader::new(index_file))
+        && index.version == 1
+        && index.stamp == stamp
+    {
+        let mut stored = index.metadata;
+        let restored = (|| -> Result<_> {
+            Ok((
+                restore(index.revisions, &file, &store)?,
+                restore(index.drafts, &file, &store)?,
+                restore(index.job_snapshots, &file, &store)?,
+            ))
+        })();
+        // An index whose store references are unreadable falls back to the scan.
+        if let Ok((revisions, drafts, job_snapshots)) = restored {
+            stored.revisions = revisions;
+            stored.drafts = drafts;
+            stored.job_snapshots = job_snapshots;
+            return Ok(stored);
         }
     }
     let mut scan = Scanner {
@@ -679,9 +772,9 @@ pub(crate) fn open(path: &Path) -> Result<StoredWorkspace> {
             return Err(Error::domain("INVALID_REQUEST", "Duplicate journal field"));
         }
         match key.as_str() {
-            "revisions" => revisions = scan.map(&file)?,
-            "drafts" => drafts = scan.map(&file)?,
-            "job_snapshots" => job_snapshots = scan.map(&file)?,
+            "revisions" => revisions = scan.map(&file, &store)?,
+            "drafts" => drafts = scan.map(&file, &store)?,
+            "job_snapshots" => job_snapshots = scan.map(&file, &store)?,
             _ => {
                 let (start, bytes) = scan.span()?;
                 let value = serde_json::from_reader(BufReader::new(
@@ -689,6 +782,8 @@ pub(crate) fn open(path: &Path) -> Result<StoredWorkspace> {
                         file: file.clone(),
                         start,
                         bytes,
+                        store: None,
+                        compact: false,
                     }
                     .reader(),
                 ))?;
@@ -744,6 +839,7 @@ type Locations<T> = Vec<(
 fn write_map<T: Snapshot, W: Write>(
     map: &Snapshots<T>,
     writer: &mut Counter<W>,
+    store: &SourceStore,
 ) -> Result<Locations<T>> {
     writer.write_all(b"{")?;
     let mut locations = Vec::new();
@@ -756,17 +852,33 @@ fn write_map<T: Snapshot, W: Write>(
         let start = writer.offset;
         // Snapshot edits clear their range before any resident value changes.
         let range = entry.location.read().unwrap().clone();
-        if let Some(range) = range {
-            let n = io::copy(&mut range.reader(), writer)?;
-            if n != range.bytes {
-                return Err(Error::domain("IO_ERROR", "Truncated snapshot bytes"));
+        match range {
+            // Compact bodies already in this store are copied byte for byte.
+            Some(range)
+                if range.compact && range.store.as_deref().is_some_and(|s| s.same(store)) =>
+            {
+                let n = io::copy(&mut range.reader(), writer)?;
+                if n != range.bytes {
+                    return Err(Error::domain("IO_ERROR", "Truncated snapshot bytes"));
+                }
             }
-        } else {
-            let value = entry
-                .value
-                .as_ref()
-                .ok_or_else(|| Error::domain("IO_ERROR", "Missing snapshot bytes"))?;
-            serde_json::to_writer(&mut *writer, value.as_ref())?;
+            // New, parked, inline (pre-store) or foreign bodies are compacted.
+            range => {
+                let decoded;
+                let value = match (&entry.value, range) {
+                    (Some(value), _) => value.as_ref(),
+                    (None, Some(range)) => {
+                        decoded = range.decode::<T>()?.0;
+                        &decoded
+                    }
+                    (None, None) => {
+                        return Err(Error::domain("IO_ERROR", "Missing snapshot bytes"));
+                    }
+                };
+                let mut body = serde_json::to_value(value)?;
+                store.compact(&mut body)?;
+                serde_json::to_writer(&mut *writer, &body)?;
+            }
         }
         locations.push((
             entry.location.clone(),
@@ -781,11 +893,13 @@ fn write_map<T: Snapshot, W: Write>(
 }
 pub(crate) struct Publication {
     file: Arc<File>,
+    store: Arc<SourceStore>,
     revisions: Locations<Revision>,
     drafts: Locations<Draft>,
     job_snapshots: Locations<Draft>,
 }
 pub(crate) fn write(path: &Path, stored: &StoredWorkspace) -> Result<Publication> {
+    let store = SourceStore::for_workspace(path.parent().unwrap());
     let file = File::create(path)?;
     let mut writer = Counter {
         inner: io::BufWriter::with_capacity(128 * 1024, file),
@@ -805,16 +919,17 @@ pub(crate) fn write(path: &Path, stored: &StoredWorkspace) -> Result<Publication
         writer.write_all(b",")?;
     }
     writer.write_all(b"\"revisions\":")?;
-    let revisions = write_map(&stored.revisions, &mut writer)?;
+    let revisions = write_map(&stored.revisions, &mut writer, &store)?;
     writer.write_all(b",\"drafts\":")?;
-    let drafts = write_map(&stored.drafts, &mut writer)?;
+    let drafts = write_map(&stored.drafts, &mut writer, &store)?;
     writer.write_all(b",\"job_snapshots\":")?;
-    let job_snapshots = write_map(&stored.job_snapshots, &mut writer)?;
+    let job_snapshots = write_map(&stored.job_snapshots, &mut writer, &store)?;
     writer.write_all(b"}")?;
     writer.flush()?;
     writer.inner.get_ref().sync_all()?;
     Ok(Publication {
         file: Arc::new(File::open(path)?),
+        store,
         revisions,
         drafts,
         job_snapshots,
@@ -826,12 +941,19 @@ impl Publication {
         directory: &Path,
         stored: &StoredWorkspace,
     ) -> Result<crate::workspace_memory::Stamp> {
-        fn bind<T: Snapshot>(locations: Locations<T>, map: &mut Snapshots<T>, file: &Arc<File>) {
+        fn bind<T: Snapshot>(
+            locations: Locations<T>,
+            map: &mut Snapshots<T>,
+            file: &Arc<File>,
+            store: &Arc<SourceStore>,
+        ) {
             for (slot, start, bytes, summary, _) in locations {
                 *slot.write().unwrap() = Some(Range {
                     file: file.clone(),
                     start,
                     bytes,
+                    store: Some(store.clone()),
+                    compact: true,
                 });
                 if let Some(entry) = map.entries.get_mut(&summary.id) {
                     entry.summary = summary;
@@ -839,12 +961,23 @@ impl Publication {
             }
         }
         let mut indexed_stored = stored.clone();
-        bind(self.revisions, &mut indexed_stored.revisions, &self.file);
-        bind(self.drafts, &mut indexed_stored.drafts, &self.file);
+        bind(
+            self.revisions,
+            &mut indexed_stored.revisions,
+            &self.file,
+            &self.store,
+        );
+        bind(
+            self.drafts,
+            &mut indexed_stored.drafts,
+            &self.file,
+            &self.store,
+        );
         bind(
             self.job_snapshots,
             &mut indexed_stored.job_snapshots,
             &self.file,
+            &self.store,
         );
         let stamp = crate::workspace_memory::Stamp::of(&self.file)?;
         let _ = write_index(directory, &indexed_stored, &self.file);
@@ -981,5 +1114,38 @@ mod tests {
                 .values()
                 .all(|e| e.value.is_none())
         );
+    }
+}
+
+/// Checks a journal without writing: every body decodes and matches the input
+/// fingerprint its index recorded. `CADPAD_JOURNAL=... cargo test --release
+/// -p cadpad-core verify_journal -- --ignored`.
+#[cfg(test)]
+mod verify_check {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn verify_journal() {
+        let Ok(path) = std::env::var("CADPAD_JOURNAL") else {
+            return;
+        };
+        let stored = open(std::path::Path::new(&path)).unwrap();
+        fn check<T: Snapshot>(name: &str, map: &Snapshots<T>) {
+            let mut compact = 0;
+            for (id, header) in map.headers() {
+                let range = map.entries[id].location.read().unwrap().clone().unwrap();
+                compact += usize::from(range.compact);
+                let summary = map.read(id).unwrap().summary();
+                assert_eq!(
+                    summary.input_fingerprint, header.input_fingerprint,
+                    "{name} {id}"
+                );
+                assert_eq!(summary.source_hashes, header.source_hashes, "{name} {id}");
+            }
+            eprintln!("{name}: {} verified, {compact} compact", map.len());
+        }
+        check("revisions", &stored.revisions);
+        check("drafts", &stored.drafts);
+        check("job_snapshots", &stored.job_snapshots);
     }
 }

@@ -540,7 +540,13 @@ mod tests {
         drop(original);
         let directory = root.join("workspaces").join(&id);
         let path = directory.join("workspace.json");
-        assert!(std::fs::metadata(&path).unwrap().len() > 3_000_000);
+        // Source bodies and topology live in the content-addressed store.
+        let stored: u64 = std::fs::read_dir(directory.join("sources"))
+            .unwrap()
+            .map(|entry| entry.unwrap().metadata().unwrap().len())
+            .sum();
+        assert!(stored > 900_000);
+        assert!(std::fs::metadata(&path).unwrap().len() < 20_000);
         std::fs::remove_file(directory.join("workspace.catalog.json")).unwrap();
         let projected = read_catalog(&path).unwrap();
         assert!(projected.stored.revisions.is_empty());
@@ -564,8 +570,7 @@ mod tests {
         let directory = root.join("workspaces").join(&id);
         drop(original);
         let path = directory.join("workspace.json");
-        let mut stored: StoredWorkspace =
-            serde_json::from_reader(BufReader::new(File::open(&path).unwrap())).unwrap();
+        let mut stored = crate::snapshots::open(&path).unwrap();
         stored.title = Some("Changed outside the catalog".into());
         let replacement = directory.join("replacement.json");
         serde_json::to_writer(File::create(&replacement).unwrap(), &stored).unwrap();
@@ -615,5 +620,32 @@ mod tests {
             bytes
         );
         assert!(reopened.workspaces.lock().await[&id].archived.is_some());
+    }
+    #[tokio::test]
+    async fn workspace_summaries_do_not_require_resident_current_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("app");
+        let original = core(&root).await;
+        let id = original.create_workspace("test").await.unwrap();
+        {
+            let mut all = original.workspaces.lock().await;
+            let ws = all.get_mut(&id).unwrap();
+            let revision = ws.stored.current.clone();
+            ws.stored
+                .revisions
+                .resident_mut(&revision)
+                .unwrap()
+                .inputs
+                .files
+                .insert("main.py".into(), "pass\n".into());
+            original.persist(&ws.stored).await.unwrap();
+        }
+        drop(original);
+        let reopened = core(&root).await;
+        let _pin = reopened.pin_workspace(&id).await.unwrap();
+        let summaries = reopened.workspace_summaries().await;
+        let entries = summaries.as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["workspace_id"], id);
     }
 }

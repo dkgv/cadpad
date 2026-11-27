@@ -34,6 +34,7 @@ pub mod requirements;
 pub mod runtime;
 mod snapshots;
 mod source_files;
+mod source_store;
 mod stl_model;
 pub use stl_model::StlPreviewSink;
 pub mod tools;
@@ -1634,13 +1635,11 @@ mod process_lock_tests {
         assert_eq!(ws.stored.jobs["interrupted"].state, JobState::Failed);
         assert!(motion::state(ws).is_ok());
         assert!(ws.motion.is_some());
-        let persisted: StoredWorkspace = serde_json::from_slice(
-            &std::fs::read(
-                root.join("workspaces")
-                    .join(workspace)
-                    .join("workspace.json"),
-            )
-            .unwrap(),
+        let persisted = crate::snapshots::open(
+            &root
+                .join("workspaces")
+                .join(workspace)
+                .join("workspace.json"),
         )
         .unwrap();
         assert_eq!(persisted.jobs["interrupted"].state, JobState::Failed);

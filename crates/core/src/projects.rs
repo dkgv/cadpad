@@ -701,12 +701,18 @@ impl Core {
         let mut seen = std::collections::HashSet::new();
         let mut summaries=candidates.into_iter().filter(|ws| {
             if ws.stored.ephemeral { return false; }
-            let has_content = ws.archived.as_ref().map_or_else(|| {
-                let revision = ws.stored.current_revision();
-                revision.model["parts"].as_array().is_some_and(|parts| !parts.is_empty())
-                    || revision.inputs != crate::Inputs::default()
-                    || !ws.stored.jobs.is_empty() || !ws.stored.recordings.is_empty() || !ws.stored.motion_tests.is_empty()
-            }, |catalog| catalog.has_content);
+            let has_content = ws.archived.as_ref().map_or_else(
+                || {
+                    ws.stored
+                        .revisions
+                        .header(&ws.stored.current)
+                        .is_some_and(|header| header.has_content)
+                        || !ws.stored.jobs.is_empty()
+                        || !ws.stored.recordings.is_empty()
+                        || !ws.stored.motion_tests.is_empty()
+                },
+                |catalog| catalog.has_content,
+            );
             if !has_content { return false; }
 
             // Model-view tabs share the project folder with the root workspace. Keep every

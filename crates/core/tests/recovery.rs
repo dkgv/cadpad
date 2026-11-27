@@ -332,7 +332,7 @@ async fn legacy_revisions_require_explicit_rebuild_instead_of_unproven_native_re
     let (ws, rev) = model(&core, counted(&marker)).await;
     drop(core);
     let path = root.join("workspaces").join(&ws).join("workspace.json");
-    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut stored = journal_with_inline_models(&path);
     stored["revisions"][&rev]["model"]["parts"][0]
         .as_object_mut()
         .unwrap()
@@ -377,7 +377,7 @@ async fn old_display_format_with_valid_checksums_requires_verified_same_revision
     );
     drop(core);
     let path = root.join("workspaces").join(&ws).join("workspace.json");
-    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut stored = journal_with_inline_models(&path);
     // Version 1 could publish the first shape's valid bytes for a distinct part.
     let mut old = stored["revisions"][&rev]["model"]["parts"][0]["mesh"].clone();
     old["format"] = json!("cadpad-mesh-v1");
@@ -406,4 +406,21 @@ async fn old_display_format_with_valid_checksums_requires_verified_same_revision
     assert!(project["display_error"].is_null());
     assert_eq!(project["model"], expected);
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "2");
+}
+
+/// Reads a workspace journal with every revision model inlined. Models live in
+/// the workspace source store; inline bodies remain a valid journal format, so
+/// a test may edit and write the result back.
+fn journal_with_inline_models(path: &std::path::Path) -> Value {
+    let mut stored: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let sources = path.with_file_name("sources");
+    for revision in stored["revisions"].as_object_mut().unwrap().values_mut() {
+        let body = revision.as_object_mut().unwrap();
+        if let Some(Value::String(digest)) = body.remove("model_ref") {
+            let model =
+                serde_json::from_slice(&std::fs::read(sources.join(digest)).unwrap()).unwrap();
+            body.insert("model".into(), model);
+        }
+    }
+    stored
 }

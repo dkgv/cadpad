@@ -342,7 +342,7 @@ async fn native_portable_project_context_keeps_source_presence_dimensions_record
     // A synthetic persisted history exercises the actual bounded read path
     // without starting 25 redundant Python builds.
     let path = root.join("workspaces").join(&ws).join("workspace.json");
-    let mut stored: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut stored = journal_with_inline_models(&path);
     let template = serde_json::to_value(failed).unwrap();
     for index in 0..25 {
         let mut job = template.clone();
@@ -377,4 +377,21 @@ async fn native_portable_project_context_keeps_source_presence_dimensions_record
     for job in recovered["activity"].as_array().unwrap() {
         assert!(job["diagnostics"].get("logs").is_none());
     }
+}
+
+/// Reads a workspace journal with every revision model inlined. Models live in
+/// the workspace source store; inline bodies remain a valid journal format, so
+/// a test may edit and write the result back.
+fn journal_with_inline_models(path: &std::path::Path) -> Value {
+    let mut stored: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let sources = path.with_file_name("sources");
+    for revision in stored["revisions"].as_object_mut().unwrap().values_mut() {
+        let body = revision.as_object_mut().unwrap();
+        if let Some(Value::String(digest)) = body.remove("model_ref") {
+            let model =
+                serde_json::from_slice(&std::fs::read(sources.join(digest)).unwrap()).unwrap();
+            body.insert("model".into(), model);
+        }
+    }
+    stored
 }
