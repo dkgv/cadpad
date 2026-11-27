@@ -162,6 +162,7 @@ impl Provider for Script {
                 return Ok(ProviderReply {
                     content: vec![Block::Text { text: text.into() }],
                     stop: StopReason::EndTurn,
+            usage: None,
                 });
             }
         };
@@ -173,6 +174,7 @@ impl Provider for Script {
                 input: call.1,
             }],
             stop: StopReason::ToolUse,
+            usage: None,
         })
     }
 }
@@ -357,6 +359,7 @@ impl Provider for SlowNative {
                 input,
             }],
             stop: StopReason::ToolUse,
+            usage: None,
         })
     }
 }
@@ -595,6 +598,7 @@ impl Provider for RepeatedFailure {
                 input,
             }],
             stop: StopReason::ToolUse,
+            usage: None,
         })
     }
 }
@@ -693,6 +697,7 @@ impl Provider for WrongWorkspace {
                     input: json!({"workspace_id":self.target}),
                 }],
                 stop: StopReason::ToolUse,
+            usage: None,
             })
         } else {
             assert_eq!(last_result(&request)["code"], "WORKSPACE_MISMATCH");
@@ -701,6 +706,7 @@ impl Provider for WrongWorkspace {
             Ok(ProviderReply {
                 content: vec![Block::Text { text: text.into() }],
                 stop: StopReason::EndTurn,
+            usage: None,
             })
         }
     }
@@ -788,6 +794,7 @@ impl Provider for CaptureWait {
                 input: json!({"workspace_id":context["workspace_id"],"revision":context["revision"],"single":true}),
             }],
             stop: StopReason::ToolUse,
+            usage: None,
         })
     }
 }
@@ -857,6 +864,7 @@ impl Provider for RecordPrompt {
                 text: "Noted.".into(),
             }],
             stop: StopReason::EndTurn,
+            usage: None,
         })
     }
 }
@@ -977,13 +985,14 @@ async fn viewport_references_reach_the_model_with_component_source_exact_propert
     assert!(context.contains("\"label\": \"top\""));
     assert!(context.contains("<source path=\"parts/plate.py\""));
     assert!(context.contains("cq.Workplane().box(40, 20, 6)"));
-    // Exact inspection succeeded: the reference block carries exact entities.
-    // History names are opt-in and report their own absence separately.
+    // Exact inspection succeeded and was traced: the selected face names the
+    // CadQuery call that created it, restated without raw history hashes.
     let references = exact_inspection(&context);
-    assert_eq!(
-        references["exact_properties"]["history_names"]["status"],
-        "unavailable"
-    );
+    let created = &references["references"][0]["created_by"]["calls"][0];
+    assert_eq!(created["file"], "parts/plate.py");
+    assert!(created["line"].as_u64().is_some());
+    assert!(references["exact_properties"]["history_names"].is_null());
+    assert!(!context.contains("history_references"));
     let history = service.conversation(&ws, None).unwrap();
     assert_eq!(
         history["messages"][0]["references"]
@@ -1052,8 +1061,9 @@ async fn viewport_references_reach_the_model_with_component_source_exact_propert
     assert!(context.contains("parts/plate.py"));
     let references = exact_inspection(&context);
     assert!(
-        references["exact_properties"]["entities"].as_array().is_some_and(|entities| !entities
-            .is_empty()),
+        references["exact_properties"]["entities"]
+            .as_array()
+            .is_some_and(|entities| !entities.is_empty()),
         "model references resolve in their own workspace: {references}"
     );
     assert_eq!(
@@ -1160,6 +1170,7 @@ impl Provider for ChatHistoryProvider {
                 text: "Saved reply".into(),
             }],
             stop: StopReason::EndTurn,
+            usage: None,
         })
     }
 }

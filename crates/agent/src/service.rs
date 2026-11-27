@@ -3,6 +3,7 @@ use crate::{
     credentials::{Credentials, Secret},
     provider::{
         Anthropic, Block, Message, OpenRouter, Provider, ProviderRequest, Role, StopReason,
+        TokenUsage,
     },
     references::{self, Attachments, ChatReference},
     runner::{self, ChatMessage, EmitProgress, Limits, Progress, Step, ToolState},
@@ -49,6 +50,8 @@ pub struct Turn {
     pub rounds: u32,
     pub artifacts: Vec<Value>,
     pub started_at: u64,
+    #[serde(default)]
+    pub usage: TokenUsage,
     /// Live timeline of thinking, text segments and tool calls.
     #[serde(default)]
     pub steps: Vec<Step>,
@@ -73,6 +76,8 @@ struct Chat {
     messages: Vec<ChatMessage>,
     last_turn: Option<Turn>,
     #[serde(default)]
+    usage: TokenUsage,
+    #[serde(default)]
     archived: bool,
 }
 impl Default for Chat {
@@ -84,6 +89,7 @@ impl Default for Chat {
             updated_at: now(),
             messages: vec![],
             last_turn: None,
+            usage: TokenUsage::default(),
             archived: false,
         }
     }
@@ -616,11 +622,11 @@ impl AgentService {
             .into_iter()
             .find(|turn| turn.chat_id == chat.id)
             .or_else(|| chat.last_turn.clone());
-        let mut chats = book.chats.iter().filter(|chat| !chat.archived && !chat.messages.is_empty()).map(|chat| json!({"id": chat.id, "title": chat.title, "created_at": chat.created_at, "updated_at": chat.updated_at, "message_count": chat.messages.len()})).collect::<Vec<_>>();
+        let mut chats = book.chats.iter().filter(|chat| !chat.archived && !chat.messages.is_empty()).map(|chat| json!({"id": chat.id, "title": chat.title, "created_at": chat.created_at, "updated_at": chat.updated_at, "message_count": chat.messages.len(), "usage": chat.usage})).collect::<Vec<_>>();
         chats
             .sort_by_key(|chat| std::cmp::Reverse(chat["updated_at"].as_u64().unwrap_or_default()));
         Ok(
-            json!({"messages": chat.messages, "turn": turn, "active_chat_id": book.active_id, "chats": chats}),
+            json!({"messages": chat.messages, "turn": turn, "active_chat_id": book.active_id, "usage": chat.usage, "chats": chats}),
         )
     }
     /// Switch history only while idle. Publish the selection after the file is saved.
@@ -737,6 +743,9 @@ impl AgentService {
                         return Err(Error::domain("INVALID_REQUEST", "Choose a user message"));
                     }
                     chat.messages.truncate(index);
+                    if chat.messages.is_empty() {
+                        chat.usage = TokenUsage::default();
+                    }
                     chat.last_turn = None;
                     chat.updated_at = now();
                     book.active_id = id.into();
@@ -876,6 +885,7 @@ impl AgentService {
             rounds: 0,
             artifacts: vec![],
             started_at: now(),
+            usage: TokenUsage::default(),
             steps: vec![],
             text_open: false,
         };
@@ -1068,11 +1078,16 @@ impl AgentService {
                     self.emit(turn, "step", None);
                 }
             }
-            Progress::ToolStarted { id, name, detail } => {
+            Progress::ToolStarted {
+                id,
+                name,
+                label,
+                detail,
+            } => {
                 turn.tool_calls += 1;
                 turn.text_open = false;
                 close_thinking(turn);
-                let label = activity(&name);
+                let label = label.unwrap_or_else(|| activity(&name));
                 turn.activity = label.clone();
                 push_step(
                     turn,
@@ -1082,6 +1097,8 @@ impl AgentService {
                         label,
                         detail: detail.filter(|detail| !detail.trim().is_empty()),
                         state: ToolState::Running,
+                        started_at: now(),
+                        finished_at: None,
                     },
                 );
                 self.emit(turn, "tool_started", None);
@@ -1091,12 +1108,16 @@ impl AgentService {
                     matches!(step, Step::Tool { id: step_id, name: step_name, state: ToolState::Running, .. }
                         if id.is_some() && step_id == &id || id.is_none() && step_name == &name)
                 });
-                if let Some(Step::Tool { state, .. }) = target {
+                if let Some(Step::Tool {
+                    state, finished_at, ..
+                }) = target
+                {
                     *state = if error {
                         ToolState::Failed
                     } else {
                         ToolState::Done
                     };
+                    *finished_at = Some(now());
                 }
                 turn.activity = if error {
                     format!("Reviewing {} feedback", activity(&name).to_lowercase())
@@ -1166,17 +1187,31 @@ impl AgentService {
                 let service = self.clone();
                 let id = turn.id.clone();
                 let cancel = self.inner.core.actor_signal(&turn.actor);
+                let cli_usage = Arc::new(Mutex::new(TokenUsage::default()));
+                let record_usage = cli_usage.clone();
                 cli::drive(launch, settings.backend, cancel, move |event| {
                     let progress = match event {
                         StreamEvent::Text(text) => Progress::Text(text),
                         StreamEvent::TextBreak => Progress::TextBreak,
                         StreamEvent::Thinking(text) => Progress::Thinking(text),
                         StreamEvent::ThinkingDone => Progress::ThinkingDone,
-                        StreamEvent::ToolStarted { id, name, detail } => {
-                            Progress::ToolStarted { id, name, detail }
-                        }
+                        StreamEvent::ToolStarted {
+                            id,
+                            name,
+                            label,
+                            detail,
+                        } => Progress::ToolStarted {
+                            id,
+                            name,
+                            label,
+                            detail,
+                        },
                         StreamEvent::ToolFinished { id, name, error } => {
                             Progress::ToolFinished { id, name, error }
+                        }
+                        StreamEvent::Usage(usage) => {
+                            record_usage.lock().unwrap().add(usage);
+                            return;
                         }
                         StreamEvent::Done => return,
                     };
@@ -1187,11 +1222,16 @@ impl AgentService {
                 // through the whole statement; locking again for tool_calls
                 // would deadlock after the CLI has already finished.
                 let completed = self.turn(&turn.id)?;
+                let mut usage = *cli_usage.lock().unwrap();
+                if usage.is_zero() {
+                    usage = TokenUsage::estimate(prompt.len(), completed.text.len());
+                }
                 Ok(runner::RunOutcome {
                     text: completed.text,
                     rounds: 1,
                     tool_calls: completed.tool_calls,
                     artifacts: vec![],
+                    usage,
                 })
             } else {
                 let credentials = credentials_for(&self.inner.credentials, settings.backend);
@@ -1261,6 +1301,7 @@ impl AgentService {
                     stored.rounds = outcome.rounds;
                     stored.tool_calls = outcome.tool_calls;
                     stored.artifacts = outcome.artifacts;
+                    stored.usage = outcome.usage;
                     stored.activity = "Finished".into();
                 }
                 Ok(_) => {
@@ -1285,7 +1326,9 @@ impl AgentService {
             // Nothing is still running once the turn is terminal.
             close_thinking(stored);
             for step in &mut stored.steps {
-                if let Step::Tool { state, .. } = step
+                if let Step::Tool {
+                    state, finished_at, ..
+                } = step
                     && *state == ToolState::Running
                 {
                     *state = if stored.state == TurnState::Succeeded {
@@ -1293,6 +1336,7 @@ impl AgentService {
                     } else {
                         ToolState::Failed
                     };
+                    finished_at.get_or_insert_with(now);
                 }
             }
             let finished = stored.clone();
@@ -1305,6 +1349,7 @@ impl AgentService {
                 .find(|chat| chat.id == turn.chat_id)
                 .expect("turn chat exists");
             chat.updated_at = now();
+            chat.usage.add(finished.usage);
             chat.last_turn = Some(finished.clone());
             let messages = &mut chat.messages;
             let text = if finished.text.is_empty() {
@@ -1442,6 +1487,7 @@ impl AgentService {
             Progress::ToolStarted {
                 id: Some("references".into()),
                 name: "references".into(),
+                label: None,
                 detail: None,
             },
         );
@@ -1561,6 +1607,7 @@ fn activity(tool: &str) -> String {
         "control_playback" => "Controlling playback",
         "capture_views" => "Capturing model views",
         "compare_views" => "Comparing before and after",
+        "redraw_canvas" => "Redrawing the canvas",
         "tool_schema" => "Looking up Cadpad tools",
         "cli:command" => "Running a command",
         "cursor:read" => "Reading a file",
@@ -1620,6 +1667,7 @@ mod prose_print_advisory_tests {
                     text: self.response.clone(),
                 }],
                 stop: StopReason::EndTurn,
+                usage: None,
             })
         }
     }

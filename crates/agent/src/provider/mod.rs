@@ -64,10 +64,67 @@ pub enum StopReason {
     MaxTokens,
     Refusal,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+}
+impl TokenUsage {
+    pub fn total(&self) -> u64 {
+        self.input_tokens.saturating_add(self.output_tokens)
+    }
+    pub fn add(&mut self, other: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+    }
+    pub fn is_zero(&self) -> bool {
+        self.input_tokens == 0 && self.output_tokens == 0
+    }
+    /// Generic fallback estimate (~4 chars/token) when a provider or CLI omits usage.
+    pub fn estimate(input_chars: usize, output_chars: usize) -> Self {
+        Self {
+            input_tokens: if input_chars == 0 { 0 } else { (input_chars as u64).div_ceil(4) },
+            output_tokens: if output_chars == 0 { 0 } else { (output_chars as u64).div_ceil(4) },
+        }
+    }
+    /// Parse token usage from Anthropic, OpenAI/OpenRouter, or CLI JSON usage objects.
+    pub fn from_json(value: &Value) -> Option<Self> {
+        let obj = value.as_object()?;
+        let base_in = obj
+            .get("input_tokens")
+            .or_else(|| obj.get("prompt_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let cache_create = obj
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let cache_read = obj
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let input_tokens = base_in
+            .saturating_add(cache_create)
+            .saturating_add(cache_read);
+        let output_tokens = obj
+            .get("output_tokens")
+            .or_else(|| obj.get("completion_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let usage = Self {
+            input_tokens,
+            output_tokens,
+        };
+        (!usage.is_zero()).then_some(usage)
+    }
+}
 #[derive(Clone, Debug)]
 pub struct ProviderReply {
     pub content: Vec<Block>,
     pub stop: StopReason,
+    pub usage: Option<TokenUsage>,
 }
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -316,6 +373,7 @@ struct MessageAccumulator {
     stop: Option<StopReason>,
     stopped: bool,
     started: bool,
+    usage: TokenUsage,
 }
 impl MessageAccumulator {
     fn event(&mut self, event: Value, emit: &EmitText) -> Result<()> {
@@ -332,6 +390,9 @@ impl MessageAccumulator {
                     return Err(protocol());
                 }
                 self.started = true;
+                if let Some(usage) = TokenUsage::from_json(&event["message"]["usage"]) {
+                    self.usage.add(usage);
+                }
             }
             "ping" => {}
             "content_block_start" => {
@@ -437,6 +498,14 @@ impl MessageAccumulator {
                 *closed = true;
             }
             "message_delta" => {
+                if let Some(usage) = TokenUsage::from_json(&event["usage"]) {
+                    if usage.input_tokens > 0 {
+                        self.usage.input_tokens = usage.input_tokens;
+                    }
+                    if usage.output_tokens > 0 {
+                        self.usage.output_tokens = usage.output_tokens;
+                    }
+                }
                 if let Some(stop) = event["delta"]["stop_reason"].as_str() {
                     self.stop = Some(match stop {
                         "end_turn" | "stop_sequence" => StopReason::EndTurn,
@@ -485,7 +554,12 @@ impl MessageAccumulator {
         if matches!(stop, StopReason::ToolUse) != (tools > 0) {
             return Err(protocol());
         }
-        Ok(ProviderReply { content, stop })
+        let usage = (!self.usage.is_zero()).then_some(self.usage);
+        Ok(ProviderReply {
+            content,
+            stop,
+            usage,
+        })
     }
 }
 fn protocol() -> Error {

@@ -370,40 +370,73 @@ pub async fn resolve(tools: &dyn ToolExecutor, request: Request<'_>) -> Result<R
             image,
         });
     }
-    let inspected = tools
+    // History names replay the build once per worker with tracing and tie each
+    // face/edge to the CadQuery call that created it. Tracing can be refused
+    // (mesh revisions, nondeterministic builds); plain properties still help.
+    let mut inspected = tools
         .call(
             "inspect",
-            json!({"workspace_id":workspace,"revision":revision,"entities":entities,"pose_version":pose_version}),
+            json!({"workspace_id":workspace,"revision":revision,"entities":entities,"pose_version":pose_version,"history_names":true}),
         )
         .await;
-    let properties = match inspected {
+    let mut trace_error = None;
+    if let Err(error) = &inspected {
+        trace_error = Some(error.to_string());
+        inspected = tools
+            .call(
+                "inspect",
+                json!({"workspace_id":workspace,"revision":revision,"entities":entities,"pose_version":pose_version}),
+            )
+            .await;
+    }
+    let mut properties = match inspected {
         Ok(value) => value,
         Err(error) => json!({"unavailable": error.to_string()}),
     };
+    let origins = chips
+        .iter()
+        .map(|chip| origin(&properties, chip))
+        .collect::<Vec<_>>();
+    strip_history(&mut properties);
     let references = chips
         .iter()
-        .map(|chip| {
-            json!({
+        .zip(&origins)
+        .map(|(chip, origin)| {
+            let mut reference = json!({
                 "letter": chip.letter,
                 "part": chip.part,
                 "entity": {"revision": revision, "instance_id": chip.instance_id, "entity_id": chip.entity_id},
                 "label": chip.label,
-                "source": chip.file.as_ref().map(|file| json!({"file": file, "show_line": chip.line})),
-            })
+                "published_by": chip.file.as_ref().map(|file| json!({"file": file, "line": chip.line})),
+            });
+            if let Some(origin) = origin {
+                reference["created_by"] = origin.clone();
+            }
+            reference
         })
         .collect::<Vec<_>>();
     let mesh = properties["accuracy"] == "mesh";
+    let traced = origins.iter().any(Option::is_some);
     let mut text = String::from(
         "The user selected this geometry in the viewport and attached it to the message below. \
-Letters match the badges in the viewport and screenshot; with one reference the user may say \"this\". \
-Entity IDs are scoped to the stated revision. ",
+Letters match the badges in the user's viewport screenshot; with one reference the user may say \"this\". \
+Entity IDs are scoped to the stated revision and are already resolved: the properties below are exact, \
+so do not re-inspect them or ask the user which feature they meant. ",
     );
     text.push_str(if mesh {
-        "Properties are measured from the STL triangles. A selected surface may group adjacent coplanar triangles.\n<references>\n"
+        "Properties are measured from the STL triangles. A selected surface may group adjacent coplanar triangles.\n"
+    } else if traced {
+        "`created_by` is traced from the build: `calls[0]` is the CadQuery operation that created the face or edge, \
+followed by the caller chain (outermost last). Explain the feature from that code. `positional: true` means the name depends on call order, \
+which is still exact for this revision. `published_by` is only where the part was shown.\n"
     } else {
-        "Source files are the component modules whose show() call published each part; \
-face/edge provenance is not recorded, so match exact properties to the code that produced them.\n<references>\n"
+        "`published_by` is where the part was shown; face/edge provenance could not be traced, \
+so match the exact properties (world_center, normal, size) to the code that produced them.\n"
     });
+    if let Some(error) = trace_error.filter(|_| !mesh && !traced) {
+        text.push_str(&format!("History tracing was unavailable: {error}\n"));
+    }
+    text.push_str("<references>\n");
     let mut context = json!({"revision": revision, "pose_version": pose_version, "units": "mm", "references": references});
     context[if mesh {
         "mesh_properties"
@@ -412,11 +445,22 @@ face/edge provenance is not recorded, so match exact properties to the code that
     }] = properties;
     text.push_str(&serde_json::to_string_pretty(&context)?);
     text.push_str("\n</references>\n");
-    let files = chips
-        .iter()
-        .filter_map(|chip| chip.file.clone())
-        .filter(|file| file.ends_with(".py"))
-        .collect::<BTreeSet<_>>();
+    // Creating code first: it explains the selected face; the publishing file
+    // is often a generated entry point or an assembly.
+    let mut files = Vec::new();
+    for origin in origins.iter().flatten() {
+        for call in origin["calls"].as_array().into_iter().flatten().take(2) {
+            if let Some(file) = call["file"].as_str() {
+                files.push(file.to_string());
+            }
+        }
+    }
+    files.extend(chips.iter().filter_map(|chip| chip.file.clone()));
+    let mut seen = BTreeSet::new();
+    let files = files
+        .into_iter()
+        .filter(|file| file.ends_with(".py") && seen.insert(file.clone()))
+        .collect::<Vec<_>>();
     let mut budget = MAX_SOURCE_BYTES;
     for file in files {
         if budget == 0 {
@@ -453,9 +497,47 @@ face/edge provenance is not recorded, so match exact properties to the code that
     }
     let image = if image_supported { image } else { None };
     if image.is_none() && chips.len() > 1 {
-        text.push_str("No screenshot is attached; capture_views with single=true shows the same lettered badges.\n");
+        text.push_str("No screenshot is attached. Rendered captures (capture_views) do not draw the selection badges; \
+locate references by their world_center and bounds instead.\n");
     }
     Ok(Resolved { text, image })
+}
+
+/// The traced creation site of one reference: the history names and the
+/// source frames of the operation that created it.
+fn origin(properties: &Value, chip: &ChatReference) -> Option<Value> {
+    let item = properties["entities"].as_array()?.iter().find(|item| {
+        item["reference"]["instance_id"] == chip.instance_id.as_str()
+            && item["reference"]["entity_id"] == chip.entity_id.as_str()
+    })?;
+    let names = item["history_references"].as_array()?;
+    let calls = names
+        .iter()
+        .find_map(|name| name["source"].as_array().filter(|calls| !calls.is_empty()))?;
+    Some(json!({
+        "history_names": names.iter().filter_map(|name| name["name"].as_str()).collect::<Vec<_>>(),
+        "positional": names.iter().any(|name| name["positional"] == true),
+        "calls": calls,
+    }))
+}
+
+/// History references are restated as `created_by`; drop the raw copies and
+/// hashes so they do not crowd the context.
+fn strip_history(properties: &mut Value) {
+    if let Some(items) = properties["entities"].as_array_mut() {
+        for item in items {
+            if let Some(item) = item.as_object_mut() {
+                item.remove("history_references");
+                item.remove("history_references_status");
+                item.remove("history_references_reason");
+                item.remove("anchor");
+                item.remove("circular_definition");
+            }
+        }
+    }
+    if let Some(properties) = properties.as_object_mut() {
+        properties.remove("history_names");
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +635,81 @@ mod tests {
         assert!(validate_image(&Some("iVBORw0KGgo=".into())).is_ok());
         assert!(validate_image(&Some("data:image/png;base64,xx".into())).is_err());
         assert!(validate_image(&Some("A".repeat(MAX_IMAGE_BYTES + 1))).is_err());
+    }
+
+    struct Traced {
+        trace: bool,
+        reads: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl ToolExecutor for Traced {
+        async fn call(&self, name: &str, args: Value) -> Result<Value> {
+            match name {
+                "inspect" if args["history_names"] == true && !self.trace => Err(Error::domain(
+                    "HISTORY_TRACE_MISMATCH",
+                    "replay differed",
+                )),
+                "inspect" => {
+                    let mut item = json!({"reference":{"instance_id":"plate","entity_id":"face:5"},
+                        "kind":"face","world_center":[1,2,3],"anchor":{"kind":"geometry_center"}});
+                    if args["history_names"] == true {
+                        item["history_references"] = json!([{"name":"parts/tab.py:tab/box#0@frame>tab#1/left",
+                            "positional":true,"exact_hash":"x","source":[
+                                {"file":"parts/tab.py","line":4,"function":"tab"},
+                                {"file":"parts/frame.py","line":9,"function":"frame"}]}]);
+                    }
+                    Ok(json!({"accuracy":"exact","entities":[item]}))
+                }
+                "read_source" => {
+                    self.reads.lock().unwrap().push(args["path"].as_str().unwrap().into());
+                    Ok(json!({"source":"def tab(): ..."}))
+                }
+                other => unreachable!("unexpected tool {other}"),
+            }
+        }
+    }
+
+    async fn resolve_traced(trace: bool) -> (Resolved, Vec<String>) {
+        let tools = Traced {
+            trace,
+            reads: Default::default(),
+        };
+        let entities = [entity("face:5")];
+        let chips = summarize(&project(), &entities).unwrap();
+        let resolved = resolve(
+            &tools,
+            Request {
+                workspace: "ws",
+                revision: "r1",
+                pose_version: 0,
+                entities: &entities,
+                chips: &chips,
+                image: None,
+                image_supported: true,
+            },
+        )
+        .await
+        .unwrap();
+        (resolved, tools.reads.into_inner().unwrap())
+    }
+
+    #[tokio::test]
+    async fn traced_references_point_at_the_creating_code() {
+        let (resolved, reads) = resolve_traced(true).await;
+        assert!(resolved.text.contains("\"created_by\""));
+        assert!(resolved.text.contains("\"function\": \"tab\""));
+        assert!(!resolved.text.contains("history_references"));
+        assert!(!resolved.text.contains("anchor"));
+        assert_eq!(reads, ["parts/tab.py", "parts/frame.py", "parts/plate.py"]);
+    }
+
+    #[tokio::test]
+    async fn refused_tracing_falls_back_to_exact_properties() {
+        let (resolved, reads) = resolve_traced(false).await;
+        assert!(!resolved.text.contains("\"created_by\""));
+        assert!(resolved.text.contains("world_center"));
+        assert!(resolved.text.contains("History tracing was unavailable"));
+        assert_eq!(reads, ["parts/plate.py"]);
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-//! Headless Claude / Codex / Cursor / OpenCode CLIs as agent hosts.
+//! Headless Claude / Codex / Cursor / OpenCode / Antigravity CLIs as agent hosts.
 //! Cadpad supplies tools through the existing MCP bridge; the CLI owns the loop.
 use cadpad_core::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,8 @@ pub enum Backend {
     CursorCli,
     #[serde(rename = "opencode_cli")]
     OpenCodeCli,
+    #[serde(rename = "antigravity_cli")]
+    AntigravityCli,
 }
 impl Default for Backend {
     fn default() -> Self {
@@ -40,6 +42,7 @@ impl Backend {
             Self::CodexCli => "codex_cli",
             Self::CursorCli => "cursor_cli",
             Self::OpenCodeCli => "opencode_cli",
+            Self::AntigravityCli => "antigravity_cli",
         }
     }
     pub fn label(self) -> &'static str {
@@ -50,12 +53,17 @@ impl Backend {
             Self::CodexCli => "Codex CLI",
             Self::CursorCli => "Cursor CLI",
             Self::OpenCodeCli => "OpenCode CLI",
+            Self::AntigravityCli => "Antigravity CLI",
         }
     }
     pub fn is_cli(self) -> bool {
         matches!(
             self,
-            Self::ClaudeCli | Self::CodexCli | Self::CursorCli | Self::OpenCodeCli
+            Self::ClaudeCli
+                | Self::CodexCli
+                | Self::CursorCli
+                | Self::OpenCodeCli
+                | Self::AntigravityCli
         )
     }
     pub fn parse(value: &str) -> Result<Self> {
@@ -66,9 +74,10 @@ impl Backend {
             "codex_cli" | "codex" => Ok(Self::CodexCli),
             "cursor_cli" | "cursor" => Ok(Self::CursorCli),
             "opencode_cli" | "opencode" => Ok(Self::OpenCodeCli),
+            "antigravity_cli" | "antigravity" | "agy" => Ok(Self::AntigravityCli),
             _ => Err(Error::domain(
                 "INVALID_PARAMETER",
-                "Choose Anthropic API, OpenRouter API, Claude CLI, Codex CLI, Cursor CLI, or OpenCode CLI",
+                "Choose Anthropic API, OpenRouter API, Claude CLI, Codex CLI, Cursor CLI, OpenCode CLI, or Antigravity CLI",
             )),
         }
     }
@@ -96,6 +105,7 @@ fn candidates(backend: Backend) -> &'static [&'static str] {
         Backend::CodexCli => &["codex"],
         Backend::CursorCli => &["cursor-agent", "agent"],
         Backend::OpenCodeCli => &["opencode"],
+        Backend::AntigravityCli => &["agy", "antigravity"],
         Backend::AnthropicApi | Backend::OpenRouterApi => &[],
     }
 }
@@ -227,19 +237,29 @@ pub async fn detect(backend: Backend) -> Detection {
                         .into();
             }
         }
+        Backend::AntigravityCli => {
+            let status = run_status(&binary, &["models"]).await;
+            if status.is_some_and(|(ok, text)| ok && !parse_antigravity_models(&text).is_empty()) {
+                detection.authenticated = true;
+                detection.detail = "Models available through your Antigravity account".into();
+            } else {
+                detection.detail = "Run `agy` to sign in to Antigravity".into();
+            }
+        }
         Backend::AnthropicApi | Backend::OpenRouterApi => {}
     }
     detection
 }
 
 pub async fn detect_all() -> Vec<Detection> {
-    let (claude, codex, cursor, opencode) = tokio::join!(
+    let (claude, codex, cursor, opencode, antigravity) = tokio::join!(
         detect(Backend::ClaudeCli),
         detect(Backend::CodexCli),
         detect(Backend::CursorCli),
-        detect(Backend::OpenCodeCli)
+        detect(Backend::OpenCodeCli),
+        detect(Backend::AntigravityCli)
     );
-    vec![claude, codex, cursor, opencode]
+    vec![claude, codex, cursor, opencode, antigravity]
 }
 
 pub struct LaunchRequest<'a> {
@@ -301,6 +321,7 @@ pub fn legacy_default_model(model: &str) -> bool {
             Backend::CodexCli,
             Backend::CursorCli,
             Backend::OpenCodeCli,
+            Backend::AntigravityCli,
         ]
         .into_iter()
         .any(|backend| backend.label() == model)
@@ -310,6 +331,30 @@ pub fn parse_cursor_models(text: &str) -> Vec<ModelChoice> {
     let mut models: Vec<ModelChoice> = Vec::new();
     for line in text.lines() {
         let Some((id, label)) = line.trim().split_once(" - ") else {
+            continue;
+        };
+        let id = id.trim();
+        let label = label.trim();
+        if !valid_model_id(id) || label.is_empty() || models.iter().any(|model| model.id == id) {
+            continue;
+        }
+        models.push(ModelChoice {
+            id: id.to_string(),
+            label: label.to_string(),
+        });
+    }
+    models
+}
+
+/// `agy models` emits one `id<TAB>label` row per model after a status line.
+pub fn parse_antigravity_models(text: &str) -> Vec<ModelChoice> {
+    let mut models: Vec<ModelChoice> = Vec::new();
+    for line in text.lines() {
+        let Some((id, label)) = line
+            .trim()
+            .split_once('\t')
+            .or_else(|| line.trim().split_once("  "))
+        else {
             continue;
         };
         let id = id.trim();
@@ -585,6 +630,10 @@ pub async fn list_models(backend: Backend) -> Vec<ModelChoice> {
             .map(|(_, text)| parse_cursor_models(&text))
             .unwrap_or_default(),
         Backend::OpenCodeCli => opencode_models(&binary).await,
+        Backend::AntigravityCli => run_status(&binary, &["models"])
+            .await
+            .map(|(_, text)| parse_antigravity_models(&text))
+            .unwrap_or_default(),
         Backend::AnthropicApi | Backend::OpenRouterApi => Vec::new(),
     }
 }
@@ -644,11 +693,11 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
          Available Cadpad MCP commands (discover the input schemas you need through the connected server in one lookup when possible; reuse discovered schemas for the rest of the turn, and do not rediscover before each call):
 {catalog}
 
-         Modeling workflow: get_project first. Use the source path from the project or selection to locate text with search_source, then read around hits with read_source and start_line. Use read_source when you need the full file. Use trace_cad_edge for native edge adjacency and observed operation sites. For an STL edge use trace_mesh_edges, and use match_mesh_edge if the user identifies a corresponding CAD tab. Read-only lookup and edge tracing in that explicitly identified tab within this project are allowed. Use trace_part_source for a component publication site or linked asset path. Use update_source to stage changes, build the returned draft,          and poll get_job until terminal. A failed build leaves the previous model displayed; repair the draft rather than claiming success.          After success, get_project again and use inspect for geometry properties (mesh accuracy for STL) and capture_views with single=true to check the visible result. For multiple angles omit single; for before/after comparisons capture_views before editing, retain capture_id, then compare_views after building with current revision and pose_version.          Only claim a change is reflected in the canvas after verifying the committed revision. Use managed asset tools for imports;          an STL reference mesh is not an editable parametric solid. For rigid tweaks on STL assets use transform_mesh; use check_printability for slicer triage (watertightness, build volume, feature size, overhangs) and re-run it after edits. Keep all other project calls scoped to this workspace.          Use the connected cadpad MCP commands directly rather than asking the user to run them.",
+         Modeling workflow: get_project first. Use the source path from the project or selection to locate text with search_source, then read around hits with read_source and start_line. Use read_source when you need the full file. Use trace_cad_edge for native edge adjacency and observed operation sites. For an STL edge use trace_mesh_edges, and use match_mesh_edge if the user identifies a corresponding CAD tab. Read-only lookup and edge tracing in that explicitly identified tab within this project are allowed. Use trace_part_source for a component publication site or linked asset path. Use update_source to stage changes, build the returned draft,          and poll get_job until terminal. A failed build leaves the previous model displayed; repair the draft rather than claiming success.          After success, get_project again and use inspect for geometry properties (mesh accuracy for STL) and capture_views with single=true to check the visible result. For multiple angles omit single; for before/after comparisons capture_views before editing, retain capture_id, then compare_views after building with current revision and pose_version.          If the project folder changed outside Cadpad, call redraw_canvas to re-present the viewport and re-check the disk, then poll get_project before capturing. Only claim a change is reflected in the canvas after verifying the committed revision. Use managed asset tools for imports;          an STL reference mesh is not an editable parametric solid. For rigid tweaks on STL assets use transform_mesh; use check_printability for slicer triage (watertightness, build volume, feature size, overhangs) and re-run it after edits. Keep all other project calls scoped to this workspace.          Use the connected cadpad MCP commands directly rather than asking the user to run them.",
         request.workspace_id
     );
     let system = format!(
-        "{system}\nProject folder: {}. This is the sole source of truth. Paths mentioned in old messages are historical context, not additional workspaces. Do not read, edit, synchronize or export to other project folders. Use Cadpad MCP for all model edits and managed exports. Never maintain a second copy of the model.",
+        "{system}\nProject folder: {}. This is the sole source of truth. Paths mentioned in old messages are historical context, not additional workspaces. Do not read, edit, synchronize or export to other project folders. Use Cadpad MCP for all model edits and managed exports. Never maintain a second copy of the model. Never use browser, JS, or computer-use/window-automation tools to access, inspect, or drive the Cadpad app or window; use only the connected cadpad MCP tools and workspace files.",
         request
             .project_directory
             .map(|path| path.display().to_string())
@@ -794,6 +843,34 @@ pub async fn spawn(request: LaunchRequest<'_>) -> Result<Launch> {
                 .kill_on_drop(true)
                 .spawn()
         }
+        Backend::AntigravityCli => {
+            let agents_dir = work_dir.join(".agents");
+            tokio::fs::create_dir_all(&agents_dir).await?;
+            tokio::fs::write(
+                agents_dir.join("mcp_config.json"),
+                serde_json::to_vec_pretty(&mcp)?,
+            )
+            .await?;
+            tokio::fs::write(work_dir.join("AGENTS.md"), system.as_bytes()).await?;
+            let settings = json!({"trustedWorkspaces": [&work_dir]});
+            Command::new(&binary)
+                .current_dir(&work_dir)
+                .args([
+                    "-p",
+                    request.prompt,
+                    "--output-format",
+                    "stream-json",
+                    "--dangerously-skip-permissions",
+                    "--settings",
+                ])
+                .arg(serde_json::to_string(&settings)?)
+                .args(model_args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+        }
         Backend::AnthropicApi | Backend::OpenRouterApi => {
             return Err(Error::domain(
                 "INVALID_REQUEST",
@@ -843,6 +920,8 @@ pub enum StreamEvent {
     ToolStarted {
         id: Option<String>,
         name: String,
+        /// A more specific label than the tool's generic default.
+        label: Option<String>,
         /// The agent's own one-line reason for the call, when the CLI reports one.
         detail: Option<String>,
     },
@@ -851,7 +930,21 @@ pub enum StreamEvent {
         name: String,
         error: bool,
     },
+    Usage(crate::provider::TokenUsage),
     Done,
+}
+
+fn usage_then_done(value: &Value) -> Vec<StreamEvent> {
+    let mut events = Vec::with_capacity(2);
+    if let Some(usage) = value
+        .get("usage")
+        .or_else(|| value["result"].get("usage"))
+        .and_then(crate::provider::TokenUsage::from_json)
+    {
+        events.push(StreamEvent::Usage(usage));
+    }
+    events.push(StreamEvent::Done);
+    events
 }
 
 /// Normalizes `mcp__cadpad__build`, `cadpad-build` and similar to `build`.
@@ -878,6 +971,12 @@ pub struct StreamParser {
     claude_streamed: bool,
     /// Cursor text streamed since the last segment boundary.
     cursor_segment: String,
+    /// Antigravity tool step index -> call details, so completion keeps its name.
+    antigravity_tools: std::collections::HashMap<u64, (String, Option<String>, Option<String>)>,
+    /// Antigravity tool steps whose start was already reported.
+    antigravity_started: std::collections::HashSet<u64>,
+    /// Antigravity agent_response steps that streamed visible text.
+    antigravity_text: std::collections::HashSet<u64>,
 }
 
 impl StreamParser {
@@ -901,6 +1000,7 @@ impl StreamParser {
             Some(Backend::CursorCli) => self.cursor(&value),
             Some(Backend::CodexCli) => codex(&value),
             Some(Backend::OpenCodeCli) => opencode(&value),
+            Some(Backend::AntigravityCli) => self.antigravity(&value),
             _ => vec![],
         }
     }
@@ -961,10 +1061,15 @@ impl StreamParser {
                             if let Some(id) = &id {
                                 self.claude_tools.insert(id.clone(), name.clone());
                             }
+                            let described = crate::activity::describe(&name, Some(&block["input"]));
                             events.push(StreamEvent::ToolStarted {
                                 id,
                                 name,
-                                detail: block["input"]["description"].as_str().map(str::to_string),
+                                label: described.label,
+                                detail: block["input"]["description"]
+                                    .as_str()
+                                    .map(str::to_string)
+                                    .or(described.detail),
                             });
                         }
                         _ => {}
@@ -990,13 +1095,13 @@ impl StreamParser {
                     }
                 })
                 .collect(),
-            "result" => vec![StreamEvent::Done],
+            "result" => usage_then_done(value),
             _ => vec![],
         }
     }
 }
 
-fn cursor_tool(value: &Value) -> (Option<String>, String, Option<String>, bool) {
+fn cursor_tool(value: &Value) -> (Option<String>, String, Option<String>, Option<String>, bool) {
     let id = value["call_id"]
         .as_str()
         .or_else(|| value["tool_call"]["toolCallId"].as_str())
@@ -1005,7 +1110,7 @@ fn cursor_tool(value: &Value) -> (Option<String>, String, Option<String>, bool) 
         .as_object()
         .and_then(|object| object.iter().find(|(key, _)| key.ends_with("ToolCall")))
     else {
-        return (id, "tool".into(), None, false);
+        return (id, "tool".into(), None, None, false);
     };
     let args = &call["args"];
     let name = match key.as_str() {
@@ -1043,11 +1148,18 @@ fn cursor_tool(value: &Value) -> (Option<String>, String, Option<String>, bool) 
                 })
                 .filter(|names| !names.is_empty())
         });
+    let described = crate::activity::describe(&name, Some(args));
     let result = &call["result"];
     let error = result.get("error").is_some()
         || result.get("failure").is_some()
         || result["success"]["isError"].as_bool().unwrap_or(false);
-    (id, name, detail, error)
+    (
+        id,
+        name,
+        detail.or(described.detail),
+        described.label,
+        error,
+    )
 }
 
 impl StreamParser {
@@ -1096,14 +1208,19 @@ fn cursor(value: &Value) -> Vec<StreamEvent> {
             .unwrap_or_default(),
         ("thinking", "completed") => vec![StreamEvent::ThinkingDone],
         ("tool_call", "started") => {
-            let (id, name, detail, _) = cursor_tool(value);
-            vec![StreamEvent::ToolStarted { id, name, detail }]
+            let (id, name, detail, label, _) = cursor_tool(value);
+            vec![StreamEvent::ToolStarted {
+                id,
+                name,
+                label,
+                detail,
+            }]
         }
         ("tool_call", "completed") => {
-            let (id, name, _, error) = cursor_tool(value);
+            let (id, name, _, _, error) = cursor_tool(value);
             vec![StreamEvent::ToolFinished { id, name, error }]
         }
-        ("result", _) => vec![StreamEvent::Done],
+        ("result", _) => usage_then_done(value),
         _ => vec![],
     }
 }
@@ -1128,11 +1245,16 @@ fn codex(value: &Value) -> Vec<StreamEvent> {
                     ]
                 })
                 .unwrap_or_default(),
-            ("mcp_tool_call", "started") => vec![StreamEvent::ToolStarted {
-                id,
-                name: tool_name(item["tool"].as_str().unwrap_or("tool")),
-                detail: None,
-            }],
+            ("mcp_tool_call", "started") => {
+                let name = tool_name(item["tool"].as_str().unwrap_or("tool"));
+                let described = crate::activity::describe(&name, item.get("arguments"));
+                vec![StreamEvent::ToolStarted {
+                    id,
+                    name,
+                    label: described.label,
+                    detail: described.detail,
+                }]
+            }
             ("mcp_tool_call", "completed") => vec![StreamEvent::ToolFinished {
                 id,
                 name: tool_name(item["tool"].as_str().unwrap_or("tool")),
@@ -1142,6 +1264,7 @@ fn codex(value: &Value) -> Vec<StreamEvent> {
             ("command_execution", "started") => vec![StreamEvent::ToolStarted {
                 id,
                 name: "cli:command".into(),
+                label: None,
                 detail: item["command"].as_str().map(str::to_string),
             }],
             ("command_execution", "completed") => vec![StreamEvent::ToolFinished {
@@ -1166,6 +1289,7 @@ fn codex(value: &Value) -> Vec<StreamEvent> {
         "tool_call" | "function_call" => vec![StreamEvent::ToolStarted {
             id: value["call_id"].as_str().map(str::to_string),
             name: tool_name(value["name"].as_str().unwrap_or("tool")),
+            label: None,
             detail: None,
         }],
         "tool_result" | "function_call_output" => vec![StreamEvent::ToolFinished {
@@ -1173,7 +1297,7 @@ fn codex(value: &Value) -> Vec<StreamEvent> {
             name: tool_name(value["name"].as_str().unwrap_or("tool")),
             error: value["is_error"].as_bool().unwrap_or(false),
         }],
-        "turn.completed" | "result" => vec![StreamEvent::Done],
+        "turn.completed" | "result" => usage_then_done(value),
         _ => vec![],
     }
 }
@@ -1206,11 +1330,16 @@ fn opencode(value: &Value) -> Vec<StreamEvent> {
             }
             // OpenCode reports tools only after completion. Emit the pair so
             // the chat still records the call and its outcome.
+            let described = crate::activity::describe(
+                &name,
+                part.get("state").and_then(|state| state.get("input")),
+            );
             vec![
                 StreamEvent::ToolStarted {
                     id: id.clone(),
                     name: name.clone(),
-                    detail: None,
+                    label: described.label,
+                    detail: described.detail,
                 },
                 StreamEvent::ToolFinished {
                     id,
@@ -1223,6 +1352,114 @@ fn opencode(value: &Value) -> Vec<StreamEvent> {
         // Wait for EOF and the exit code even after a final stop, so later
         // errors or background work cannot be mistaken for success.
         _ => vec![],
+    }
+}
+
+/// Antigravity exposes MCP tools through one generic `call_mcp_tool` step.
+/// Translate it back to the Cadpad tool name so the chat can describe it.
+fn antigravity_tool(raw: &str, parameters: &Value) -> (String, Option<String>, Option<String>) {
+    if raw == "call_mcp_tool" {
+        let tool = parameters["ToolName"]
+            .as_str()
+            .or_else(|| parameters["tool_name"].as_str())
+            .unwrap_or("tool");
+        let name = tool_name(tool);
+        let arguments = parameters
+            .get("Arguments")
+            .or_else(|| parameters.get("arguments"))
+            .filter(|value| !value.is_null());
+        let described = crate::activity::describe(&name, arguments);
+        return (name, described.label, described.detail);
+    }
+    if raw == "read_file"
+        && let Some(path) = parameters["Path"].as_str()
+        && path.contains("/mcp/")
+        && path.ends_with(".json")
+    {
+        let tool = Path::new(path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(str::to_string);
+        return ("tool_schema".into(), None, tool);
+    }
+    let name = tool_name(raw);
+    let described = crate::activity::describe(&name, Some(parameters));
+    (name, described.label, described.detail)
+}
+
+impl StreamParser {
+    fn antigravity(&mut self, value: &Value) -> Vec<StreamEvent> {
+        match value["event"].as_str().unwrap_or("") {
+            "step_update" => self.antigravity_step(&value["step_update"]),
+            "result" => usage_then_done(value),
+            _ => vec![],
+        }
+    }
+
+    fn antigravity_step(&mut self, step: &Value) -> Vec<StreamEvent> {
+        let index = step["step_index"].as_u64().unwrap_or(0);
+        match step["step_type"].as_str().unwrap_or("") {
+            "agent_response" => {
+                let mut events = Vec::new();
+                if let Some(text) = step["text_delta"].as_str()
+                    && !text.is_empty()
+                {
+                    self.antigravity_text.insert(index);
+                    events.push(StreamEvent::Text(text.into()));
+                }
+                if step["state"] == "DONE" && self.antigravity_text.remove(&index) {
+                    events.push(StreamEvent::TextBreak);
+                }
+                events
+            }
+            "tool" => {
+                let id = Some(index.to_string());
+                let info = &step["tool_info"];
+                let raw = info["name"]
+                    .as_str()
+                    .or_else(|| step["tool_name"].as_str())
+                    .unwrap_or("tool");
+                let described = antigravity_tool(raw, &info["parameters"]);
+                match step["state"].as_str().unwrap_or("") {
+                    "ACTIVE" => {
+                        self.antigravity_started.insert(index);
+                        self.antigravity_tools.insert(index, described.clone());
+                        vec![StreamEvent::ToolStarted {
+                            id,
+                            name: described.0,
+                            label: described.1,
+                            detail: described.2,
+                        }]
+                    }
+                    "DONE" | "ERROR" => {
+                        let described = self.antigravity_tools.remove(&index).unwrap_or(described);
+                        let started = self.antigravity_started.remove(&index);
+                        let name = described.0;
+                        let error = step["state"] == "ERROR" || info.get("error").is_some();
+                        let finished = StreamEvent::ToolFinished {
+                            id: id.clone(),
+                            name: name.clone(),
+                            error,
+                        };
+                        if started {
+                            vec![finished]
+                        } else {
+                            vec![
+                                StreamEvent::ToolStarted {
+                                    id,
+                                    name,
+                                    label: described.1,
+                                    detail: described.2,
+                                },
+                                finished,
+                            ]
+                        }
+                    }
+                    _ => vec![],
+                }
+            }
+            _ => vec![],
+        }
     }
 }
 
@@ -1264,6 +1501,16 @@ pub async fn drive(
                         let message = value["error"]["message"].as_str()
                             .or_else(|| value["error"]["data"]["message"].as_str())
                             .unwrap_or("OpenCode could not complete the turn");
+                        return Err(Error::domain("LLM_UNAVAILABLE", message));
+                    }
+                    if backend == Backend::AntigravityCli
+                        && let Ok(value) = serde_json::from_str::<Value>(&line)
+                        && value["event"] == "result"
+                        && let Some(status) = value["result"]["status"].as_str()
+                        && status != "SUCCESS"
+                    {
+                        let message = value["result"]["error"].as_str()
+                            .unwrap_or("Antigravity could not complete the turn");
                         return Err(Error::domain("LLM_UNAVAILABLE", message));
                     }
                     for event in parser.parse(&line) {

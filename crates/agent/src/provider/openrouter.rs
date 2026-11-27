@@ -1,6 +1,6 @@
 use super::{
     Block, EmitText, EventDecoder, Message, Provider, ProviderReply, ProviderRequest, Role,
-    StopReason,
+    StopReason, TokenUsage,
 };
 use crate::credentials::Secret;
 use async_trait::async_trait;
@@ -271,10 +271,19 @@ struct MessageAccumulator {
     tool_calls: BTreeMap<u64, ToolCall>,
     finish: Option<StopReason>,
     finished: bool,
+    usage: TokenUsage,
 }
 
 impl MessageAccumulator {
     fn event(&mut self, event: Value, emit: &EmitText) -> Result<()> {
+        if let Some(usage) = event.get("usage").and_then(TokenUsage::from_json) {
+            if usage.input_tokens > 0 {
+                self.usage.input_tokens = usage.input_tokens;
+            }
+            if usage.output_tokens > 0 {
+                self.usage.output_tokens = usage.output_tokens;
+            }
+        }
         if event.get("error").is_some() {
             let kind = event["error"]["type"]
                 .as_str()
@@ -471,7 +480,12 @@ impl MessageAccumulator {
         if matches!(stop, StopReason::ToolUse) != (tools > 0) {
             return Err(protocol());
         }
-        Ok(ProviderReply { content, stop })
+        let usage = (!self.usage.is_zero()).then_some(self.usage);
+        Ok(ProviderReply {
+            content,
+            stop,
+            usage,
+        })
     }
 }
 
