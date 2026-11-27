@@ -51,6 +51,7 @@ const WORDY=/[\p{L}\p{N}]/u;
 export function highlightSegments(text:string,print?:Print|null,diagnostics:Diagnostic[]=[]):Highlight[]{
   const offsets=scalarOffsets(text),n=offsets.length-1;
   if(!n)return [];
+  if(!print)return [{kind:'plain',raw:text}];
   const kind=new Uint8Array(n),claims:string[]=new Array(n).fill('');
   const paint=(span:Span|null|undefined,value:number,claim:string)=>{
     if(!span||!Number.isInteger(span[0])||!Number.isInteger(span[1]))return;
@@ -100,15 +101,36 @@ export function questionsOf(info:Pick<RequirementInfo,'text'|'diagnostics'>):Que
     const ask=diagnostic.fix?.kind==='ask_user'?diagnostic.fix:null;
     if(!ask&&diagnostic.code!=='E_VAGUE')continue;
     const span=diagnostic.span?.length===2?diagnostic.span:null;
+    const options=[...new Set(ask?.options??[])];
     out.push({
       key:`${diagnostic.code}|${diagnostic.at}|${span?.join('-')??''}`,code:diagnostic.code,at:diagnostic.at,message:diagnostic.message,
-      question:ask?.question||diagnostic.message,options:[...(ask?.options??[])],span,
+      question:ask?.question||diagnostic.message,options,span,
       quote:span?sliceScalars(info.text,span[0],span[1],offsets):'',
     });
   }
   return out;
 }
-export const errorsOf=(diagnostics:Diagnostic[]=[])=>diagnostics.filter(item=>item.severity==='error');
+export function errorsOf(diagnostics:Diagnostic[]=[]):Diagnostic[]{
+  const seen=new Set<string>(),out:Diagnostic[]=[];
+  for(const item of diagnostics){
+    if(item.severity!=='error')continue;
+    const key=`${item.code??''}|${item.message}`;
+    if(seen.has(key))continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+/** Shorten `@path/to/file.py#builder(/part)` references in diagnostics so cards stay scannable. */
+export function formatDiagnosticMessage(message:string):string{
+  return message.replace(/@([^\s@#()[\]]+)#([^\s/()[\]]+)(?:\/([^\s()[\]]+))?/g,(_full,entry:string,builder:string,part?:string)=>{
+    const file=entry.split('/').at(-1)||entry;
+    const stem=file.replace(/\.[^.]+$/,'');
+    const head=builder===stem||builder==='$file'?file:`${file} (${builder})`;
+    return part?`${head} / ${part}`:head;
+  });
+}
 
 /** The prompt that returns the user's answers to the assistant, which records them in the IR. */
 export function answersPrompt(info:Pick<RequirementInfo,'id'|'name'|'text'>,answers:{question:Question;answer:string;suggested:boolean}[]):string{
@@ -126,7 +148,7 @@ export function reviewHashes(info:RequirementInfo):Hashes|null{
 /** Why Approve is disabled, or null when it is allowed. */
 export function approveBlock(info:RequirementInfo):string|null{
   const errors=errorsOf(info.diagnostics);
-  if(errors.length)return `Fix ${errors.length} ${errors.length===1?'problem':'problems'} first: ${errors[0].message}`;
+  if(errors.length)return `Fix ${errors.length} ${errors.length===1?'problem':'problems'} first: ${formatDiagnosticMessage(errors[0].message)}`;
   if(!info.print||!info.rendered&&!info.print.lines.length)return 'There is nothing to review yet.';
   if(!reviewHashes(info))return 'The reviewed version is not available yet. Ask the assistant to save the requirement again.';
   return null;
@@ -258,12 +280,25 @@ export const summaryOf=(infos:RequirementInfo[])=>{
 // --------------------------------------------------------------- grouping
 
 const modelId=(model:ModelTarget)=>JSON.stringify([model.entry,model.builder]);
-/** Requirements keyed by every model their text mentions; those with no chip go under the empty key. */
+/** Parse a `groupByModel` key back into its referenced models (empty for unassigned). */
+export function modelsOfGroupKey(key:string):ModelTarget[]{
+  if(!key)return [];
+  const parsed=JSON.parse(key) as unknown;
+  if(Array.isArray(parsed)&&typeof parsed[0]==='string')return [{entry:parsed[0],builder:String(parsed[1]??'')}];
+  if(Array.isArray(parsed))return (parsed as [string,string][]).map(([entry,builder])=>({entry,builder}));
+  return [];
+}
+export function groupKeyForModels(models:ModelTarget[]):string{
+  if(!models.length)return '';
+  if(models.length===1)return modelId(models[0]);
+  return JSON.stringify(models.map(m=>[m.entry,m.builder]));
+}
+/** Requirements keyed by all models their text mentions (single combined group when >1); those with no chip go under the empty key. */
 export function groupByModel<T extends {text:string}>(items:T[]):Map<string,T[]>{
   const groups=new Map<string,T[]>();
   for(const item of items){
-    const keys=mentionedModels(item.text).map(modelId);
-    for(const key of keys.length?keys:['']){const list=groups.get(key)??[];list.push(item);groups.set(key,list);}
+    const key=groupKeyForModels(mentionedModels(item.text));
+    const list=groups.get(key)??[];list.push(item);groups.set(key,list);
   }
   return groups;
 }

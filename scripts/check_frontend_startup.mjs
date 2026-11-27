@@ -33,7 +33,7 @@ window.__TAURI_INTERNALS__={transformCallback:()=>1,unregisterCallback:()=>{},in
  if(command==='agent_conversation')return {messages:[],turn:null};
  if(command==='agent_settings')return {provider:'fixture',model:'fixture',configured:false,credential_storage:'fixture'};
  if(command==='mcp_settings')return {config:{},bridge_installed:true,sessions:[]};
- if(command==='motion_tests')return {catalog:'fixture',tests:[],accuracy:'Fixture',snapshot:null};
+ if(command==='requirements')return {catalog:'fixture',requirements:[],settings:{}};
  return null;
 }};
 try{

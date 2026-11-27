@@ -164,14 +164,15 @@ export function stepIndex(index:number,length:number,delta:number){
 
 /**
  * Cursor + multi-selection for a mention list. `active` is the row the cursor
- * sits on (-1 when nothing is selected); `selected` holds every row picked by
- * Shift+Arrow so Enter can insert them all.
+ * sits on (`initialActive` when reset, `-1` when nothing is selected); `selected`
+ * holds every row picked by Shift+Arrow so Enter can insert them all.
  */
-export function useMentionSelection(length:number){
-  const [active,setActive]=useState(-1);
-  const [selected,setSelected]=useState<Set<number>>(()=>new Set());
-  const anchor=useRef(-1);
-  const reset=()=>{anchor.current=-1;setActive(-1);setSelected(new Set());};
+export function useMentionSelection(length:number,initialActive=-1){
+  const initialSelected=()=>initialActive>=0?new Set([initialActive]):new Set<number>();
+  const [active,setActive]=useState(initialActive);
+  const [selected,setSelected]=useState<Set<number>>(initialSelected);
+  const anchor=useRef(initialActive);
+  const reset=()=>{anchor.current=initialActive;setActive(initialActive);setSelected(initialSelected());};
   const move=(delta:number,extend=false)=>{
     if(!length)return;
     const next=extend

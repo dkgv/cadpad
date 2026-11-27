@@ -6,14 +6,26 @@ import {RequirementComposer,type RequirementPart} from './requirement-composer';
 import {mentionedModels} from './requirement-tokens';
 import './requirements.css';
 import {useRequirementCatalog} from './requirement-catalog';
-import {RequirementCard,QuestionFlow,type CardActions} from './requirement-cards';
+import {ChipText,RequirementCard,type CardActions} from './requirement-cards';
 import {RequirementReplayPanel,type RequirementReplay} from './requirement-replay';
-import {groupByModel,pairText,questionsOf,statusRank,statusOf,summaryOf,type RequirementInfo} from './requirement-review';
+import {groupByModel,groupKeyForModels,modelsOfGroupKey,pairText,questionsOf,statusRank,statusOf,summaryOf,type RequirementInfo} from './requirement-review';
 
 export type RequirementModel={model:ModelRef;label:string;detail?:string};
 export type ModelRef={entry:string;builder:string};
 type ProjectPartsReply={model?:{parts?:{name?:string;source?:{file?:string};builder_function?:string}[]}};
 const sameModel=(a?:ModelRef|null,b?:ModelRef|null)=>{const key=(model?:ModelRef|null)=>model?JSON.stringify([model.entry,model.builder]):'';return key(a)===key(b);};
+/** A pending entry where the requirement will appear once the assistant saves it. */
+function PendingRequirement({text,agentBusy,onOpenAssistant}:{text:string;agentBusy:boolean;onOpenAssistant?:()=>void}){
+  const status=agentBusy?'Preparing checks…':'Waiting for your reply';
+  return <article className="rq-card rq-pending" aria-busy={agentBusy} aria-label={`Pending requirement: ${status}`}>
+    <div className="rq-pending-status" role="status">
+      {agentBusy?<span className="cloud-spinner" aria-hidden="true"/>:<span className="rq-pending-dot" aria-hidden="true"/>}
+      <span className={agentBusy?'thinking-label':'rq-pending-wait'}>{status}</span>
+      {!agentBusy&&onOpenAssistant&&<button type="button" className="rq-pending-open" onClick={onOpenAssistant} title="Open Assistant to reply">Reply</button>}
+    </div>
+    <p className="rq-pending-text"><ChipText raw={text}/></p>
+  </article>;
+}
 const errorText=(value:unknown)=>value instanceof Error?value.message:typeof value==='object'&&value&&'message' in value?String((value as {message:unknown}).message):String(value);
 
 /** Models listed in the project's source catalog (the Explorer's Models section). */
@@ -38,7 +50,7 @@ export function useProjectModels(workspace?:string,revision?:string):Requirement
  * Lives in the shared sidebar, independent of the focused tab: models without a tab are
  * prepared in the background to run, and replay opens a separate temporary view.
  */
-export function Requirements({project,projectRunnable,models,focusedModel,modelViews,onCreate,onEdit,onChanged,onAsk,agentBusy=false}:{
+export function Requirements({project,projectRunnable,models,focusedModel,modelViews,onCreate,onEdit,onChanged,onAsk,onOpenAssistant,agentBusy=false,catalog:sharedCatalog}:{
   /** Workspace that owns the catalog (project root, or a standalone design). */
   project:string;
   /** The project workspace is itself a design that unassigned requirements can run on. */
@@ -52,15 +64,19 @@ export function Requirements({project,projectRunnable,models,focusedModel,modelV
   onChanged:()=>void;
   /** Send a message to the assistant (answers, allowance drafts, rule removal). `mentioned` models are prepared first. */
   onAsk?:(request:string,mentioned:ModelRef[])=>Promise<void>|void;
+  onOpenAssistant?:()=>void;
   agentBusy?:boolean;
+  catalog?:ReturnType<typeof useRequirementCatalog>;
 }){
-  const catalog=useRequirementCatalog(project);
+  const ownCatalog=useRequirementCatalog(sharedCatalog?undefined:project);
+  const catalog=sharedCatalog??ownCatalog;
   const sourceCatalogEpoch=useSourceCatalogEpoch();
   const [partSuggestions,setPartSuggestions]=useState<RequirementPart[]>([]);
   const [error,setError]=useState('');
   const [requirementReplay,setRequirementReplay]=useState<RequirementReplay|null>(null);
   const [creating,setCreating]=useState(false),[intent,setIntent]=useState(''),[target,setTarget]=useState(''),[drafting,setDrafting]=useState(false),[editing,setEditing]=useState<string|null>(null);
-  const [preparing,setPreparing]=useState('');
+  const [pending,setPending]=useState<{key:string;label:string;text:string}|null>(null);
+  const [prepareOpen,setPrepareOpen]=useState(true),[existingOpen,setExistingOpen]=useState(true);
   const replayRequest=useRef(0);
   useEffect(()=>{setRequirementReplay(null);return()=>{replayRequest.current++;};},[project]);
   useEffect(()=>{
@@ -105,6 +121,7 @@ export function Requirements({project,projectRunnable,models,focusedModel,modelV
     cancel:runId=>void catalog.cancelRun(runId),
     crossCheck:info=>catalog.crossCheck(info,requirementWorkspace(info)),
     ask:async(prompt,info)=>{if(!onAsk)throw new Error('The assistant is not available here.');await onAsk(prompt,mentionedRefs(info.text));},
+    openAssistant:onOpenAssistant,
     editWording:info=>composeRequirement(info),
     replay:async(info,primitiveId,worst)=>{
       const token=++replayRequest.current,sourceProject=latest.current.project;
@@ -123,10 +140,15 @@ export function Requirements({project,projectRunnable,models,focusedModel,modelV
   function composeRequirement(info:RequirementInfo){
     const model=mentionedRefs(info.text)[0]??focusedModel??null;
     const fallback=choices.find(choice=>sameModel(choice.model,model))??choices[0];
-    setEditing(info.id);setIntent(info.text);setTarget(fallback?.key??'');setCreating(true);
+    setPrepareOpen(true);setEditing(info.id);setIntent(info.text);setTarget(fallback?.key??'');setCreating(true);
+  }
+  /** The focused canvas model is the default target; otherwise the first project model. */
+  function preferredChoice(){
+    return choices.find(choice=>sameModel(choice.model,focusedModel))??choices[0];
   }
   function compose(){
-    const fallback=choices[0];
+    const fallback=preferredChoice();
+    setPrepareOpen(true);
     setEditing(null);setIntent('');setTarget(fallback?.key??'');setCreating(true);
   }
   const canSubmit=!!intent.trim()&&!agentBusy&&intent.length<=4096&&!!pickTarget(intent);
@@ -136,35 +158,42 @@ export function Requirements({project,projectRunnable,models,focusedModel,modelV
     if(!text||agentBusy||!pick)return;
     const {choice,mentioned}=pick;
     draftCount.current=count;setCreating(false);setDrafting(true);setError('');
+    // A new requirement shows as a pending entry in its model(s)' group until the assistant saves it.
+    const pendingModels=mentioned.length?mentioned:choice.model?[choice.model]:[];
+    setPending(editing?null:{key:groupKeyForModels(pendingModels),label:pendingModels.length?pendingModels.map(m=>labelOf(m)).join(' + '):choice.label,text});
     try{
-      if(choice.model)setPreparing(`Preparing ${choice.label}…`);
       if(editing&&onEdit)await onEdit(editing,text,choice.model,mentioned);else await onCreate(text,choice.model,mentioned);
-    }catch(value){setDrafting(false);setError(errorText(value));}
-    finally{setPreparing('');}
+    }catch(value){setDrafting(false);setPending(null);setError(errorText(value));}
   }
   /** Today's single-model flow: the first mentioned model that is still in the project, else the focused one. */
   function pickTarget(text:string){
     const mentioned=mentionedModels(text).filter(ref=>models.some(item=>sameModel(item.model,ref))) as ModelRef[];
-    const choice=(mentioned.length?choices.find(item=>sameModel(item.model,mentioned[0])):undefined)??choices.find(item=>item.key===target)??choices[0];
+    const choice=(mentioned.length?choices.find(item=>sameModel(item.model,mentioned[0])):undefined)??choices.find(item=>item.key===target)??preferredChoice();
     return choice?{choice,mentioned}:null;
   }
   // The assistant finished preparing: a requirement was saved, or it is waiting for answers.
   const draftCount=useRef(0);
-  useEffect(()=>{if(drafting&&count!==draftCount.current)setDrafting(false);},[count]);
-  useEffect(()=>{setCreating(false);setDrafting(false);setIntent('');setEditing(null);setPreparing('');setRequirementReplay(null);},[project]);
-  const asking=reqs.find(item=>item.approval!=='approved'&&questionsOf(item).length>0);
-  // Group by model in the order the project lists them; unknown models and unassigned last.
-  const groups=new Map<string,{label:string;detail?:string;model:ModelRef|null;reqs:RequirementInfo[]}>();
-  for(const item of models)groups.set(JSON.stringify([item.model.entry,item.model.builder]),{label:item.label,detail:item.detail,model:item.model,reqs:[]});
-  // A requirement appears under every model its text mentions (P1.81).
-  for(const [key,list] of groupByModel(reqs)){
-    if(!groups.has(key)){
-      const [entry,builder]=key?JSON.parse(key) as [string,string]:['',''];
-      const model=key?{entry,builder}:null;
-      groups.set(key,{label:model?labelOf(model):(projectRunnable?'This design':'Unassigned'),detail:model?.entry,model,reqs:[]});
-    }
-    groups.get(key)!.reqs.push(...list);
+  useEffect(()=>{if(drafting&&count!==draftCount.current){setDrafting(false);setPending(null);}},[count]);
+  useEffect(()=>{setCreating(false);setDrafting(false);setIntent('');setEditing(null);setPending(null);setRequirementReplay(null);},[project]);
+  // Group by model in the order the project lists them; multi-model, unknown and unassigned follow.
+  const groups=new Map<string,{label:string;detail?:string;detailTitle?:string;models:ModelRef[];reqs:RequirementInfo[]}>();
+  for(const item of models){
+    const file=item.detail?.split('/').at(-1);
+    groups.set(JSON.stringify([item.model.entry,item.model.builder]),{label:item.label,detail:file&&file!==item.label?file:undefined,detailTitle:item.detail,models:[item.model],reqs:[]});
   }
+  const ensureGroup=(key:string,fallbackLabel?:string)=>{
+    if(groups.has(key))return groups.get(key)!;
+    const list=modelsOfGroupKey(key);
+    const label=list.length?list.map(m=>labelOf(m)).join(' + '):(fallbackLabel??(projectRunnable?'This design':'Unassigned'));
+    const file=list.length===1?(list[0].entry.split('/').at(-1)||list[0].entry):undefined;
+    const detail=file&&file!==label?file:undefined;
+    const detailTitle=list.length?list.map(m=>m.entry).join(', '):undefined;
+    const group={label,detail,detailTitle,models:list,reqs:[]};
+    groups.set(key,group);
+    return group;
+  };
+  for(const [key,list] of groupByModel(reqs))ensureGroup(key).reqs.push(...list);
+  if(pending)ensureGroup(pending.key,pending.label);
   for(const group of groups.values())group.reqs.sort((a,b)=>statusRank(statusOf(a))-statusRank(statusOf(b)));
   const unassigned=groups.get('');if(unassigned){groups.delete('');groups.set('',unassigned);}
   function labelOf(model?:ModelRef|null){
@@ -172,26 +201,38 @@ export function Requirements({project,projectRunnable,models,focusedModel,modelV
     return models.find(item=>sameModel(item.model,model))?.label??model.entry.split('/').at(-1)??model.entry;
   }
 
-  return <><section className="motion-tests">
-    {!catalog.loaded&&!catalog.error&&<p className="muted">Loading requirements…</p>}
-    {catalog.loaded&&count>0&&!creating&&<div className="test-heading test-list-heading"><span className="muted">{count} {count===1?'requirement':'requirements'}</span><button disabled={agentBusy||!choices.length} onClick={compose}><Icon name="plus" size={13}/>New requirement…</button></div>}
-    {catalog.loaded&&!count&&!creating&&(drafting
-      ?<div className="test-empty"><Icon name="sparkles" size={24}/><h3>{preparing||(agentBusy?'Preparing checks…':'Answer the assistant')}</h3><p>{preparing||agentBusy?'The assistant will save measurable checks here for you to review.':'The assistant needs more information before it can save checks. Reply in the Assistant panel.'}</p></div>
-      :<div className="test-empty"><Icon name="tests" size={26}/><h3>No requirements yet</h3><p>{choices.length?'Describe a requirement for any model in this project. Review the checks, then check the requirement.':'Add a model to this project to define requirements for it.'}</p>{!!choices.length&&<button className="primary-button" disabled={agentBusy} onClick={compose}>New requirement…</button>}</div>)}
-    {creating&&<form className="test-composer" onSubmit={event=>void submit(event)}>
-      <RequirementComposer id="test-intent" label="What should the model do?" value={intent} onChange={setIntent} models={models} parts={partSuggestions} openModels={modelViews().map(view=>({entry:view.entry,builder:view.builder}))} autoFocus onSubmit={()=>{if(canSubmit)void submit({preventDefault(){}} as React.FormEvent);}} placeholder="@ a model or part: it should move at least 50 mm."/>
-      <p className="muted">The assistant prepares steps and pass/fail checks for the mentioned models, even if they aren't open. You review them before running.</p>
-      <div className="test-composer-actions"><button className="primary-button" type="submit" disabled={!canSubmit}>{editing?'Update checks':'Prepare requirement'}</button><button type="button" onClick={()=>setCreating(false)}>Cancel</button></div>
-    </form>}
-    {count>0&&drafting&&!creating&&<p className="muted" role="status">{preparing||(agentBusy?'The assistant is preparing checks…':'Waiting for your reply in the Assistant panel.')}</p>}
-    {preparing&&!drafting&&<p className="muted" role="status">{preparing}</p>}
-    {asking&&<QuestionFlow info={asking} questions={questionsOf(asking)} agentBusy={agentBusy} onSend={prompt=>cardActions.ask(prompt,asking)}/>}
-    {reqs.length>0&&<div className="rq-summary" role="status" aria-label="Requirement summary">{summaryOf(reqs).map(({key,label,count:n})=><span key={key} className="rq-badge">{n} {label}</span>)}</div>}
-    {[...groups.entries()].filter(([,group])=>group.reqs.length).map(([key,group])=><section className="requirement-group" key={key||'unassigned'} aria-label={`Requirements for ${group.label}`}>
-      <header className="requirement-group-heading"><Icon name={group.model?'cube':'tests'} size={13}/><strong>{group.label}</strong>{group.detail&&<small title={group.detail}>{group.detail.split('/').at(-1)}</small>}{!!group.model&&sameModel(group.model,focusedModel)&&<span className="muted">· open</span>}</header>
-      {group.reqs.map(item=><RequirementCard key={`${key}:${item.id}`} info={item} actions={cardActions}/>)}
-    </section>)}
-    {error&&<p role="alert" className="error">{error}</p>}
-    {catalog.error&&catalog.error!==error&&<p role="alert" className="error">{catalog.error}</p>}
+  return <><section className="requirements">
+    {!catalog.loaded&&!catalog.error&&<p className="muted test-loading">Loading requirements…</p>}
+    <div className="test-sections">
+      <section className="test-section">
+        <header className="test-section-heading"><button type="button" aria-expanded={prepareOpen} aria-controls="test-prepare-body" onClick={()=>setPrepareOpen(open=>!open)}><Icon name="chevron" size={11}/><span className="test-section-title">Preparation</span></button></header>
+        {prepareOpen&&<div id="test-prepare-body" className="test-section-body">
+          {creating
+            ?<form className="test-composer" onSubmit={event=>void submit(event)}>
+              <RequirementComposer id="test-intent" label="What should the model do?" value={intent} onChange={setIntent} models={models} parts={partSuggestions} openModels={modelViews().map(view=>({entry:view.entry,builder:view.builder}))} autoFocus onSubmit={()=>{if(canSubmit)void submit({preventDefault(){}} as React.FormEvent);}} placeholder="@ a model or part: it should move at least 50 mm."/>
+              <div className="test-composer-actions"><button className="primary-button" type="submit" disabled={!canSubmit}>{editing?'Update checks':'Prepare requirement'}</button><button type="button" onClick={()=>setCreating(false)}>Cancel</button></div>
+            </form>
+            :<button className="primary-button" disabled={agentBusy||!choices.length} onClick={compose}><Icon name="plus" size={13}/>New requirement…</button>}
+          {drafting&&!creating&&!pending&&<p className="muted" role="status">{agentBusy?'The assistant is updating checks…':'Waiting for your reply in the Assistant panel.'}</p>}
+        </div>}
+      </section>
+      <section className="test-section">
+        <header className="test-section-heading"><button type="button" aria-expanded={existingOpen} aria-controls="test-existing-body" onClick={()=>setExistingOpen(open=>!open)}><Icon name="chevron" size={11}/><span className="test-section-title">Existing requirements</span>{(count>0||pending)&&<span className="test-section-count">{count+(pending?1:0)}</span>}</button></header>
+        {existingOpen&&<div id="test-existing-body" className="test-section-body">
+          {reqs.length>1&&<div className="rq-summary" role="status" aria-label="Requirement summary">{summaryOf(reqs).map(({key,label,count:n})=><span key={key} className="rq-badge">{n} {label}</span>)}</div>}
+          {[...groups.entries()].filter(([key,group])=>group.reqs.length||pending?.key===key).map(([key,group])=>{
+            const groupCount=group.reqs.length+(pending?.key===key?1:0);
+            return <section className="requirement-group" key={key||'unassigned'} aria-label={`Requirements for ${group.label}`}>
+              <header className="requirement-group-heading" title={group.detailTitle}><Icon name={group.models.length?'cube':'tests'} size={13}/><strong>{group.label}</strong>{group.detail&&<small>{group.detail}</small>}{groupCount>1&&<span className="requirement-group-count">{groupCount}</span>}</header>
+              {pending?.key===key&&<PendingRequirement text={pending.text} agentBusy={agentBusy} onOpenAssistant={onOpenAssistant}/>}
+              {group.reqs.map(item=><RequirementCard key={`${key}:${item.id}`} info={item} actions={cardActions}/>)}
+            </section>;
+          })}
+          {catalog.loaded&&!count&&!pending&&<div className="test-empty"><Icon name="tests" size={20}/><h3>No requirements yet</h3><p>{choices.length?'Describe a requirement for any model in this project. Review the checks, then check the requirement.':'Add a model to this project to define requirements for it.'}</p></div>}
+        </div>}
+      </section>
+    </div>
+    {error&&<p role="alert" className="error test-alert">{error}</p>}
+    {catalog.error&&catalog.error!==error&&<p role="alert" className="error test-alert">{catalog.error}</p>}
   </section>{requirementReplay&&<RequirementReplayPanel replay={requirementReplay} onClose={()=>setRequirementReplay(null)}/>}</>;
 }

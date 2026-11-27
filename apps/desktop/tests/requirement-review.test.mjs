@@ -137,7 +137,7 @@ test('spans are Unicode scalar offsets: highlight with non-BMP characters',async
   // Out-of-range and malformed spans never throw.
   assert.doesNotThrow(()=>m.highlightSegments('abc',{title:'t',sets:[],lines:[line({span:[2,99]}),line({span:[5,1]}),line({span:null})],details:[]},[]));
   assert.deepEqual(m.highlightSegments('',null,[]),[]);
-  assert.deepEqual(m.highlightSegments('door opens',null,[]).map(s=>s.kind),['uncovered']);
+  assert.deepEqual(m.highlightSegments('door opens',null,[]).map(s=>s.kind),['plain']);
   // A chip token is never split by a span that ends inside it.
   const chip='@[Door](cabinet.py#cabinet/door) opens';
   const split=m.highlightSegments(chip,{title:'t',sets:[],lines:[line({span:[0,8]})],details:[]},[]);
@@ -183,7 +183,11 @@ test('needs-review diff is plain language and finding selection tracks live ids'
   assert.equal(m.findingStates(finding('a','new')),'angle = 126 deg to angle = 132 deg');
   const prompt=m.allowancePrompt({id:'req-1',name:'Clamps'},[finding('a','new'),finding('c','still_failing')]);
   assert.match(prompt,/finding a:/);assert.match(prompt,/finding c:/);assert.match(prompt,/clamp_2 and rotor/);assert.match(prompt,/Do not approve/);
-  assert.deepEqual([...m.groupByModel([{text:'@[A](a.py#a) next to @[B](b.py#b) and @[A](a.py#a)'},{text:'no chips'}]).keys()],[JSON.stringify(['a.py','a']),JSON.stringify(['b.py','b']),'']);
+  const grouped=m.groupByModel([{text:'@[A](a.py#a) next to @[B](b.py#b) and @[A](a.py#a)'},{text:'@[A](a.py#a) alone'},{text:'no chips'}]);
+  assert.deepEqual([...grouped.keys()],[JSON.stringify([['a.py','a'],['b.py','b']]),JSON.stringify(['a.py','a']),'']);
+  assert.deepEqual(m.modelsOfGroupKey(JSON.stringify([['a.py','a'],['b.py','b']])),[{entry:'a.py',builder:'a'},{entry:'b.py',builder:'b'}]);
+  assert.deepEqual(m.modelsOfGroupKey(JSON.stringify(['a.py','a'])),[{entry:'a.py',builder:'a'}]);
+  assert.deepEqual(m.modelsOfGroupKey(''),[]);
  }finally{await cleanup();}
 });
 
@@ -226,7 +230,7 @@ test('review card: highlight, inferred marker, disabled Approve with reason, app
   current={...current,diagnostics:[{code:'E_BIND_PART_MISSING',severity:'error',at:'claims[0]',message:'Part frame not found',fix:null}]};
   await act(async()=>{await new Promise(r=>setTimeout(r,2100));});
   const blocked=[...root_.querySelectorAll('button')].find(b=>b.textContent==='Approve');
-  assert.equal(blocked.disabled,true);assert.match(root_.querySelector('#block-req-1').textContent,/Fix 1 problem first: Part frame not found/);
+  assert.equal(blocked.disabled,true);assert.match(root_.querySelector('#block-req-1').textContent,/Part frame not found/);
   assert.equal(blocked.getAttribute('aria-describedby'),'block-req-1');
   assert.equal(m.approveBlock(info({draft_hashes:null})).startsWith('The reviewed version is not available'),true);
   // Approve sends exactly the reviewed hashes and the catalog fingerprint.
@@ -371,16 +375,32 @@ test('cards: needs-review diff + Re-approve, results, inconclusive, findings acc
   assert.match(host().textContent,/1 of 2/);assert.equal(host().querySelector('mark').textContent,'freely');
   const radios=[...host().querySelectorAll('input[type=radio]')];
   assert.equal(radios[0].checked,true,'the suggestion is pre-selected');assert.match(host().querySelector('.rq-suggested').textContent,/Suggested/);
+  assert.equal(radios.at(-1).value,'__other__','includes an Other option');
   assert.ok(button('Use suggested for the rest'));
   await act(async()=>button('Next').click());
   assert.match(host().textContent,/2 of 2/);assert.equal(asks.length,1,'nothing is sent until the last answer');
-  await act(async()=>[...host().querySelectorAll('input[type=radio]')][1].click());
+  await act(async()=>[...host().querySelectorAll('input[type=radio]')].at(-1).click());
+  const otherInput=host().querySelector('input.rq-answer-text');assert.ok(otherInput,'selecting Other reveals a text input');
+  await act(async()=>{const setter=Object.getOwnPropertyDescriptor(window.window.HTMLInputElement.prototype,'value').set;setter.call(otherInput,'Custom answer');otherInput.dispatchEvent(new window.window.Event('input',{bubbles:true}));});
   await act(async()=>button('Send answers').click());
-  assert.equal(asks.length,2);assert.match(asks[1],/It never touches the base \(your suggested answer\)|It never touches the base/);assert.match(asks[1],/No/);assert.match(asks[1],/Do not run it and do not approve it/);
+  assert.equal(asks.length,2);assert.match(asks[1],/It never touches the base \(your suggested answer\)|It never touches the base/);assert.match(asks[1],/Custom answer/);assert.match(asks[1],/Do not run it and do not approve it/);
   assert.match(host().textContent,/went to the assistant/);
   // Draft whose question is open shows no Approve and points to the question.
   await render(React.createElement(m.RequirementCard,{info:drafted,actions}));
   assert.equal(button('Approve'),undefined);assert.match(host().textContent,/Waiting for your answer/);
+  assert.equal(host().querySelector('.rq-badge').textContent,'Needs answer');
+
+  // Draft with no print and duplicate build errors: no "can't measure it", errors deduplicated & formatted, badge is Needs fix.
+  const buildErr={code:'E_BUILD',severity:'error',at:'claims[0]',message:"@parts/tensioner/crank_screw/v1/carriage_frame_assembly.py#carriage_frame_assembly failed to build: name 'import_stl' is not defined",fix:null};
+  const failedDraft=info({text:'@[carriage.stl](parts/tensioner/crank_screw/v1/stl/carriage.stl#$file) must attach to @[Frame](parts/tensioner/crank_screw/v1/mount.py#frame)',print:null,rendered:null,diagnostics:[buildErr,{...buildErr,at:'claims[1]'},{...buildErr,at:'claims[2]'}]});
+  await render(React.createElement(m.RequirementCard,{info:failedDraft,actions}));
+  assert.equal(host().querySelector('.rq-badge').textContent,'Needs fix');
+  assert.equal(host().querySelector('.rq-prose .unc'),null,'no false uncovered highlight when print is missing');
+  assert.doesNotMatch(host().textContent,/can’t measure|won’t be checked/);
+  assert.equal(host().querySelectorAll('.rq-callout.bad li').length,0,'single deduplicated error renders without a bullet list');
+  assert.match(host().querySelector('.rq-callout.bad').textContent,/carriage_frame_assembly\.py failed to build: name 'import_stl' is not defined/);
+  assert.doesNotMatch(host().querySelector('.rq-callout.bad').textContent,/parts\/tensioner/);
+  assert.equal(host().querySelectorAll('#block-req-1').length,1,'error is not duplicated below the buttons');
   await act(async()=>root.unmount());
  }finally{try{await act(async()=>root.unmount());}catch{}console.error=error;window.window.close();await cleanup();}
 });

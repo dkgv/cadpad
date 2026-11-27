@@ -92,7 +92,7 @@ export function MentionTextarea({value,onValueChange,items,onMention,openModels=
   const sources=open?items.map(item=>({choice:{...baseChoice(item),rank:openRank(item),icon:<Icon name={item.kind==='folder'?'folder':'file'} size={14}/>},item})):[];
   const filtered=filterMentions(sources.map(source=>source.choice),query);
   const choices=orderMentions(filtered,query).slice(0,50);
-  const {active,selected,move,hover,reset}=useMentionSelection(choices.length);
+  const {active,selected,move,hover,reset}=useMentionSelection(choices.length,0);
   const byKey=new Map(sources.map(source=>[source.choice.key,source.item]));
   const activeIndex=clampIndex(active,choices.length);
   const pick=(choice:MentionChoice)=>byKey.get(choice.key);

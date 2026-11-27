@@ -164,6 +164,37 @@ test('composer: picker, chips, keyboard, paste, stale chips',async()=>{
  }
 });
 
+test('composer: Enter prepares while Shift+Enter adds a line',async()=>{
+ const {module:{RequirementComposer},cleanup}=await load('../src/requirement-composer.tsx');
+ const dom=new JSDOM('<div id="root"></div>',{url:'https://tauri.localhost'});
+ for(const key of ['window','document','navigator','HTMLElement','HTMLBRElement','Node','Event','KeyboardEvent','MouseEvent'])Object.defineProperty(globalThis,key,{value:dom.window[key],configurable:true});
+ globalThis.IS_REACT_ACT_ENVIRONMENT=true;
+ const {createRoot}=await import('react-dom/client');
+ const root=createRoot(document.getElementById('root'));
+ const models=[{model:{entry:'door.py',builder:'door'},label:'Door',detail:'door.py'}];
+ let value='',submits=0;
+ const view=()=>React.createElement(RequirementComposer,{value,onChange:next=>{value=next;},models,label:'What should the model do?',onSubmit:()=>{submits++;}});
+ const editor=()=>document.querySelector('[role=textbox]');
+ const caret=(node,offset)=>{const range=document.createRange();range.setStart(node,offset);range.collapse(true);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);};
+ const type=async text=>act(async()=>{const el=editor();const node=document.createTextNode(text);el.append(node);caret(node,text.length);el.dispatchEvent(new window.Event('input',{bubbles:true}));});
+ const key=async(name,init={})=>{let event;await act(async()=>{event=new window.KeyboardEvent('keydown',{key:name,bubbles:true,cancelable:true,...init});editor().dispatchEvent(event);});return event;};
+ const error=console.error;console.error=()=>{};
+ try{
+  await act(async()=>root.render(view()));
+  await type('Door must open');
+  const enter=await key('Enter');
+  assert.equal(enter.defaultPrevented,true);
+  assert.equal(submits,1);
+  assert.equal(value,'Door must open');
+  await key('Enter',{shiftKey:true});
+  assert.equal(submits,1);
+  assert.equal(value,'Door must open\n');
+ }finally{
+  console.error=error;
+  await act(async()=>root.unmount());dom.window.close();await cleanup();
+ }
+});
+
 test('composer: open models list first, then best matches when filtering',async()=>{
  const {module:{RequirementComposer},cleanup}=await load('../src/requirement-composer.tsx');
  const dom=new JSDOM('<div id="root"></div>',{url:'https://tauri.localhost'});

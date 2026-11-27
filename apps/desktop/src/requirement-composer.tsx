@@ -1,6 +1,6 @@
 import React,{useEffect,useId,useLayoutEffect,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
-import type {RequirementModel} from './motion-tests';
+import type {RequirementModel} from './requirements';
 import {parseTokens,tokenFor} from './requirement-tokens';
 import {MentionList,clampIndex,filterMentions,matchesMention,mentionPopupPosition,orderMentions,useMentionSelection,type MentionChoice} from './mention-list';
 import {PART_FORMAT_ORDER,parsePartFile,partFileKey} from './part-files';
@@ -268,11 +268,10 @@ export function RequirementComposer({id,value,onChange,models,parts=[],openModel
 
   function onKeyDown(event:React.KeyboardEvent<HTMLDivElement>){
     if(event.nativeEvent.isComposing)return;
-    const submit=event.key==='Enter'&&(event.metaKey||event.ctrlKey);
-    if(open&&choices.length&&!submit){
+    if(open&&choices.length){
       if(event.key==='ArrowDown'){event.preventDefault();move(1,event.shiftKey);return;}
       if(event.key==='ArrowUp'){event.preventDefault();move(-1,event.shiftKey);return;}
-      if((event.key==='Enter'||event.key==='Tab')&&activeIndex>=0){
+      if((event.key==='Enter'||event.key==='Tab')&&!event.shiftKey&&activeIndex>=0){
         event.preventDefault();
         const picks=[...selected].sort((a,b)=>a-b).map(index=>choices[index]).filter((choice):choice is MentionChoice=>!!choice);
         if(picks.length)chooseChoices(picks);
@@ -286,7 +285,7 @@ export function RequirementComposer({id,value,onChange,models,parts=[],openModel
     }
     if(event.key==='Enter'){
       event.preventDefault();
-      if(submit){onSubmit?.();return;}
+      if(!event.shiftKey){onSubmit?.();return;}
       const selection=window.getSelection();
       if(selection?.rangeCount)insertAt(selection.getRangeAt(0),[document.createElement('br')]);
       emit();return;
@@ -326,7 +325,7 @@ export function RequirementComposer({id,value,onChange,models,parts=[],openModel
   return <div className="req-composer">
     <label id={`${inputId}-label`} onClick={()=>editor.current?.focus()}>{label}</label>
     <div className="req-editor-wrap">
-      <div ref={editor} id={inputId} className="req-editor" role="textbox" aria-multiline="true" aria-labelledby={`${inputId}-label`} aria-describedby={hintId}
+      <div ref={editor} id={inputId} className="req-editor" role="textbox" aria-multiline="true" aria-labelledby={`${inputId}-label`}
         aria-haspopup="listbox" aria-expanded={open} aria-controls={open?listId:undefined} aria-autocomplete="list"
         aria-activedescendant={open&&choices.length&&activeIndex>=0?optionId(activeIndex):undefined}
         contentEditable suppressContentEditableWarning spellCheck data-empty={empty||undefined} data-placeholder={placeholder}
@@ -337,6 +336,5 @@ export function RequirementComposer({id,value,onChange,models,parts=[],openModel
         style={position} selected={selected} onHover={hover} onChoose={chooseChoice}
         empty={<div className="req-picker-empty" role="status">{models.length||parts.length?'No matching model or part':'No models in this project'}</div>}/>,document.body)}
     </div>
-    <p id={hintId} className="muted">Type @ to mention a model or its published part. Enter adds a line; Cmd/Ctrl+Enter prepares.</p>
   </div>;
 }

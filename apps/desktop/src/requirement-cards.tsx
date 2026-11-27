@@ -1,7 +1,8 @@
 import React,{useCallback,useEffect,useMemo,useRef,useState} from 'react';
+import {MentionTextarea,type MentionItem} from './mention-textarea';
 import {parseTokens} from './requirement-tokens';
 import {
-  STATUS_TEXT,FINDING_TEXT,allowancePrompt,answersPrompt,approveBlock,canAccept,errorsOf,findingStates,formatQuantity,headlinePrimitive,highlightSegments,needsApproval,notRun,
+  STATUS_TEXT,FINDING_TEXT,allowancePrompt,answersPrompt,approveBlock,canAccept,errorsOf,findingStates,formatDiagnosticMessage,formatQuantity,headlinePrimitive,highlightSegments,needsApproval,notRun,
   pairText,partNames,printDiff,pruneSelection,questionsOf,readResult,removeRulePrompt,resultIsPrevious,sliceScalars,stateStrip,statusOf,statusTone,toggleSelection,
   type Finding,type PrimitiveResult,type ProsePrintAdvisory,type Question,type RequirementInfo,type RequirementRun,type ResultView,type Worst,
 } from './requirement-review';
@@ -14,11 +15,41 @@ export type CardActions={
   ask:(prompt:string,info:RequirementInfo)=>Promise<void>|void;
   editWording:(info:RequirementInfo)=>void;
   replay:(info:RequirementInfo,primitiveId:string,sample:Worst)=>Promise<void>;
+  openAssistant?:()=>void;
 };
 
-/** Requirement text with `@[Label](entry#builder)` tokens drawn as chips. */
-export function ChipText({raw}:{raw:string}){
-  return <>{parseTokens(raw).map((segment,index)=>segment.kind==='text'?<React.Fragment key={index}>{segment.text}</React.Fragment>:<span key={index} className="req-chip" title={segment.part?`${segment.entry} / ${segment.part}`:segment.entry}>{segment.label}</span>)}</>;
+type ModelTarget={entry:string;builder:string};
+
+/** Split plain text on `@path` mentions that resolve to a project model. */
+function renderTextWithModelMentions(text:string,resolveModel?:(path:string)=>ModelTarget|undefined,onOpenModel?:(entry:string,builder:string)=>void,keyPrefix='t'):React.ReactNode[]{
+  if(!resolveModel||!onOpenModel)return [<React.Fragment key={keyPrefix}>{text}</React.Fragment>];
+  const out:React.ReactNode[]=[];
+  const pattern=/(^|[\s\n])@([^\s@]+)/g;
+  let last=0,match:RegExpExecArray|null,index=0;
+  while((match=pattern.exec(text))){
+    const prefix=match[1],rawToken=match[2];
+    const clean=rawToken.replace(/[.,:;)?!]+$/,'');
+    const trailing=rawToken.slice(clean.length);
+    const target=clean?resolveModel(clean):undefined;
+    if(!target)continue;
+    const atStart=match.index+prefix.length;
+    if(atStart>last)out.push(<React.Fragment key={`${keyPrefix}-s${index}`}>{text.slice(last,atStart)}</React.Fragment>);
+    out.push(<button type="button" key={`${keyPrefix}-m${index}`} className="req-chip is-link" title={target.entry} onClick={()=>onOpenModel(target.entry,target.builder)}>@{clean}</button>);
+    if(trailing)out.push(<React.Fragment key={`${keyPrefix}-e${index}`}>{trailing}</React.Fragment>);
+    last=match.index+match[0].length;
+    index++;
+  }
+  if(last<text.length)out.push(<React.Fragment key={`${keyPrefix}-tail`}>{text.slice(last)}</React.Fragment>);
+  return out.length?out:[<React.Fragment key={keyPrefix}>{text}</React.Fragment>];
+}
+
+/** Requirement text with `@[Label](entry#builder)` tokens (and optional `@path` model mentions) drawn as chips. */
+export function ChipText({raw,resolveModel,onOpenModel}:{raw:string;resolveModel?:(path:string)=>ModelTarget|undefined;onOpenModel?:(entry:string,builder:string)=>void}){
+  return <>{parseTokens(raw).map((segment,index)=>segment.kind==='text'
+    ?<React.Fragment key={index}>{renderTextWithModelMentions(segment.text,resolveModel,onOpenModel,`seg-${index}`)}</React.Fragment>
+    :onOpenModel
+      ?<button type="button" key={index} className="req-chip is-link" title={segment.part?`${segment.entry} / ${segment.part}`:segment.entry} onClick={()=>onOpenModel(segment.entry,segment.builder)}>{segment.label}</button>
+      :<span key={index} className="req-chip" title={segment.part?`${segment.entry} / ${segment.part}`:segment.entry}>{segment.label}</span>)}</>;
 }
 /** Capitalise a plain word; names like `clamp_2` stay as written (mirrors core's print). */
 const sentence=(text:string)=>/^\p{L}+(\s|$)/u.test(text)?text.charAt(0).toUpperCase()+text.slice(1):text;
@@ -26,17 +57,40 @@ const Badge=({status,children}:{status:ReturnType<typeof statusOf>;children?:Rea
 
 // ---------------------------------------------------------------- questions
 
+/** Format `path/to/file.py#builder(/part)` options into a concise title + muted folder path; plain options stay as-is. */
+function formatOption(option:string):{title:string;detail?:string}{
+  const hash=option.indexOf('#');
+  if(hash<=0||/\s/.test(option))return {title:option};
+  const entry=option.slice(0,hash),rest=option.slice(hash+1);
+  if(!rest)return {title:option};
+  const slash=rest.indexOf('/');
+  const builder=slash<0?rest:rest.slice(0,slash),part=slash<0?undefined:rest.slice(slash+1);
+  const file=entry.split('/').at(-1)||entry;
+  const dir=entry.slice(0,entry.length-file.length).replace(/\/$/,'');
+  const stem=file.replace(/\.[^.]+$/,'');
+  const title=part?`${part} · ${file}`:(builder==='$file'||builder===stem?file:`${builder} · ${file}`);
+  return {title,detail:dir||undefined};
+}
+
 /**
  * One question at a time (P1.75). Answers go to the assistant as a single message; the user never edits the IR.
  * `E_VAGUE` / `ask_user` diagnostics supply the question and options; the first option is the suggestion.
  */
-export function QuestionFlow({info,questions,agentBusy,onSend}:{info:RequirementInfo;questions:Question[];agentBusy:boolean;onSend:(prompt:string)=>Promise<void>|void}){
+export function QuestionFlow({info,questions,agentBusy,onSend,mentionItems,openModels}:{info:RequirementInfo;questions:Question[];agentBusy:boolean;onSend:(prompt:string)=>Promise<void>|void;mentionItems?:MentionItem[];openModels?:string[]}){
   const signature=questions.map(item=>item.key).join('\n');
   const [answers,setAnswers]=useState<Record<string,{answer:string;suggested:boolean}>>({});
-  const [reopened,setReopened]=useState<string|null>(null),[choice,setChoice]=useState(''),[sent,setSent]=useState(''),[error,setError]=useState('');
+  const [reopened,setReopened]=useState<string|null>(null),[choice,setChoice]=useState(''),[isOther,setIsOther]=useState(false),[otherText,setOtherText]=useState(''),[sent,setSent]=useState(''),[error,setError]=useState('');
   useEffect(()=>{setAnswers({});setReopened(null);setError('');},[info.id,signature]);
   const open=reopened?questions.find(item=>item.key===reopened):questions.find(item=>!answers[item.key]);
-  useEffect(()=>{if(open)setChoice(answers[open.key]?.answer??open.options[0]??'');},[open?.key]);
+  useEffect(()=>{
+    if(!open)return;
+    const prev=answers[open.key]?.answer;
+    if(prev!==undefined&&open.options.length&&!open.options.includes(prev)){
+      setIsOther(true);setOtherText(prev);setChoice(open.options[0]??'');
+    }else{
+      setIsOther(false);setOtherText('');setChoice(prev??open.options[0]??'');
+    }
+  },[open?.key]);
   const position=open?questions.indexOf(open)+1:questions.length;
   async function finish(next:Record<string,{answer:string;suggested:boolean}>){
     setError('');
@@ -58,17 +112,24 @@ export function QuestionFlow({info,questions,agentBusy,onSend}:{info:Requirement
   }
   const answered=questions.filter(item=>answers[item.key]);
   const remaining=questions.filter(item=>!answers[item.key]);
+  const effective=open?(isOther?otherText.trim():choice.trim()):'';
   if(sent===signature)return <section className="rq-card rq-question" aria-label="Question sent"><p role="status" className="muted">Your answers went to the assistant. It will update the requirement for you to review.</p></section>;
   return <section className="rq-card rq-question" aria-label={`Question about ${info.name}`}>
-    <div className="rq-head"><strong>Quick question</strong><span className="muted" aria-live="polite">{open?`${position} of ${questions.length}`:'All answered'}</span></div>
+    <div className="rq-head"><strong>Quick question · {info.name}</strong><span className="muted" aria-live="polite">{open?`${position} of ${questions.length}`:'All answered'}</span></div>
     {answered.length>0&&<ul className="rq-answered" aria-label="Your answers so far">{answered.map(item=><li key={item.key}><span>{item.quote||item.at}: <b>{answers[item.key].answer}</b></span><button type="button" className="rq-link" onClick={()=>setReopened(item.key)}>Change</button></li>)}</ul>}
-    {open&&<form onSubmit={event=>{event.preventDefault();if(choice.trim())answer(open,choice.trim(),!!open.options.length&&choice===open.options[0]);}}>
+    {open&&<form onSubmit={event=>{event.preventDefault();if(effective)answer(open,effective,!isOther&&!!open.options.length&&choice===open.options[0]);}}>
       {open.quote&&<p className="rq-quote" aria-label="Your sentence"><ChipText raw={sliceScalars(info.text,0,open.span![0])}/><mark><ChipText raw={open.quote}/></mark><ChipText raw={sliceScalars(info.text,open.span![1],Infinity)}/></p>}
       <fieldset className="rq-options"><legend className="rq-question-text">{open.question}</legend>
-        {open.options.map((option,index)=><label key={option} className={choice===option?'on':''}><input type="radio" name={`q-${open.key}`} value={option} checked={choice===option} onChange={()=>setChoice(option)} autoFocus={index===0}/><span>{option}{index===0&&<small className="rq-suggested">Suggested</small>}</span></label>)}
-        {!open.options.length&&<input type="text" className="rq-answer-text" aria-label="Your answer" value={choice} onChange={event=>setChoice(event.target.value)} placeholder="Your answer" autoFocus/>}
+        {open.options.map((option,index)=>{
+          const formatted=formatOption(option);
+          return <label key={option} className={!isOther&&choice===option?'on':''} title={formatted.detail?option:undefined}><input type="radio" name={`q-${open.key}`} value={option} checked={!isOther&&choice===option} onChange={()=>{setIsOther(false);setChoice(option);}} autoFocus={index===0}/><span className="rq-option-body"><span className="rq-option-title">{formatted.title}{index===0&&<small className="rq-suggested">Suggested</small>}</span>{formatted.detail&&<small className="rq-option-detail">{formatted.detail}</small>}</span></label>;
+        })}
+        {open.options.length>0&&<label className={isOther?'on':''}><input type="radio" name={`q-${open.key}`} value="__other__" checked={isOther} onChange={()=>setIsOther(true)}/><span>Other…</span></label>}
+        {(isOther||!open.options.length)&&(mentionItems
+          ?<MentionTextarea className="rq-answer-text" rows={2} aria-label="Your answer" value={isOther?otherText:choice} onValueChange={value=>isOther?setOtherText(value):setChoice(value)} items={mentionItems} openModels={openModels} placeholder="Type your answer… Type @ to tag files or folders" autoFocus={isOther||!open.options.length} onKeyDown={event=>{if(!event.defaultPrevented&&event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(effective&&!agentBusy)answer(open,effective,!isOther&&!!open.options.length&&choice===open.options[0]);}}}/>
+          :<input type="text" className="rq-answer-text" aria-label="Your answer" value={isOther?otherText:choice} onChange={event=>isOther?setOtherText(event.target.value):setChoice(event.target.value)} placeholder="Type your answer…" autoFocus={isOther||!open.options.length}/>)}
       </fieldset>
-      <div className="rq-actions"><button type="submit" className="primary-button" disabled={!choice.trim()||agentBusy}>{remaining.length>1||reopened?'Next':'Send answers'}</button>
+      <div className="rq-actions"><button type="submit" className="primary-button" disabled={!effective||agentBusy}>{remaining.length>1||reopened?'Next':'Send answers'}</button>
         {remaining.length>1&&remaining.every(item=>item.options.length)&&<button type="button" onClick={useSuggested}>Use suggested for the rest</button>}</div>
     </form>}
     {error&&<p role="alert" className="error">{error}</p>}
@@ -88,7 +149,7 @@ function ReviewBody({info,actions,previous}:{info:RequirementInfo;actions:CardAc
   const diff=edited?printDiff(info.approved?.print,print):[];
   const numbered=(print?.lines??[]);
   return <>
-    <span className="rq-label">You wrote</span>
+    {print&&<span className="rq-label">You wrote</span>}
     <p className="rq-prose" aria-label="Your requirement with what was understood">{segments.map((item,index)=>{
       const on=!!item.claim&&linked===item.claim;
       if(item.kind==='covered'||item.kind==='inferred')return <span key={index} className={`cov${item.kind==='inferred'?' inf':''}${on?' on':''}`} tabIndex={0} data-claim={item.claim} aria-label={item.kind==='inferred'?'Read between the lines':'Understood'} onMouseEnter={()=>setLinked(item.claim??null)} onMouseLeave={()=>setLinked(null)} onFocus={()=>setLinked(item.claim??null)} onBlur={()=>setLinked(null)}><ChipText raw={item.raw}/></span>;
@@ -96,9 +157,10 @@ function ReviewBody({info,actions,previous}:{info:RequirementInfo;actions:CardAc
       return <span key={index}><ChipText raw={item.raw}/></span>;
     })}</p>
     {print&&<div className="rq-legend" aria-hidden="true"><span><i className="l-cov"/>understood</span><span><i className="l-inf"/>read between the lines</span><span><i className="l-unc"/>not checked</span></div>}
-    {uncovered.length>0&&<div className="rq-callout warn" role="note"><div><b>{uncovered.map(item=>`“${item.raw.replace(/^[\s,.;:]+|[\s,.;:]+$/g,'')}”`).join(' and ')} won’t be checked.</b> Cadpad can’t measure {uncovered.length===1?'it':'them'}, so the result will say so.</div></div>}
-    {errors.length>0&&<div className="rq-callout bad" role="alert"><div><b>{errors.length===1?'One problem':`${errors.length} problems`} to fix before approval.</b><ul>{errors.map((item,index)=><li key={index}>{item.message}</li>)}</ul></div></div>}
-    {warnings.map((item,index)=><div key={index} className="rq-callout warn" role="note"><div>{item.message}</div></div>)}
+    {uncovered.length>0&&<div className="rq-callout warn" role="note"><div><b>{uncovered.map((item,index)=><React.Fragment key={index}>{index>0&&' and '}“<ChipText raw={item.raw.replace(/^[\s,.;:]+|[\s,.;:]+$/g,'')}/>”</React.Fragment>)} won’t be checked.</b> Cadpad can’t measure {uncovered.length===1?'it':'them'}, so the result will say so.</div></div>}
+    {errors.length===1&&<div className="rq-callout bad" role="alert" id={`block-${info.id}`} title={errors[0].message}>{formatDiagnosticMessage(errors[0].message)}</div>}
+    {errors.length>1&&<div className="rq-callout bad" role="alert" id={`block-${info.id}`}><ul>{errors.map((item,index)=><li key={index} title={item.message}>{formatDiagnosticMessage(item.message)}</li>)}</ul></div>}
+    {warnings.map((item,index)=><div key={index} className="rq-callout warn" role="note"><div title={item.message}>{formatDiagnosticMessage(item.message)}</div></div>)}
     {edited&&diff.length>0&&<><span className="rq-label">What changed since you approved</span><DiffTable rows={diff}/></>}
     {print&&<><span className="rq-label">Cadpad will check</span>
       {print.sets.length>0&&<ul className="rq-sets">{print.sets.map((line,index)=><li key={index}>{line.text}</li>)}</ul>}
@@ -121,16 +183,16 @@ function PreviousLine({result,info}:{result:ResultView;info:RequirementInfo}){
 
 /** Review of a draft (never approved, or edited since) and the single Approve (P1.76, P1.79). */
 function ReviewCard({info,actions,previous}:{info:RequirementInfo;actions:CardActions;previous:ResultView|null}){
-  const block=approveBlock(info),edited=info.approval==='edited_since_approval';
+  const block=approveBlock(info),edited=info.approval==='edited_since_approval',hasErrors=errorsOf(info.diagnostics).length>0;
   const advisoryKey=JSON.stringify([info.id,info.draft_hash,info.draft_hashes,info.rendered]);
   return <>
     <ReviewBody info={info} actions={actions} previous={previous}/>
     <ProsePrintReview key={advisoryKey} info={info} actions={actions}/>
     <div className="rq-actions">
-      <button type="button" className="primary-button" disabled={!!block||actions.busy===info.id} aria-describedby={block?`block-${info.id}`:undefined} onClick={()=>actions.approve(info)}>{actions.busy===info.id?'Approving…':edited?'Re-approve':'Approve'}</button>
+      <button type="button" className="primary-button" disabled={!!block||actions.busy===info.id} title={block??undefined} aria-describedby={block?`block-${info.id}`:undefined} onClick={()=>actions.approve(info)}>{actions.busy===info.id?'Approving…':edited?'Re-approve':'Approve'}</button>
       <button type="button" disabled={actions.agentBusy} onClick={()=>actions.editWording(info)}>Edit wording</button>
     </div>
-    {block&&<p className="rq-hint" id={`block-${info.id}`}>{block}</p>}
+    {block&&!hasErrors&&<p className="rq-hint" id={`block-${info.id}`}>{block}</p>}
     {!block&&(info.print?.lines??[]).some(line=>line.inferred)&&<p className="rq-hint">Approving also confirms the inferred {(info.print?.lines??[]).filter(line=>line.inferred).length===1?'rule':'rules'} above.</p>}
   </>;
 }
@@ -311,12 +373,14 @@ export function RequirementCard({info,actions}:{info:RequirementInfo;actions:Car
   const unapproved=info.approval!=='approved';
   const questions=useMemo(()=>unapproved?questionsOf(info):[],[info.text,info.diagnostics,unapproved]);
   const review=unapproved&&!questions.length,relink=!unapproved&&status==='needs_review';
+  const hasErrors=review&&errorsOf(info.diagnostics).length>0;
+  const badgeStatus=hasErrors?'error':status;
+  const badgeLabel=notRun(info)?'Not checked':questions.length>0?'Needs answer':hasErrors?'Needs fix':undefined;
   return <article className="rq-card" aria-label={`Requirement ${info.name}`}>
-    <div className="rq-head"><strong>{info.name}</strong><Badge status={status}>{notRun(info)?'Not checked':undefined}</Badge></div>
-    {questions.length>0&&<p className="rq-lede">Waiting for your answer. Answer the question at the top of this panel.</p>}
+    <div className="rq-head"><strong>{info.name}</strong><div className="rq-head-end"><Badge status={badgeStatus}>{badgeLabel}</Badge><button type="button" className="icon-button rq-remove" aria-label={`Delete requirement ${info.name}`} title="Delete requirement" disabled={actions.busy===info.id} onClick={()=>actions.remove(info)}>×</button></div></div>
+    {questions.length>0&&<><p className="rq-lede">Waiting for your answer in the Assistant chat.</p>{actions.openAssistant&&<div className="rq-actions"><button type="button" className="rq-mini" onClick={actions.openAssistant}>Open Assistant chat</button></div>}</>}
     {review&&<ReviewCard info={info} actions={actions} previous={result}/>}
     {relink&&<NeedsReviewCard info={info} result={result} actions={actions}/>}
     {!unapproved&&!relink&&<ResultCard info={info} result={result} actions={actions}/>}
-    <div className="rq-footer"><span className="rq-spacer"/><button type="button" className="icon-button" aria-label={`Delete requirement ${info.name}`} title="Delete requirement" disabled={actions.busy===info.id} onClick={()=>actions.remove(info)}>×</button></div>
   </article>;
 }

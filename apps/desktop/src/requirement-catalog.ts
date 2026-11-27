@@ -36,7 +36,7 @@ async function requestAdvisory(workspace:string,info:RequirementInfo):Promise<Pr
  * The project's requirement catalog: polls `requirements` list (quickly while something is queued or running,
  * otherwise every 2 s) and carries the user-only commands.
  */
-export function useRequirementCatalog(project:string){
+export function useRequirementCatalog(project?:string){
   const [reply,setReply]=useState<RequirementsReply|null>(null),[error,setError]=useState(''),[busy,setBusy]=useState<string|null>(null);
   const epoch=useRef(0),order=useRef(0),pending=useRef(false),lastRead=useRef(0),running=useRef(false),current=useRef<RequirementsReply|null>(null);
   function adopt(next:RequirementsReply,token:number){
@@ -48,6 +48,7 @@ export function useRequirementCatalog(project:string){
   useEffect(()=>{
     const token=++epoch.current;
     setReply(null);setError('');setBusy(null);current.current=null;running.current=false;lastRead.current=0;pending.current=false;
+    if(!project)return()=>{epoch.current++;};
     let active=true,reading=false;
     const refresh=()=>{
       if(reading||pending.current||(!running.current&&lastRead.current&&performance.now()-lastRead.current<2000))return;
@@ -81,6 +82,6 @@ export function useRequirementCatalog(project:string){
     running.current=true;return next;
   });
   const cancelRun=(runId:string)=>perform(runId,()=>call('requirements',{expected_catalog:null,command:{action:'cancel_run',run_id:runId}}));
-  const crossCheck=(info:RequirementInfo,workspace=project)=>requestAdvisory(workspace,info);
+  const crossCheck=(info:RequirementInfo,workspace=project??'')=>requestAdvisory(workspace,info);
   return {requirements:reply?.requirements??[],run:reply?.run??null,loaded:!!reply,error,busy,approve,remove,startRun,cancelRun,crossCheck,clearError:()=>setError('')};
 }
