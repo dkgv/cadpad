@@ -92,6 +92,7 @@ export function AssistantChatDock({
   const [unseen,setUnseen]=useState<Set<string>>(()=>new Set());
   const seenRef=useRef<(id:string)=>boolean>(()=>false);
   useEffect(()=>{setEmptyClosed(false);setTree(current=>syncChatDock(current,ids,activeId));setRemoved(null);setFocusedGroup(undefined);setUnseen(new Set());},[workspaceKey]);
+  useEffect(()=>{if(!removed)return;const timer=window.setTimeout(()=>setRemoved(null),6000);return()=>window.clearTimeout(timer);},[removed]);
   useEffect(()=>{setTree(current=>syncChatDock(current,ids,activeId));},[ids.join('\0'),activeId]);
   const visibleIds=groups(tree).flatMap(pane=>pane.active&&ids.includes(pane.active)?[pane.active]:[]);
   const visibleKey=JSON.stringify(visibleIds);

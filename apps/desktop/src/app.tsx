@@ -6,7 +6,7 @@ import {createPortal} from 'react-dom';
 import type {SessionHost,ToolTab} from './session-host';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { invoke, Channel } from '@tauri-apps/api/core';
-import { CadViewport, sceneEntity, sameEntity, referenceLetter, recordedFrameAt, type Inspection, type Entity, type SceneModel, type SelectionMode, type Scope, type MotionSnapshot } from '@cadpad/viewer';
+import { CadViewport, diffSurfaces, type ReviewDiff, sceneEntity, sameEntity, referenceLetter, recordedFrameAt, type Inspection, type Entity, type SceneModel, type SelectionMode, type Scope, type MotionSnapshot } from '@cadpad/viewer';
 import './style.css';
 import {Icon,humanLabel,errorSummary,ModelOpening,PropertySummary,type IconName} from './ui';
 import {ExternalLoads} from './loads';
@@ -23,8 +23,10 @@ import {MotionParts} from './motion-parts';
 import {BuildDiagnostics} from './build-diagnostics';
 import {ProjectEntry,type EntrySelection} from './project-entry';
 import {ModelHistory} from './model-history';
+import {captureSurfaces,rememberSnapshot,reviewSnapshot,volumeChange} from './model-review';
 import {ExternalChangesPanel} from './external-changes';
 import {AppAlert} from './app-alert';
+import {ConfirmDialog} from './confirm-dialog';
 import {ProjectExplorer} from './explorer';
 import {FOLDER_DRAG_TYPE} from './source-catalog';
 import {MentionTextarea,projectFileMentions,projectFiles,projectFolders,type MentionItem} from './mention-textarea';
@@ -202,6 +204,8 @@ export function App({host}:{host?:SessionHost}={}) {
   const [graphicsLost,setGraphicsLost]=useState(false);
   const [startupError,setStartupError]=useState(''),[viewportAttempt,setViewportAttempt]=useState(0);
   const [viewStatus,setViewStatus]=useState<ViewStatus|null>(null),[viewAttempt,setViewAttempt]=useState(0);
+  // Geometry review compares a captured pre-turn surface with the presented revision.
+  const [review,setReview]=useState<{workspace:string;before:string;after:string;diff:ReviewDiff|null;error?:string}|null>(null),[,setSnapshotGeneration]=useState(0);
   const cameraIntent=useRef<{workspace:string;revision:string;action:CameraAction}|null>(null);
   const [properties,setProperties] = useState<Inspection|null>(null);
   const [inspectStatus,setInspectStatus]=useState('');
@@ -244,6 +248,15 @@ export function App({host}:{host?:SessionHost}={}) {
     window.addEventListener('cadpad-canvas-visibility',onVisibility);
     return()=>{window.removeEventListener('cadpad-canvas-select',onSelect);window.removeEventListener('cadpad-canvas-visibility',onVisibility);};
   },[host?.active,project?.workspace_id,project?.revision]);
+  useEffect(()=>{
+    const onRedraw=()=>{
+      if(hostRef.current&&!hostRef.current.visible)return;
+      externalCheck.current();
+      viewer.current?.redraw();
+    };
+    window.addEventListener('cadpad-canvas-redraw',onRedraw);
+    return()=>window.removeEventListener('cadpad-canvas-redraw',onRedraw);
+  },[]);
   const [advancedView,setAdvancedView]=useState(false);
   const [editing,setEditing]=useState(false);
   const menuAction=useRef<(action:string)=>void>(()=>{});
@@ -536,26 +549,82 @@ export function App({host}:{host?:SessionHost}={}) {
   const [editingMessage,setEditingMessage]=useState<MessageEdit|null>(null);
   const [editingMessageBusy,setEditingMessageBusy]=useState(false);
   const [editingQueued,setEditingQueued]=useState<{id:number;text:string}|null>(null);
+  const [pendingRestore,setPendingRestore]=useState<{checkpoint_revision:string;chatId:string;index:number}|null>(null);
+  const [restoringMessage,setRestoringMessage]=useState(false);
+  useEffect(()=>{setPendingRestore(null);},[project?.workspace_id,activeChatId]);
+  async function restoreMessageCheckpoint(checkpointRevision:string|undefined,index:number,chatId:string){
+    const current=currentProject.current;
+    if(!current)return;
+    if(liveJob.current&&['queued','running'].includes(liveJob.current.state))throw new Error('Wait for the current build to finish before changing the model.');
+    if(checkpointRevision&&checkpointRevision!==current.revision){
+      let job=await invoke<Job>('restore_checkpoint',{workspace:current.workspace_id,revision:current.revision,target:checkpointRevision});
+      while(['queued','running'].includes(job.state)){
+        await new Promise(resolve=>window.setTimeout(resolve,200));
+        job=await invoke<Job>('job',{workspace:current.workspace_id,jobId:job.id});
+      }
+      if(job.state!=='succeeded')throw new Error('Could not restore the model. Your conversation was kept.');
+      adopt(await invoke<Project>('project',{workspace:current.workspace_id}));
+    }
+    await invoke('agent_chat',{workspace:current.workspace_id,action:`rewind:${index}`,chatId});
+    await refreshChat(current.workspace_id);
+    window.dispatchEvent(new CustomEvent('cadpad-canvas-redraw'));
+  }
+  async function confirmMessageRestore(){
+    const target=pendingRestore;
+    if(!target||restoringMessage)return;
+    setRestoringMessage(true);setError('');
+    try{
+      await restoreMessageCheckpoint(target.checkpoint_revision,target.index,target.chatId);
+      setPendingRestore(null);
+    }catch(error){
+      setPendingRestore(null);
+      setError(message(error));
+    }finally{setRestoringMessage(false);}
+  }
   async function submitMessageEdit(){
-    const edit=editingMessage,current=currentProject.current;
-    if(!edit||!current||!edit.text.trim()||editingMessageBusy)return;
+    const edit=editingMessage;
+    if(!edit||!currentProject.current||!edit.text.trim()||editingMessageBusy)return;
     setEditingMessageBusy(true);setError('');
     try{
-      if(edit.checkpoint_revision&&edit.checkpoint_revision!==current.revision){
-        let job=await invoke<Job>('restore_checkpoint',{workspace:current.workspace_id,revision:current.revision,target:edit.checkpoint_revision});
-        while(['queued','running'].includes(job.state)){
-          await new Promise(resolve=>window.setTimeout(resolve,200));
-          job=await invoke<Job>('job',{workspace:current.workspace_id,jobId:job.id});
-        }
-        if(job.state!=='succeeded')throw new Error('Could not restore the model. Your conversation was kept.');
-        adopt(await invoke<Project>('project',{workspace:current.workspace_id}));
-      }
-      await invoke('agent_chat',{workspace:current.workspace_id,action:`rewind:${edit.index}`,chatId:edit.chatId});
-      await refreshChat(current.workspace_id);
+      await restoreMessageCheckpoint(edit.checkpoint_revision,edit.index,edit.chatId);
       setEditingMessage(null);
       await sendPrompt(edit.text,edit.chatId,edit);
     }catch(error){setError(message(error));}finally{setEditingMessageBusy(false);}
   }
+  const loadArtifact=(workspace:string,revision:string)=>(handle:string)=>invoke<ArrayBuffer>('artifact',{workspace,revision,handle});
+  /** Display meshes of past revisions are collected; keep this one so the finished turn can be reviewed. */
+  async function rememberBeforeTurn(current:Project){
+    if(current.display_error||reviewSnapshot(current.workspace_id,current.revision))return;
+    let timer:ReturnType<typeof setTimeout>|undefined;
+    try{
+      const snapshot=await Promise.race([
+        captureSurfaces(current.workspace_id,current.revision,current.model,loadArtifact(current.workspace_id,current.revision)),
+        new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Snapshot timed out')),3000);}),
+      ]);
+      rememberSnapshot(snapshot);setSnapshotGeneration(n=>n+1);
+    }catch{/* Review is optional; the turn starts without a baseline. */}
+    finally{clearTimeout(timer);}
+  }
+  async function startReview(before:string){
+    const current=currentProject.current;
+    const baseline=current&&reviewSnapshot(current.workspace_id,before);
+    if(!current||!baseline)return;
+    const target={workspace:current.workspace_id,before,after:current.revision};
+    const same=(state:typeof review)=>state?.workspace===target.workspace&&state.before===before&&state.after===target.after;
+    viewer.current?.setReview(null);setReview({...target,diff:null});
+    try{
+      const after=await captureSurfaces(target.workspace,target.after,current.model,loadArtifact(target.workspace,target.after));
+      // Let the banner paint "Comparing…" before the synchronous diff.
+      await new Promise(resolve=>setTimeout(resolve,16));
+      const diff=diffSurfaces(baseline.parts,after.parts);
+      const now=currentProject.current,viewport=viewer.current;
+      if(now?.workspace_id!==target.workspace||now.revision!==target.after)return;
+      if(!viewport?.hasScene(target.workspace,target.after))throw new Error('The model view is not ready.');
+      viewport.setReview(diff);
+      setReview(state=>same(state)?{...target,diff}:state);
+    }catch(error){setReview(state=>same(state)?{...target,diff:null,error:message(error)}:state);}
+  }
+  function endReview(){viewer.current?.setReview(null);setReview(null);}
   async function sendPrompt(submission?:string,chatId?:string,edit?:MessageEdit,modelWorkspace?:string,queued?:QueuedPrompt):Promise<boolean>{
     const latest=currentProject.current;
     const current=edit&&latest?.workspace_id===displayProject?.workspace_id?latest:displayProject||latest;
@@ -608,6 +677,7 @@ export function App({host}:{host?:SessionHost}={}) {
       if(!queued)setScrollTrigger(n=>n+1);
     }
     if(!edit&&!queued)clearDraft(targetChat,submitted);
+    if(workspace===current.workspace_id&&(modelWorkspace??current.workspace_id)===current.workspace_id)await rememberBeforeTurn(current);
     try{
       const turn=await invoke<AgentTurn>('agent_start',{workspace,...((modelWorkspace??current.workspace_id)!==workspace?{modelWorkspace:modelWorkspace??current.workspace_id}:{}),prompt:submitted,references:attached,image,folders,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
       if(turn.workspace_id!==workspace)throw new Error('Agent reply belongs to another workspace');
@@ -1161,6 +1231,14 @@ export function App({host}:{host?:SessionHost}={}) {
     });
     return () => { active=false;viewport.cancelLoad(); };
   },[project?.workspace_id,project?.revision,project?.display_generation,project?.display_error?.code,viewAttempt,graphicsLost,viewportAttempt,host?.visible]);
+  // Any scene replacement drops the overlay; the review state follows it.
+  useEffect(()=>{viewer.current?.setReview(null);setReview(null);},[project?.workspace_id,project?.revision,project?.display_generation,viewAttempt,viewportAttempt,graphicsLost]);
+  useEffect(()=>{
+    if(!review)return;
+    const leave=(event:KeyboardEvent)=>{if(event.key==='Escape'&&!event.defaultPrevented){event.preventDefault();endReview();}};
+    window.addEventListener('keydown',leave);
+    return()=>window.removeEventListener('keydown',leave);
+  },[!!review]);
   useEffect(() => { viewer.current?.setDimensions(dimensions,scope); },[dimensions,scope,viewportAttempt]);
   useEffect(()=>{viewer.current?.setSelectionMode(selectionMode);},[selectionMode,viewportAttempt]);
   useEffect(()=>{viewer.current?.setFillSelection(fillSelection);},[fillSelection,viewportAttempt]);
@@ -1658,6 +1736,17 @@ export function App({host}:{host?:SessionHost}={}) {
     const normalized=path.replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'');
     return requirementModels.find(item=>item.model.entry===normalized)?.model;
   }
+  function textMentionsFolder(text:string,folder:string){
+    const normalized=folder.replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'');
+    if(!normalized)return false;
+    const pattern=/(^|[\s\n])@([^\s@]+)/g;
+    let match:RegExpExecArray|null;
+    while((match=pattern.exec(text))){
+      const clean=match[2].replace(/[.,:;)?!]+$/,'').replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'');
+      if(clean===normalized||clean.startsWith(`${normalized}/`))return true;
+    }
+    return false;
+  }
   const openReferencedModel=(entry:string,builder:string)=>{void openModelEntry(entry,builder);};
   const requirementCatalog=useRequirementCatalog(project?.workspace_id);
   const askingRequirement=requirementCatalog.requirements.find(item=>item.approval!=='approved'&&questionsOf(item).length>0);
@@ -1672,7 +1761,7 @@ export function App({host}:{host?:SessionHost}={}) {
     agentBusy={agentWorking||agentSending} catalog={requirementCatalog} onOpenAssistant={()=>{setQuestionDismissedInNew(false);setPanel('assistant');const targetChat=questionChatId&&chatList.some(c=>c.id===questionChatId)?questionChatId:activeChatId;if(targetChat&&targetChat!=='new'&&targetChat!==activeChatId)void changeChat('select',targetChat);requestAnimationFrame(()=>document.querySelector('#panel-assistant .rq-question')?.scrollIntoView({behavior:'smooth',block:'nearest'}));}} onCreate={(intent,model,mentioned)=>prepareRequirement(intent,model,undefined,mentioned)} onEdit={(id,intent,model,mentioned)=>prepareRequirement(intent,model,id,mentioned)} onAsk={askAboutRequirement}/>;
   const requirementsPanel=(<aside className="motion-sidebar inspector-page" id="panel-test" aria-label="Requirements"><div className="motion-sidebar-content requirements-content">{requirementsBody}</div></aside>);
   const explorer=displayProject||project;
-  const projectPaths=projectFiles(explorer?.files??[]);
+  const projectPaths=projectFiles([...(explorer?.files??[]),...requirementModels.map(item=>item.model.entry)]);
   const folderOptions=projectFolders(projectPaths);
   const mentionItems:MentionItem[]=[...folderOptions.map(path=>({kind:'folder' as const,path})),...projectFileMentions(projectPaths)];
   const selectedMesh=explorer?.model.parts.some(part=>part.instance_id===selection?.instance_id&&part.accuracy==='mesh');
@@ -1715,6 +1804,14 @@ export function App({host}:{host?:SessionHost}={}) {
 
       </nav>}
       <div className="viewport" ref={container} aria-busy={managedOpening||localModelOpening||scenePhase==='loading'||scenePhase==='lost'}/>
+      {review&&review.workspace===project?.workspace_id&&<div className="review-banner" role="status" aria-label="Change review">
+        <strong>Reviewing changes</strong>
+        {review.error?<span className="review-error">{review.error}</span>
+          :!review.diff?<span className="muted">Comparing…</span>
+          :review.diff.identical?<span className="muted">No geometry changes</span>
+          :<>{!!review.diff.added.length&&<span className="review-key added">Added</span>}{!!review.diff.removed.length&&<span className="review-key removed">Removed</span>}{volumeChange(review.diff.volumeBefore,review.diff.volumeAfter)&&<span className="muted">{volumeChange(review.diff.volumeBefore,review.diff.volumeAfter)}</span>}</>}
+        <button onClick={endReview} title="Leave review (Esc)">Done</button>
+      </div>}
       {!!makeover&&<div className="canvas-makeover" key={makeover} aria-hidden="true">
         <span className="canvas-makeover-pill"><Icon name="sparkles" size={13}/>Updated</span>
         {[1,2,3,4,5,6].map(index=><span key={index} className={`canvas-sparkle sparkle-${index}`}/>)}
@@ -1771,21 +1868,27 @@ export function App({host}:{host?:SessionHost}={}) {
             const queued=queuedPrompts.filter(item=>item.workspace===chatWorkspace&&(item.chatId?item.chatId===chatId:chatId===(activeChatId||'new')));
             const showQuestion=!!(activePane&&askingRequirement&&(questionChatId&&openChatIds.includes(questionChatId)?chatId===questionChatId:!(questionDismissedInNew&&chatId==='new')));
             const emptyChat=!messages.length&&!live&&!queued.length&&!showQuestion;
+            const lastUser=[...messages].reverse().find(entry=>entry.role==='user');
+            const reviewBase=!live&&project&&lastUser?.checkpoint_revision&&lastUser.checkpoint_revision!==project.revision&&reviewSnapshot(project.workspace_id,lastUser.checkpoint_revision)?lastUser.checkpoint_revision:null;
             return <div className={`assistant-chat-pane${emptyChat?' is-empty':''}`} data-chat-id={chatId} tabIndex={-1} onPointerDown={event=>{if(!(event.target as HTMLElement).closest('button,input,textarea,select,a,summary'))event.currentTarget.focus({preventScroll:true});}}>
               <ConversationScroll key={`${project?.workspace_id}:${chatId}`} ref={activePane?conversationRef:undefined} scrollTrigger={activePane?scrollTrigger:0}>
                 <div className="inspector-page" id={activePane?'panel-assistant':undefined} role="region" aria-label="Assistant conversation">
-                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p><ChipText raw={entry.text} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/></p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({...entry,chatId,index})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending} onClick={()=>void run('restore_checkpoint',{target:entry.checkpoint_revision})}><Icon name="undo" size={13}/>Restore</button>}</>:<FinishedReply text={entry.text} steps={entry.steps} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=>{
+                  {messages.map((entry,index)=>{
+                    const summaryFolders=(entry.folders??[]).filter(path=>!textMentionsFolder(entry.text,path));
+                    const knownFolders=entry.folders?.length?[...new Set([...folderOptions,...entry.folders])]:folderOptions;
+                    return <div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p><ChipText raw={entry.text} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel} knownFiles={projectPaths} knownFolders={knownFolders}/></p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({...entry,chatId,index})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending||restoringMessage} onClick={()=>setPendingRestore({checkpoint_revision:entry.checkpoint_revision!,chatId,index})}><Icon name="undo" size={13}/>Restore</button>}</>:<><FinishedReply text={entry.text} steps={entry.steps} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/>{reviewBase&&index===messages.length-1&&<button className="message-review" aria-pressed={review?.before===reviewBase} onClick={()=>review?.before===reviewBase?endReview():void startReview(reviewBase)}><Icon name="history" size={13}/>{review?.before===reviewBase?'Exit review':'Review changes'}</button>}</>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=>{
                     const target=chip.file?resolveModelForFile(chip.file):undefined;
                     const title=`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`;
                     const content=<>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></>;
                     return <li key={`${chip.instance_id}:${chip.entity_id}`} className={target?'reference-chip-item':'reference-chip'} title={target?undefined:title}>{target?<button type="button" className="reference-chip is-link" title={title} onClick={()=>openReferencedModel(target.entry,target.builder)}>{content}</button>:content}</li>;
-                  })}</ul>}{!!entry.folders?.length&&<ul className="message-references" aria-label="Referenced folders">{entry.folders.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span></li>)}</ul>}</div>)}
+                  })}</ul>}{!!summaryFolders.length&&<ul className="message-references" aria-label="Referenced folders">{summaryFolders.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span></li>)}</ul>}</div>;
+                  })}
                   {activePane&&!!agentChromeStatus&&<span className="visually-hidden" data-agent-chrome-status role="status">{agentChromeStatus}</span>}
                   {live&&<div className="chat-message assistant streaming" aria-live="polite"><strong>Cadpad</strong>{agentWorking&&agentTurn.steps?.length?<LiveReply steps={agentTurn.steps} activity={agentTurn.activity} startedAt={agentTurn.started_at} stopping={agentStartCancelling||agentTurn.state==='cancelling'} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/>:agentWorking&&agentTurn.text?<><Markdown text={agentTurn.text} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/><LiveReply steps={[]} activity={agentTurn.activity} startedAt={agentTurn.started_at} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/></>:<LiveReply steps={[]} activity={agentStartCancelling?'Stopping':agentWorking?agentTurn.activity:'Starting'} startedAt={agentWorking?agentTurn.started_at:undefined} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/>}</div>}
                   {live&&agentTurn?.state==='failed'&&<p className="agent-failure">{agentTurn.error?.message||'The agent could not finish this change.'}</p>}
                   {live&&agentTurn?.state==='cancelled'&&<p className="muted">Stopped. The last committed model is still available.</p>}
                   {live&&!!agentTurn?.artifacts.length&&<section className="agent-artifacts">{agentTurn.artifacts.map(artifact=><button key={artifact.handle} onClick={()=>saveAgentArtifact(artifact)}>Save {artifact.format} export</button>)}</section>}
-                  {queued.map(item=><div key={`queued:${item.id}`} className="chat-message user queued" aria-label="Queued message"><strong>You</strong>{editingQueued?.id===item.id?<div className="message-edit"><textarea aria-label="Edit queued message" value={editingQueued.text} onChange={event=>setEditingQueued({id:item.id,text:event.target.value})} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();setEditingQueued(null);}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();saveQueuedEdit(item);}}}/><p>This message stays queued. Send it now or let it go out when the assistant finishes.</p><button type="button" onClick={()=>setEditingQueued(null)}>Cancel</button><button type="button" className="primary-button" disabled={!editingQueued.text.trim()} onClick={()=>saveQueuedEdit(item)}>Save</button></div>:<><p><ChipText raw={item.message.text} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/></p>{item.message.image&&<img className="message-image" src={`data:image/png;base64,${item.message.image}`} alt="Attached reference"/>}<div className="queued-footer"><span className="queued-label">Queued</span><div className="message-actions" role="group" aria-label="Queued message actions"><button type="button" className="message-action" title="Send now" aria-label="Send now" onClick={()=>void sendQueuedNow(item)}><Icon name="arrowUp" size={13}/></button><button type="button" className="message-action" title="Delete message" aria-label="Delete message" onClick={()=>removeQueued(item)}><Icon name="trash" size={13}/></button><button type="button" className="message-action" title="Edit message" aria-label="Edit message" onClick={()=>setEditingQueued({id:item.id,text:item.message.text})}><Icon name="edit" size={13}/></button></div></div></>}</div>)}
+                  {queued.map(item=><div key={`queued:${item.id}`} className="chat-message user queued" aria-label="Queued message"><strong>You</strong>{editingQueued?.id===item.id?<div className="message-edit"><textarea aria-label="Edit queued message" value={editingQueued.text} onChange={event=>setEditingQueued({id:item.id,text:event.target.value})} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();setEditingQueued(null);}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();saveQueuedEdit(item);}}}/><p>This message stays queued. Send it now or let it go out when the assistant finishes.</p><button type="button" onClick={()=>setEditingQueued(null)}>Cancel</button><button type="button" className="primary-button" disabled={!editingQueued.text.trim()} onClick={()=>saveQueuedEdit(item)}>Save</button></div>:<><p><ChipText raw={item.message.text} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel} knownFiles={projectPaths} knownFolders={item.message.folders?.length?[...new Set([...folderOptions,...item.message.folders])]:folderOptions}/></p>{item.message.image&&<img className="message-image" src={`data:image/png;base64,${item.message.image}`} alt="Attached reference"/>}<div className="queued-footer"><span className="queued-label">Queued</span><div className="message-actions" role="group" aria-label="Queued message actions"><button type="button" className="message-action" title="Send now" aria-label="Send now" onClick={()=>void sendQueuedNow(item)}><Icon name="arrowUp" size={13}/></button><button type="button" className="message-action" title="Delete message" aria-label="Delete message" onClick={()=>removeQueued(item)}><Icon name="trash" size={13}/></button><button type="button" className="message-action" title="Edit message" aria-label="Edit message" onClick={()=>setEditingQueued({id:item.id,text:item.message.text})}><Icon name="edit" size={13}/></button></div></div></>}</div>)}
                   {activePane&&askingRequirement&&(questionChatId&&openChatIds.includes(questionChatId)?chatId===questionChatId:!(questionDismissedInNew&&chatId==='new'))&&<QuestionFlow info={askingRequirement} questions={questionsOf(askingRequirement)} agentBusy={agentWorking||agentSending} mentionItems={mentionItems} openModels={(host?.modelViews?.()??[]).map(view=>view.entry)} onSend={prompt=>askAboutRequirement(prompt,mentionedModels(askingRequirement.text))}/>}
                 </div>
               </ConversationScroll>
@@ -1810,6 +1913,7 @@ export function App({host}:{host?:SessionHost}={}) {
         {!!imageDropDepth&&<div className="assistant-image-drop" aria-hidden="true">Drop image to attach</div>}
       </aside>);
   const externalReview=(<>{(host?.chrome||externalReviewOpen)&&<ExternalChangesPanel changes={external?.changed?external.changes:{}} conflicts={external?.changed?external.conflicts:[]} resolutions={externalResolutions} reloadFailed={externalReloadFailed} busy={working} onResolve={(path,value)=>setExternalResolutions(values=>({...values,[path]:value}))} onClose={()=>{if(host)host.closeChanges();else setExternalReviewOpen(false);}} onReload={()=>{void reloadExternal();}}/>}</>);
+  const restoreDialog=(pendingRestore&&<ConfirmDialog title="Restore model?" message="Restore the model to its state before this message? This message and all later replies will be removed." confirmLabel={restoringMessage?'Restoring…':'Restore'} busy={restoringMessage} onConfirm={()=>void confirmMessageRestore()} onCancel={()=>{if(!restoringMessage)setPendingRestore(null);}}/>);
   const dialogs=(<>{error&&<AppAlert message={error} active={!host||host.active} onDismiss={()=>setError('')}/>}{project&&<QuickModelSelector open={quickModelOpen} workspace={project.workspace_id} revision={project.revision} historyWorkspace={host?.projectWorkspace} activeEntry={host?.modelEntry?.entry} activeBuilder={host?.modelEntry?.builder} busy={modelPickerBusy} onClose={()=>setQuickModelOpen(false)} onChoose={(entry,builder)=>void openModelEntry(entry,builder)}/>}    {entrySelection&&<ProjectEntry key={entrySelection.request_id} selection={entrySelection} busy={busy} error={entryError} onOpen={(entry,adapter)=>void openSelectedEntry(entry,adapter)} onCancel={()=>void openSelectedEntry()}/>}</>);
   const providerDialog=(<SettingsDialog
       open={providerOpen}
@@ -1850,6 +1954,7 @@ export function App({host}:{host?:SessionHost}={}) {
     {host.chrome&&createPortal(assistantPanel,host.tools.assistant)}
     {canvasPanel}{host.chrome&&createPortal(externalReview,host.changes)}{host.active&&dialogs}{host.active&&importSetup&&createPortal(importSetup,document.body)}
     {/* Shared chrome can outlive the canvas tab that owns its settings. */}
+    {(host.active||host.chrome)&&createPortal(restoreDialog,document.body)}
     {(host.active||host.chrome)&&createPortal(providerDialog,document.body)}
   </>;
   return <div className={`app ${/Mac/.test(navigator.platform)?'macos':''}`} style={{'--model-width':`${panelSizes.model}px`,'--assistant-width':`${panelSizes.assistant}px`,'--motion-width':`${panelSizes.motion}px`} as React.CSSProperties}>
@@ -1869,6 +1974,6 @@ export function App({host}:{host?:SessionHost}={}) {
       </div>
       {assistantPanel}
     </main>
-    {externalReview}{dialogs}{providerDialog}
+    {externalReview}{dialogs}{restoreDialog}{providerDialog}
   </div>;
 }

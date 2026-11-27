@@ -70,11 +70,12 @@ before(async()=>{
          export {selectedAnchor,selectedCircle} from ${JSON.stringify(path.join(repo,'packages/viewer/src/references.ts'))};
          export {recordedFrameAt,partMotion} from ${JSON.stringify(path.join(repo,'packages/viewer/src/motion.ts'))};
          export {dimensionText} from ${JSON.stringify(path.join(repo,'packages/viewer/src/dimension-display.ts'))};
+         export {diffSurfaces} from ${JSON.stringify(path.join(repo,'packages/viewer/src/review-diff.ts'))};
          export const modelDimensions=model=>model.annotations||[];
          export class CadViewport{constructor(container,onSelect,onAnnotation,onGraphics){const host=globalThis.__cadpadUiHarness;host.constructions=(host.constructions||0)+1;(host.viewports??=[]).push(this);if(host.startupFailures){host.startupFailures--;throw new Error('Synthetic WebGL initialization failure');}globalThis.__cadpadUiHarness.graphics=state=>{if(state==='lost'){this.presented=null;this.cancelLoad();}onGraphics(state);};this.onSelect=onSelect;this.hidden=new Set();this.selection=null;globalThis.__cadpadUiHarness.viewport=this;globalThis.__cadpadUiHarness.select=entity=>{this.selection=entity;onSelect(entity);};globalThis.__cadpadUiHarness.annotation=onAnnotation;}
            async load(...args){const sequence=this.sequence=(this.sequence||0)+1;this.call('load',...args);await globalThis.__cadpadUiHarness.load?.(...args);if(sequence===this.sequence){if(!args[0].parts.length||!this.sceneState(args[3],args[1])){this.hidden.clear();this.selection=null;this.onSelect(null,'replacement');}this.logical=args[0].parts.length?{workspace:args[3],revision:args[1]}:null;this.presented=this.logical;}}
            hasScene(workspace,revision){return this.presented?.workspace===workspace&&this.presented?.revision===revision;} sceneState(workspace,revision){return this.logical?.workspace===workspace&&this.logical?.revision===revision?{hidden:[...this.hidden],selection:this.selection}:null;} cancelLoad(){this.sequence=(this.sequence||0)+1;} suspend(){this.cancelLoad();this.presented=null;this.call('suspend');} call(name,...args){globalThis.__cadpadUiHarness.viewer.push([name,...args]);}
-           setStatusContainer(...a){this.call('statusContainer',...a);} setDimensions(...a){this.call('dimensions',...a);} redraw(){this.call('redraw');} setMotion(...a){} setSelectionMode(...a){this.call('selectionMode',...a);} setFillSelection(...a){this.call('fillSelection',...a);} setManipulation(...a){this.call('manipulation',...a);} dispose(){this.cancelLoad();this.presented=null;this.logical=null;this.call('dispose');}
+           setStatusContainer(...a){this.call('statusContainer',...a);} setDimensions(...a){this.call('dimensions',...a);} redraw(){this.call('redraw');} setMotion(...a){} setSelectionMode(...a){this.call('selectionMode',...a);} setFillSelection(...a){this.call('fillSelection',...a);} setManipulation(...a){this.call('manipulation',...a);} setReview(diff){this.review=diff;this.call('review',diff);} dispose(){this.cancelLoad();this.presented=null;this.logical=null;this.call('dispose');}
            selectEntity(entity){this.selection=entity;this.call('selectEntity',entity);} setReferences(...a){this.references=a[0];this.call('references',...a);} select(...a){this.selection=a[0]?{revision:this.presented?.revision,instance_id:a[0],entity_id:'part:0'}:null;this.call('select',...a);} setVisible(...a){a[1]?this.hidden.delete(a[0]):this.hidden.add(a[0]);this.call('visible',...a);} view(...a){this.call('view',...a);} cameraQuaternion(){return [0,0,0,1];} capture(){globalThis.__cadpadUiHarness.captureCalls=(globalThis.__cadpadUiHarness.captureCalls||0)+1;throw new Error('Unexpected fixture capture');} resetView(){this.call('fit');} setAdvancedTools(...a){this.call('advanced',...a);} previewCoordinate(...a){this.call('preview',...a);}
          }`}));
     }
@@ -1370,6 +1371,49 @@ test('clicking model references in chat messages reopens the referenced model',a
     {entry:'parts/rail.py',builder:'rail'},
     {entry:'parts/rail.py',builder:'rail'},
   ]);
+});
+test('inline folder mentions render in the message text without repeating a summary chip at the end',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation')return {
+      active_chat_id:'folder-chat',
+      chats:[{id:'folder-chat',title:'Folders',message_count:2}],
+      messages:[
+        {role:'user',text:'sorry it’s meant to be\n@parts/base/frame/v5',folders:['parts/base/frame/v5']},
+        {role:'user',text:'also check this',folders:['parts/other']},
+      ],
+      turn:null,
+    };
+    return original(command,args);
+  };
+  await act(async()=>harness.agent.onmessage({kind:'refresh'}));await flush();
+  const users=[...document.querySelectorAll('.chat-message.user')];
+  assert.equal(users.length,2);
+  assert.equal(users[0].querySelector('.req-chip.folder-chip')?.textContent,'@parts/base/frame/v5');
+  assert.equal(users[0].querySelector('[aria-label="Referenced folders"]'),null);
+  assert.equal(users[1].querySelector('[aria-label="Referenced folders"] .folder-chip')?.textContent,'parts/other');
+});
+test('Assistant @ mentions include STL and STEP model files from the source index',async()=>{
+  const original=harness.invoke.bind(harness);
+  const files=[
+    {path:'parts/base/frame/v5/assembled/beam_near.stl',description:'beam_near.stl',builders:[{id:'$file',label:'beam_near.stl',available:true,reason:'',line:1,kind:'model_file'}],diagnostic:null},
+    {path:'parts/base/frame/v5/assembled/beam_near.step',description:'beam_near.step',builders:[{id:'$file',label:'beam_near.step',available:true,reason:'',line:1,kind:'model_file'}],diagnostic:null},
+  ];
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files};
+    return original(command,args);
+  };
+  await act(async()=>root.unmount());
+  root=createRoot(document.getElementById('root'));
+  await act(async()=>{root.render(React.createElement(App));});await flush(30);
+  const prompt=document.getElementById('model-prompt');
+  await act(async()=>{prompt.focus();});
+  await setValue(prompt,'Check @beam');
+  await act(async()=>{prompt.setSelectionRange(prompt.value.length,prompt.value.length);prompt.dispatchEvent(new dom.window.Event('keyup',{bubbles:true}));await new Promise(resolve=>setTimeout(resolve,10));});
+  const picker=document.querySelector('.mention-picker');
+  assert.ok(picker,'Typing @beam opens the mention picker');
+  const options=[...picker.querySelectorAll('.mention-option')].map(option=>option.textContent);
+  assert.ok(options.some(option=>option.includes('beam_near')&&option.includes('STL + STEP')),'Indexed STL/STEP models appear in @ mentions');
 });
 test('resending an edited chat message keeps its image and geometry references',async()=>{
   const image='iVBORw0KGgo=';
@@ -3351,4 +3395,126 @@ test('a new requirement defaults to the focused canvas model',async()=>{
   await click(button('Prepare requirement'));await flush(30);
   assert.equal(harness.calls.findLast(([name])=>name==='agent_start')[1].modelWorkspace,'view-pin','the focused model is prepared, not the first catalog model');
   assert.match(harness.calls.findLast(([name])=>name==='agent_start')[1].prompt,/the project model pin in cad\/widgets\.py/);
+});
+
+test('a finished agent turn can be reviewed as a red/green geometry diff',async()=>{
+  // A 10 mm cube grows to 16 mm tall: the old top is removed, new walls and top are added.
+  const box=(height)=>{
+    const v=[],t=[];const c=[[0,0,0],[10,0,0],[10,10,0],[0,10,0],[0,0,height],[10,0,height],[10,10,height],[0,10,height]];
+    for(const p of c)v.push(...p);
+    for(const [a,b,c2,d] of [[0,3,2,1],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]])t.push(a,b,c2,a,c2,d);
+    return {vertices:new Float32Array(v).buffer,triangles:new Uint32Array(t).buffer};
+  };
+  // Snapshots are kept per revision for the session; unique ids keep this test independent.
+  const meshes={'review-r1':box(10),'review-r2':box(16)};
+  const hash=(name)=>name.padEnd(64,'0');
+  const model=(revision,volume)=>({parts:[{id:'rail',instance_id:'rail',name:'rail',position:[0,0,0],bounds:{min:[0,0,0],max:[10,10,10],size:[10,10,10]},volume,area:600,
+    mesh:{buffers:{vertices:{handle:`${hash(revision+'a')}.bin`,bytes:meshes[revision].vertices.byteLength,sha256:hash(revision+'a')},triangles:{handle:`${hash(revision+'b')}.bin`,bytes:meshes[revision].triangles.byteLength,sha256:hash(revision+'b')}},face_ids:[],edge_ids:[]}}]});
+  let revision='review-r1',messages=[];
+  const original=harness.invoke.bind(harness);
+  harness.invoke=async(command,args)=>{
+    if(['artifact','project','initialize','agent_conversation'].includes(command))harness.calls.push([command,args]);
+    if(command==='artifact'){
+      if(args.revision!==revision)throw {code:'STALE_ENTITY',message:'Artifact revision is no longer active'};
+      const mesh=meshes[args.revision];return args.handle===`${hash(revision+'a')}.bin`?mesh.vertices:mesh.triangles;
+    }
+    if(command==='project'||command==='initialize')return {...structuredClone(harness.project),revision,model:model(revision,revision==='review-r1'?1000:1600)};
+    if(command==='agent_conversation')return {active_chat_id:'review-chat',chats:[{id:'review-chat',title:'Taller',message_count:messages.length}],messages,turn:null};
+    if(command==='agent_start'){messages=[{role:'user',text:args.prompt,checkpoint_revision:'review-r1'},{role:'assistant',text:'Made it taller.'}];revision='review-r2';}
+    return original(command,args);
+  };
+  // Adopt the first revision with mesh buffers so the pre-turn surface can be captured while it is current.
+  await act(async()=>harness.agent.onmessage({kind:'turn_finished',workspace_id:'workspace-1',turn_id:'seed',turn:null}));await flush(20);
+  assert.ok(harness.viewport.hasScene('workspace-1','review-r1'),'the pre-turn model is presented');
+  await submitPrompt('Make it taller');await flush(20);
+  assert.ok(harness.calls.some(([name,args])=>name==='artifact'&&args.revision==='review-r1'),'the pre-turn surface is captured before the turn');
+  await act(async()=>harness.agent.onmessage({kind:'turn_finished',workspace_id:'workspace-1',turn_id:'turn-1',turn:null}));await flush(30);
+  assert.ok(harness.viewport.hasScene('workspace-1','review-r2'),'the changed model is presented');
+  const reviewButton=[...document.querySelectorAll('.message-review')].find(active);
+  assert.ok(reviewButton,'the last reply offers a review');
+  await click(reviewButton);await flush(60);
+  const diff=harness.viewport.review;
+  assert.ok(diff&&!diff.identical,'the viewport receives a geometry diff');
+  assert.ok(diff.added.length>0&&diff.removed.length>0);
+  const banner=document.querySelector('.review-banner');
+  assert.match(banner.textContent,/Added/);assert.match(banner.textContent,/Removed/);assert.match(banner.textContent,/Volume \+600 mm³/);
+  await act(async()=>{window.dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Escape'}));});await flush();
+  assert.equal(document.querySelector('.review-banner'),null,'Escape leaves review');
+  assert.equal(harness.viewport.review,null);
+});
+
+test('pressing the restore button on a previous message shows a confirmation dialog before reverting',async()=>{
+  const original=harness.invoke.bind(harness);
+  let revision='r2';
+  let messages=[{role:'user',text:'Make the bracket thicker',checkpoint_revision:'checkpoint-1'},{role:'assistant',text:'Updated thickness.'}];
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation'){harness.calls.push([command,args]);return {active_chat_id:'restore-chat',chats:[{id:'restore-chat',title:'Bracket',message_count:messages.length}],messages,turn:null};}
+    if(command==='project'){harness.calls.push([command,args]);return {...structuredClone(harness.project),revision};}
+    if(command==='restore_checkpoint'){revision=args.target;return original(command,args);}
+    if(command==='agent_chat'&&args.action==='rewind:0'){harness.calls.push([command,args]);messages=[];return {active_chat_id:'restore-chat',chats:[{id:'restore-chat',title:'Bracket',message_count:0}],messages,turn:null};}
+    return original(command,args);
+  };
+  await act(async()=>harness.agent.onmessage({kind:'refresh'}));await flush();
+  const restoreButton=[...document.querySelectorAll('.chat-message.user .message-revert')].find(button=>button.textContent.includes('Restore'));
+  assert.ok(restoreButton,'Restore button is rendered for message with checkpoint_revision');
+  await click(restoreButton);await flush();
+  let dialog=document.querySelector('.confirm-dialog');
+  assert.ok(dialog&&dialog.open,'Confirmation dialog opens on Restore click');
+  assert.equal(harness.calls.some(([name])=>name==='restore_checkpoint'),false,'Does not revert before confirmation');
+  await click([...dialog.querySelectorAll('footer button')].find(button=>button.textContent==='Cancel'));await flush();
+  assert.equal(document.querySelector('.confirm-dialog'),null,'Cancel closes the confirmation dialog');
+  assert.equal(harness.calls.some(([name])=>name==='restore_checkpoint'),false,'Cancel does not call restore_checkpoint');
+  await click(restoreButton);await flush();
+  dialog=document.querySelector('.confirm-dialog');
+  assert.ok(dialog&&dialog.open);
+  await click(dialog.querySelector('footer .primary-button'));await flush();
+  assert.equal(document.querySelector('.confirm-dialog'),null,'Confirm closes the confirmation dialog');
+  const call=harness.calls.find(([name])=>name==='restore_checkpoint');
+  assert.ok(call,'Confirm invokes restore_checkpoint');
+  assert.equal(call[1].target,'checkpoint-1');
+  const rewind=harness.calls.find(([name,args])=>name==='agent_chat'&&args.action==='rewind:0');
+  assert.ok(rewind,'Confirm rewinds chat history to before the restored message');
+  assert.equal(document.querySelectorAll('.chat-message').length,0,'Rewound messages are removed from the chat');
+  assert.ok(harness.viewer.some(([name])=>name==='redraw'),'Confirm retriggers canvas redraw');
+});
+
+test('restore confirmation dialog opens in hosted chrome even when the chrome session is not active',async()=>{
+  const original=harness.invoke.bind(harness);
+  let revision='r2';
+  let messages=[{role:'user',text:'Make the bracket thicker',checkpoint_revision:'checkpoint-2'},{role:'assistant',text:'Updated thickness.'}];
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation'){harness.calls.push([command,args]);return {active_chat_id:'restore-chat',chats:[{id:'restore-chat',title:'Bracket',message_count:messages.length}],messages,turn:null};}
+    if(command==='project'){harness.calls.push([command,args]);return {...structuredClone(harness.project),revision};}
+    if(command==='restore_checkpoint'){revision=args.target;return original(command,args);}
+    if(command==='agent_chat'&&args.action==='rewind:0'){harness.calls.push([command,args]);messages=[];return {active_chat_id:'restore-chat',chats:[{id:'restore-chat',title:'Bracket',message_count:0}],messages,turn:null};}
+    return original(command,args);
+  };
+  const slot=()=>document.createElement('div');
+  const assistantHost=slot();
+  document.body.append(assistantHost);
+  const host={
+    workspaceId:'workspace-1',onOpenModel:()=>{},modelViews:()=>[],ensureModelView:()=>{},
+    active:false,chrome:true,visible:false,projectWorkspace:'workspace-1',focusWorkspace:'workspace-1',
+    onSelection:()=>{},changes:slot(),openChanges:()=>{},closeChanges:()=>{},
+    header:slot(),rail:slot(),notices:slot(),
+    tools:{model:slot(),move:slot(),simulate:slot(),test:slot(),image:slot(),assistant:assistantHost},
+    visibleTools:['assistant'],showTool:()=>{},onOpen:()=>{},onOpenWorkspace:()=>{},onProject:()=>{},
+    connectMenu:async()=>{},connectView:async()=>{},
+  };
+  await act(async()=>root.unmount());
+  root=createRoot(document.getElementById('root'));
+  await act(async()=>{root.render(React.createElement(App,{host}));});await flush();
+  const restoreButton=[...assistantHost.querySelectorAll('.chat-message.user .message-revert')].find(button=>button.textContent.includes('Restore'));
+  assert.ok(restoreButton);
+  await click(restoreButton);await flush();
+  const dialog=document.querySelector('.confirm-dialog');
+  assert.ok(dialog&&dialog.open,'Confirmation dialog opens when host.chrome is true and host.active is false');
+  await click(dialog.querySelector('footer .primary-button'));await flush();
+  assert.equal(document.querySelector('.confirm-dialog'),null);
+  const call=harness.calls.find(([name])=>name==='restore_checkpoint');
+  assert.ok(call,'Confirm invokes restore_checkpoint from hosted chrome');
+  assert.equal(call[1].target,'checkpoint-2');
+  const rewind=harness.calls.find(([name,args])=>name==='agent_chat'&&args.action==='rewind:0');
+  assert.ok(rewind,'Confirm rewinds chat history from hosted chrome');
+  assistantHost.remove();
 });

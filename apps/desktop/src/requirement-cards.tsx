@@ -20,9 +20,18 @@ export type CardActions={
 
 type ModelTarget={entry:string;builder:string};
 
-/** Split plain text on `@path` mentions that resolve to a project model. */
-function renderTextWithModelMentions(text:string,resolveModel?:(path:string)=>ModelTarget|undefined,onOpenModel?:(entry:string,builder:string)=>void,keyPrefix='t'):React.ReactNode[]{
-  if(!resolveModel||!onOpenModel)return [<React.Fragment key={keyPrefix}>{text}</React.Fragment>];
+const normalizeMentionPath=(path:string)=>path.replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'');
+
+/** Split plain text on `@path` mentions that resolve to a project model, file, or folder. */
+function renderTextWithMentions(
+  text:string,
+  resolveModel?:(path:string)=>ModelTarget|undefined,
+  onOpenModel?:(entry:string,builder:string)=>void,
+  knownFiles?:Set<string>,
+  knownFolders?:Set<string>,
+  keyPrefix='t',
+):React.ReactNode[]{
+  if((!resolveModel||!onOpenModel)&&!knownFiles?.size&&!knownFolders?.size)return [<React.Fragment key={keyPrefix}>{text}</React.Fragment>];
   const out:React.ReactNode[]=[];
   const pattern=/(^|[\s\n])@([^\s@]+)/g;
   let last=0,match:RegExpExecArray|null,index=0;
@@ -30,11 +39,18 @@ function renderTextWithModelMentions(text:string,resolveModel?:(path:string)=>Mo
     const prefix=match[1],rawToken=match[2];
     const clean=rawToken.replace(/[.,:;)?!]+$/,'');
     const trailing=rawToken.slice(clean.length);
-    const target=clean?resolveModel(clean):undefined;
-    if(!target)continue;
+    const normalized=clean?normalizeMentionPath(clean):'';
+    const target=clean&&resolveModel&&onOpenModel?resolveModel(clean):undefined;
+    const isKnownFolder=!!(normalized&&knownFolders?.has(normalized));
+    const isKnownFile=!!(normalized&&knownFiles?.has(normalized));
+    if(!target&&!isKnownFolder&&!isKnownFile)continue;
     const atStart=match.index+prefix.length;
     if(atStart>last)out.push(<React.Fragment key={`${keyPrefix}-s${index}`}>{text.slice(last,atStart)}</React.Fragment>);
-    out.push(<button type="button" key={`${keyPrefix}-m${index}`} className="req-chip is-link" title={target.entry} onClick={()=>onOpenModel(target.entry,target.builder)}>@{clean}</button>);
+    if(target&&onOpenModel){
+      out.push(<button type="button" key={`${keyPrefix}-m${index}`} className="req-chip is-link" title={target.entry} onClick={()=>onOpenModel(target.entry,target.builder)}>@{clean}</button>);
+    }else{
+      out.push(<span key={`${keyPrefix}-m${index}`} className={`req-chip${isKnownFolder?' folder-chip':''}`} title={normalized}>@{clean}</span>);
+    }
     if(trailing)out.push(<React.Fragment key={`${keyPrefix}-e${index}`}>{trailing}</React.Fragment>);
     last=match.index+match[0].length;
     index++;
@@ -43,10 +59,12 @@ function renderTextWithModelMentions(text:string,resolveModel?:(path:string)=>Mo
   return out.length?out:[<React.Fragment key={keyPrefix}>{text}</React.Fragment>];
 }
 
-/** Requirement text with `@[Label](entry#builder)` tokens (and optional `@path` model mentions) drawn as chips. */
-export function ChipText({raw,resolveModel,onOpenModel}:{raw:string;resolveModel?:(path:string)=>ModelTarget|undefined;onOpenModel?:(entry:string,builder:string)=>void}){
+/** Requirement text with `@[Label](entry#builder)` tokens (and optional `@path` model/file/folder mentions) drawn as chips. */
+export function ChipText({raw,resolveModel,onOpenModel,knownFiles,knownFolders}:{raw:string;resolveModel?:(path:string)=>ModelTarget|undefined;onOpenModel?:(entry:string,builder:string)=>void;knownFiles?:string[];knownFolders?:string[]}){
+  const fileSet=useMemo(()=>knownFiles?.length?new Set(knownFiles.map(normalizeMentionPath)):undefined,[knownFiles]);
+  const folderSet=useMemo(()=>knownFolders?.length?new Set(knownFolders.map(normalizeMentionPath)):undefined,[knownFolders]);
   return <>{parseTokens(raw).map((segment,index)=>segment.kind==='text'
-    ?<React.Fragment key={index}>{renderTextWithModelMentions(segment.text,resolveModel,onOpenModel,`seg-${index}`)}</React.Fragment>
+    ?<React.Fragment key={index}>{renderTextWithMentions(segment.text,resolveModel,onOpenModel,fileSet,folderSet,`seg-${index}`)}</React.Fragment>
     :onOpenModel
       ?<button type="button" key={index} className="req-chip is-link" title={segment.part?`${segment.entry} / ${segment.part}`:segment.entry} onClick={()=>onOpenModel(segment.entry,segment.builder)}>{segment.label}</button>
       :<span key={index} className="req-chip" title={segment.part?`${segment.entry} / ${segment.part}`:segment.entry}>{segment.label}</span>)}</>;
