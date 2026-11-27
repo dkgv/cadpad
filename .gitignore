@@ -77,3 +77,6 @@ apps/desktop/src-tauri/target/
 *.temp
 tmp/
 temp/
+
+# Internal design docs and evals
+/docs/
