@@ -18,6 +18,9 @@ export {recordedFrameAt,partMotion} from './motion';
 export {selectedAnchor,selectedCircle} from './references';
 export type {Inspection} from './references';
 import {framedZoom,projectedHalfExtent} from './fit-zoom';
+import type {ReviewDiff} from './review-diff';
+export {diffSurfaces} from './review-diff';
+export type {ReviewDiff,ReviewPart,ReviewSnapshot} from './review-diff';
 
 export type Vec3 = [number, number, number];
 export interface Entity { revision: string; instance_id: string; entity_id: string }
@@ -112,6 +115,8 @@ export class CadViewport {
   private hoverStatusElement:HTMLElement|null=null;
   private motionStatusElement:HTMLElement|null=null;
   private annotationGroup = new THREE.Group();
+  /** Review overlay: added surfaces in green, removed surfaces as a red ghost. */
+  private reviewGroup = new THREE.Group();
   private resize: ResizeObserver;
   private parts: Part[] = [];
   private paths = new Map<string, Part>();
@@ -279,7 +284,7 @@ export class CadViewport {
     if(this.presented)this.rememberCamera();
     this.suspended=true;this.presented=false;this.cancelLoad();this.cancelCameraFrame();
     this.clearPressMarker();this.cancelDrag();this.cancelSimulationFrame();this.cancelHover();
-    this.hovered=null;this.clearHighlights();this.releaseHoverOverlay();this.clearBadges();this.clearAnnotations();
+    this.hovered=null;this.clearHighlights();this.releaseHoverOverlay();this.clearBadges();this.clearAnnotations();this.clearReview();
     this.renderStorage?.dispose();this.renderStorage=null;
     this.renderedBuffers?.dispose();this.renderedBuffers=null;
     for(const geometry of this.pickGeometry.values())geometry.dispose();
@@ -301,7 +306,7 @@ export class CadViewport {
     this.contextLost=true;this.presented=false;this.cancelLoad();this.cancelCameraFrame();
     this.clearPressMarker();this.cancelDrag();this.cancelSimulationFrame();this.cancelHover();this.hovered=null;
     if(this.viewer.hasAnimationLoop)this.viewer.toggleAnimationLoop(false);
-    this.clearHighlights();this.clearBadges();this.clearAnnotations();
+    this.clearHighlights();this.clearBadges();this.clearAnnotations();this.clearReview();
     this.onGraphics('lost');
   };
   private graphicsRestored=()=>{
@@ -359,7 +364,7 @@ export class CadViewport {
     // References are revision scoped; the owner re-sends whatever survives.
     if(revision!==this.revision)this.references=this.references.filter(entity=>entity.revision===revision);
     for(const item of this.pickGeometry.values())item.dispose();
-    this.clearAnnotations();
+    this.clearAnnotations();this.clearReview();
     if(!workspace||workspace!==this.pickingWorkspace){this.renderStorage?.dispose();this.renderStorage=null;}
     this.renderStorage?.beginSwap();
     this.renderedBuffers?.dispose();this.renderedBuffers=null;
@@ -1016,6 +1021,39 @@ export class CadViewport {
     }
   }
 
+  /** Show a geometry diff over the presented scene; null leaves review mode. The diff must be computed against this scene. */
+  setReview(diff:ReviewDiff|null){
+    this.clearReview();
+    if(!diff||!this.presented||this.disposed)return;
+    const layer=(points:Float32Array,color:number,added:boolean)=>{
+      if(!points.length)return;
+      const geometry=new THREE.BufferGeometry();
+      geometry.setAttribute('position',new THREE.BufferAttribute(points,3));
+      geometry.computeVertexNormals();
+      // Added surface coincides with the model; pull it forward. The removed ghost
+      // stays visible through the translucent model without hiding what replaced it.
+      const material=new THREE.MeshStandardMaterial({color,side:THREE.DoubleSide,metalness:0,roughness:.8,
+        transparent:!added,opacity:added?1:.45,depthWrite:added,polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2});
+      const mesh=new THREE.Mesh(geometry,material);
+      mesh.renderOrder=added?90:91;mesh.name=added?'review-added':'review-removed';
+      this.reviewGroup.add(mesh);
+    };
+    layer(diff.added,0x2fa84f,true);
+    layer(diff.removed,0xe5484d,false);
+    this.viewer.setTransparent(true,false);
+    this.viewer.scene.add(this.reviewGroup);
+    this.viewer.update(true);
+  }
+  get reviewing(){return !!this.reviewGroup.parent;}
+  private clearReview(){
+    const active=!!this.reviewGroup.parent;
+    for(const object of [...this.reviewGroup.children]){
+      if(object instanceof THREE.Mesh){object.geometry.dispose();(object.material as THREE.Material).dispose();}
+      this.reviewGroup.remove(object);
+    }
+    this.reviewGroup.removeFromParent();
+    if(active&&!this.disposed&&!this.contextLost){try{this.viewer.setTransparent(false,false);if(this.presented)this.viewer.update(true);}catch{/* The scene is being replaced. */}}
+  }
   private clearAnnotations() {
     this.annotationGroup.traverse(object => {
       if (object instanceof THREE.Line || object instanceof THREE.Mesh) {
@@ -1129,7 +1167,7 @@ export class CadViewport {
     this.renderedBuffers?.dispose();this.renderedBuffers=null;
     this.clearHighlights();this.releaseHoverOverlay();for(const item of this.pickGeometry.values())item.dispose();this.pickGeometry.clear();
     for(const material of this.materials.values())material.dispose();this.materials.clear();
-    this.resize.disconnect(); this.clearAnnotations();
+    this.resize.disconnect(); this.clearAnnotations();this.clearReview();
     this.cancelDrag();this.cancelMarquee();
     this.detachListeners();
     this.hoverStatusElement?.remove();this.hoverStatusElement=null;this.motionStatusElement?.remove();this.motionStatusElement=null;
