@@ -11,7 +11,11 @@ import './style.css';
 import {Icon,humanLabel,errorSummary,ModelOpening,PropertySummary,type IconName} from './ui';
 import {ExternalLoads} from './loads';
 import {PhysicsSettings} from './physics-settings';
-import {Requirements,useProjectModels} from './motion-tests';
+import {Requirements,useProjectModels} from './requirements';
+import {ChipText,QuestionFlow} from './requirement-cards';
+import {useRequirementCatalog} from './requirement-catalog';
+import {questionsOf} from './requirement-review';
+import {mentionedModels} from './requirement-tokens';
 import {JointControl} from './joint-control';
 import {PanelResizeHandle,usePanelSizes} from './panel-resize';
 import {AssistantChatDock,chatTabIds,type ChatSummary} from './assistant-chats';
@@ -30,11 +34,11 @@ import {LiveReply,FinishedReply,Markdown,type AgentStep} from './agent-steps';
 import {useDockDrag} from './dock-drag';
 import {ViewCube,type ViewCubeDirection} from './view-cube';
 import {AccountBadge,type CloudAccount} from './account-badge';
-import {ImageToModel,readModelImage,type ModelImage} from './image-to-model';
+import {ImageToModel,readModelImage,type CloudHistoryItem,type ModelImage} from './image-to-model';
 import {SettingsDialog,type AgentSettings,type CloudSettings,type McpSettings,type ModelChoice} from './settings-dialog';
 import {SearchableModelSelect,type ModelOption} from './model-select';
 
-const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren>(function ConversationScroll({children},forwardedRef){
+const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren<{scrollTrigger?:number}>>(function ConversationScroll({children,scrollTrigger},forwardedRef){
   const nodeRef=useRef<HTMLDivElement|null>(null);
   const follow=useRef(true),interacting=useRef(false);
   useLayoutEffect(()=>{
@@ -46,6 +50,13 @@ const ConversationScroll=React.forwardRef<HTMLDivElement,React.PropsWithChildren
     bottom();const frame=requestAnimationFrame(bottom);
     return()=>{resize.disconnect();changes.disconnect();cancelAnimationFrame(frame);};
   },[]);
+  useLayoutEffect(()=>{
+    if(!scrollTrigger)return;
+    follow.current=true;
+    interacting.current=false;
+    const node=nodeRef.current;
+    if(node&&node.clientHeight>0)node.scrollTop=node.scrollHeight;
+  },[scrollTrigger]);
   return <div className="conversation" ref={node=>{nodeRef.current=node;if(typeof forwardedRef==='function')forwardedRef(node);else if(forwardedRef)forwardedRef.current=node;}}
     onWheel={()=>{interacting.current=true;}} onTouchStart={()=>{interacting.current=true;}} onPointerDown={()=>{interacting.current=true;}}
     onScroll={event=>{if(interacting.current){const node=event.currentTarget;follow.current=node.scrollHeight-node.scrollTop-node.clientHeight<48;}}}>{children}</div>;
@@ -60,10 +71,18 @@ export function hasUnsavedChanges(project:Project){
   return project.unsaved_changes??(project.model_parent?!!project.model_source_dirty:project.dirty);
 }
 type Job = { id:string;state:string;diagnostics:unknown;actor?:string };
-type AgentTurn = {id:string;workspace_id:string;chat_id?:string;state:'running'|'cancelling'|'cancelled'|'succeeded'|'failed';text:string;activity:string;error:{code:string;message:string}|null;artifacts:{handle:string;format:string;revision:string}[];steps?:AgentStep[];started_at?:number};
+type TokenUsage = {input_tokens:number;output_tokens:number};
+function formatTokenCount(total:number){
+  if(total<1000)return `${total}`;
+  if(total<100_000)return `${(total/1000).toFixed(1).replace(/\.0$/,'')}k`;
+  if(total<1_000_000)return `${Math.round(total/1000)}k`;
+  return `${(total/1_000_000).toFixed(1).replace(/\.0$/,'')}M`;
+}
+type AgentTurn = {id:string;workspace_id:string;chat_id?:string;state:'running'|'cancelling'|'cancelled'|'succeeded'|'failed';text:string;activity:string;error:{code:string;message:string}|null;artifacts:{handle:string;format:string;revision:string}[];steps?:AgentStep[];started_at?:number;usage?:TokenUsage};
 type PendingAgentStart={workspace:string;cancelRequested:boolean;turn?:AgentTurn;stopping?:Promise<AgentTurn>};
 type ChatReference={letter:string;instance_id:string;entity_id:string;part:string;label:string;file?:string;line?:number};
 type ChatMessage = {image?:string;checkpoint_revision?:string;role:string;text:string;references?:ChatReference[];folders?:string[];steps?:AgentStep[]};
+type QueuedPrompt={id:number;workspace:string;chatId?:string;submission:string;modelWorkspace?:string;message:ChatMessage;references:Entity[];image:string|null;imageIsReference:boolean;folders:string[];revision:string};
 type MessageEdit=Pick<ChatMessage,'image'|'references'|'folders'|'text'|'checkpoint_revision'>&{chatId:string;index:number};
 const MAX_REFERENCES=8;
 const MAX_FOLDERS=8;
@@ -145,6 +164,8 @@ export function App({host}:{host?:SessionHost}={}) {
   const [cloudGenerating,setCloudGenerating]=useState(false);
   // Cadpad Cloud panel: the image to send and optional guidance text.
   const [cloudImage,setCloudImage]=useState<ModelImage|null>(null),[cloudGuidance,setCloudGuidance]=useState('');
+  // Past Cadpad Cloud generations; will be pulled from the backend.
+  const [cloudHistory]=useState<CloudHistoryItem[]>([]);
   // Explorer folders attached to the next message, as project-relative paths.
   const [folderReferences,setFolderReferences]=useState<string[]>([]);
   function referenceFolder(path:string){
@@ -252,6 +273,14 @@ export function App({host}:{host?:SessionHost}={}) {
   function setHidden(next:Set<string>){hiddenIntent.current=next;updateHidden(next);}
   const displayRetry = useRef(false);
   const [notice,setNotice] = useState('');
+  /** Bumped when the agent re-presents the canvas, so a cosmetic makeover plays once. */
+  const [makeover,setMakeover]=useState(0);
+  const makeoverTimer=useRef<number|null>(null);
+  function flashCanvas(){
+    setMakeover(value=>value+1);
+    if(makeoverTimer.current!==null)window.clearTimeout(makeoverTimer.current);
+    makeoverTimer.current=window.setTimeout(()=>{makeoverTimer.current=null;setMakeover(0);},1250);
+  }
   const [selectionNotice,setSelectionNotice]=useState('');
   useEffect(()=>{
     if(!selectionNotice)return;
@@ -266,6 +295,8 @@ export function App({host}:{host?:SessionHost}={}) {
   const [externalReloadFailed,setExternalReloadFailed]=useState(false);
   const externalReloadAttempt=useRef('');
   const externalReloadTask=useRef<Promise<void>|undefined>(undefined);
+  /** Latest disk re-check, so a viewport redraw can also pick up external edits. */
+  const externalCheck=useRef<() => void>(()=>{});
   useEffect(()=>setExternalReviewOpen(false),[project?.workspace_id]);
 
   const [externalResolutions,setExternalResolutions]=useState<Record<string,'keep_cadpad'|'use_external'>>({});
@@ -286,7 +317,7 @@ export function App({host}:{host?:SessionHost}={}) {
   const chatScope=()=>{
     const projectWs=hostRef.current?.projectWorkspace,focusWs=hostRef.current?.focusWorkspace;
     // Chats live in the project's chat book, which the chrome Assistant shows. Canvas sessions
-    // (e.g. Requirements → prepareMotionTest) must start turns there too, or the chat is invisible.
+    // (e.g. Requirements → prepareRequirement) must start turns there too, or the chat is invisible.
     // sendPrompt passes the focused model separately as modelWorkspace.
     if(projectWs)return projectWs;
     return focusWs||activeWorkspace.current;
@@ -297,11 +328,14 @@ export function App({host}:{host?:SessionHost}={}) {
   const [prompt,updatePrompt]=useState('');
   const [chatList,setChatList]=useState<ChatSummary[]>([]),[activeChatId,setActiveChatId]=useState<string|null>(null),[chatBusy,setChatBusy]=useState(false);
   const [chatMessages,setChatMessages]=useState<Record<string,ChatMessage[]>>({});
+  const [chatUsage,setChatUsage]=useState<Record<string,TokenUsage>>({});
+  const [scrollTrigger,setScrollTrigger]=useState(0);
   const [,bumpChatDrafts]=useState(0);
   const conversationRef=useRef<HTMLDivElement>(null);
   const chatHosts=useRef(new Map<string,HTMLElement>());
   const [visibleChatIds,setVisibleChatIds]=useState<string[]>([]);
   const chatMessagesRef=useRef(chatMessages);chatMessagesRef.current=chatMessages;
+  const focusPromptPending=useRef(false);
   const selectedChat=useRef<{workspace:string;id:string|null}|null>(null),chatDrafts=useRef(new Map<string,string>()),chatChangePending=useRef<string|null>(null);
   function chatHost(id:string){let node=chatHosts.current.get(id);if(!node){node=document.createElement('div');node.className='dock-content-host assistant-chat-host';chatHosts.current.set(id,node);}return node;}
   // Drop map entries only — DockArea Mount cleanup detaches the host node.
@@ -334,6 +368,18 @@ export function App({host}:{host?:SessionHost}={}) {
       return value;
     });
   }
+  function clearDraft(chatId:string|undefined,text:string){
+    if(chatId)setDraft(chatId,'');
+    else setPrompt(value=>value===text?'':value);
+  }
+  function restoreDraft(chatId:string|undefined,text:string){
+    if(chatId){if(!draftFor(chatId))setDraft(chatId,text);}
+    else setPrompt(value=>value||text);
+  }
+  function clearComposerAttachments(folders:string[],foreign:boolean){
+    setFolderReferences(current=>current.filter(path=>!folders.includes(path)));
+    if(!foreign){setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}
+  }
   const pendingAgentStarts=useRef(new Map<string,PendingAgentStart>());
   const [agentStarts,setAgentStarts]=useState<Record<string,'starting'|'cancelling'>>({});
   const agentScope=host?.chrome?(host.projectWorkspace||host.focusWorkspace):project?.workspace_id;
@@ -351,6 +397,13 @@ export function App({host}:{host?:SessionHost}={}) {
   const [signingInCloud,setSigningInCloud]=useState(false);
   const agentConfigPending=useRef(false);
   const assistantVisible=host?host.chrome&&host.visibleTools.includes('assistant'):assistantOpen;
+  useEffect(()=>{
+    if(!focusPromptPending.current||!assistantVisible)return;
+    const input=document.getElementById('model-prompt');
+    if(!input)return;
+    focusPromptPending.current=false;
+    input.focus();
+  },[assistantVisible,activeChatId,visibleChatIds.join('\0')]);
   const savedBackend=providerSettings?.backend||providerSettings?.provider;
   const savedModel=providerSettings?.model||'';
   const catalogBackend=providerOpen?agentBackend:assistantVisible?savedBackend:undefined;
@@ -367,6 +420,37 @@ export function App({host}:{host?:SessionHost}={}) {
   const settledTurns=useRef(new Set<string>());
   const [pendingChatIds,setPendingChatIds]=useState<string[]>([]);
   const [landedChat,setLandedChat]=useState<{id:string;seq:number}|null>(null);
+  const [queuedPrompts,setQueuedPrompts]=useState<QueuedPrompt[]>([]);
+  const queuedPromptsRef=useRef<QueuedPrompt[]>([]);
+  const queuedPromptSeq=useRef(0);
+  const queueFlushing=useRef(new Set<string>());
+  const queueBlocked=useRef(new Set<string>());
+  function updateQueued(updater:(current:QueuedPrompt[])=>QueuedPrompt[]){
+    const next=updater(queuedPromptsRef.current);
+    queuedPromptsRef.current=next;
+    setQueuedPrompts(next);
+  }
+  function removeQueued(item:QueuedPrompt){
+    updateQueued(list=>list.filter(entry=>entry.id!==item.id));
+    queueBlocked.current.delete(item.workspace);
+  }
+  function saveQueuedEdit(item:QueuedPrompt){
+    const text=editingQueued?.text??'';
+    if(!text.trim())return;
+    updateQueued(list=>list.map(entry=>entry.id===item.id?{...entry,submission:text,message:{...entry.message,text}}:entry));
+    setEditingQueued(null);
+  }
+  /** Send a queued message now: stop the reply in flight and let this message go first. */
+  async function sendQueuedNow(item:QueuedPrompt){
+    const workspace=item.workspace;
+    updateQueued(list=>[item,...list.filter(entry=>entry.id!==item.id)]);
+    queueBlocked.current.delete(workspace);
+    const active=liveTurn.current;
+    if(active&&active.workspace_id===workspace&&['running','cancelling'].includes(active.state)){
+      try{await stopAgent();}catch(error){if(chatScope()===workspace)setError(message(error));}
+    }
+    await flushQueued(workspace);
+  }
   function publishPending(){
     const ids=[...new Set(pendingTurnChat.current.values())];
     setPendingChatIds(current=>current.length===ids.length&&current.every((id,index)=>id===ids[index])?current:ids);
@@ -400,11 +484,18 @@ export function App({host}:{host?:SessionHost}={}) {
     }
     liveTurn.current=turn;setAgentTurn(turn);
   }
-  function acceptChat(workspace:string,result:{messages:ChatMessage[];turn:AgentTurn|null;active_chat_id?:string;chats?:ChatSummary[]}){
+  function acceptChat(workspace:string,result:{messages:ChatMessage[];turn:AgentTurn|null;active_chat_id?:string;usage?:TokenUsage;chats?:ChatSummary[]}){
     if(!result||!Array.isArray(result.messages))throw new Error('The conversation reply is invalid. Your project is unchanged.');
     const id=result.active_chat_id??null,previous=selectedChat.current;
     if(!previous||previous.workspace!==workspace||previous.id!==id)updatePrompt(chatDrafts.current.get(`${workspace}:${id??'legacy'}`)||'');
-    selectedChat.current={workspace,id};setActiveChatId(id);setChatList(result.chats??[]);setChat(result.messages);if(id)setChatMessages(current=>({...current,[id]:result.messages}));showTurn(result.turn);
+    selectedChat.current={workspace,id};setActiveChatId(id);setChatList(result.chats??[]);setChat(result.messages);if(id)setChatMessages(current=>({...current,[id]:result.messages}));
+    setChatUsage(current=>{
+      const next={...current};
+      for(const summary of result.chats??[])if(summary.usage)next[summary.id]=summary.usage;
+      if(id&&result.usage)next[id]=result.usage;
+      return next;
+    });
+    showTurn(result.turn);
     const live=result.turn;
     if(live?.chat_id&&['running','cancelling'].includes(live.state))notePendingChat(live.chat_id,live.id);
     else if(live?.chat_id&&live.id&&['succeeded','failed','cancelled'].includes(live.state)&&(pendingTurnChat.current.has(live.id)||[...pendingTurnChat.current.values()].includes(live.chat_id)))noteSettledChat(live.chat_id,live.id);
@@ -421,7 +512,7 @@ export function App({host}:{host?:SessionHost}={}) {
     try{
       const result=await invoke<{messages:ChatMessage[];turn:AgentTurn|null;active_chat_id:string;chats:ChatSummary[]}>('agent_chat',{workspace,action,chatId:id??null});
       if(chatScope()!==workspace)return false;
-      acceptChat(workspace,result);if(action==='new'){setPrompt('');setAttachedImage(null);}setOmitted(new Set());requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());return true;
+      acceptChat(workspace,result);if(action==='remove'&&id)updateQueued(list=>{const next=list.filter(item=>item.chatId!==id);if(!next.some(item=>item.workspace===workspace))queueBlocked.current.delete(workspace);return next;});if(action==='new'){setPrompt('');setAttachedImage(null);}setOmitted(new Set());focusPromptPending.current=true;requestAnimationFrame(()=>{const input=document.getElementById('model-prompt');if(input){focusPromptPending.current=false;input.focus();}});return true;
     }catch(error){if(chatScope()===workspace)setError(message(error));return false;}
     finally{chatChangePending.current=null;setChatBusy(false);}
   }
@@ -444,6 +535,7 @@ export function App({host}:{host?:SessionHost}={}) {
   }
   const [editingMessage,setEditingMessage]=useState<MessageEdit|null>(null);
   const [editingMessageBusy,setEditingMessageBusy]=useState(false);
+  const [editingQueued,setEditingQueued]=useState<{id:number;text:string}|null>(null);
   async function submitMessageEdit(){
     const edit=editingMessage,current=currentProject.current;
     if(!edit||!current||!edit.text.trim()||editingMessageBusy)return;
@@ -464,51 +556,101 @@ export function App({host}:{host?:SessionHost}={}) {
       await sendPrompt(edit.text,edit.chatId,edit);
     }catch(error){setError(message(error));}finally{setEditingMessageBusy(false);}
   }
-  async function sendPrompt(submission?:string,chatId?:string,edit?:MessageEdit,modelWorkspace?:string){
+  async function sendPrompt(submission?:string,chatId?:string,edit?:MessageEdit,modelWorkspace?:string,queued?:QueuedPrompt):Promise<boolean>{
     const latest=currentProject.current;
     const current=edit&&latest?.workspace_id===displayProject?.workspace_id?latest:displayProject||latest;
     // Chrome keeps one project chat book mounted across model canvases.
     const workspace=chatScope();
     const targetChat=chatId??selectedChat.current?.id??activeChatId??undefined;
     const submitted=submission??(targetChat?draftFor(targetChat):prompt);
-    if(agentConfigPending.current||chatChangePending.current||!current||!workspace||!submitted.trim()||pendingAgentStarts.current.has(workspace))return;
-    if(liveTurn.current?.workspace_id===workspace&&['running','cancelling'].includes(liveTurn.current.state))return;
+    if(queued&&queued.workspace!==workspace)return false;
+    if(agentConfigPending.current||chatChangePending.current||chatBusy||!current||!workspace||!submitted.trim())return false;
+    if(!queued)queueBlocked.current.delete(workspace);
+    const busy=!!pendingAgentStarts.current.has(workspace)||!!(liveTurn.current?.workspace_id===workspace&&['running','cancelling'].includes(liveTurn.current.state));
+    if(busy){
+      if(queued||edit)return false;
+      // Queue the message without waiting for the active turn. The flush effect sends it when the turn settles.
+      const foreign=!!modelWorkspace&&modelWorkspace!==current.workspace_id;
+      const candidates=foreign?[]:remoteSelection?focusedSelection?.entities??[]:referencesNow.current;
+      const attached=current.revision===candidates[0]?.revision?candidates.filter(item=>!composerOmitted.has(entityKey(item))):[];
+      const image=foreign?null:attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
+      const folders=submission===undefined?folderReferences:[];
+      const optimistic:ChatMessage={role:'user',text:submitted,image:attachedImage?.data,folders};
+      updateQueued(list=>[...list,{id:++queuedPromptSeq.current,workspace,chatId:targetChat,submission:submitted,modelWorkspace,message:optimistic,references:attached,image,imageIsReference:!!attachedImage&&!foreign,folders,revision:current.revision}]);
+      clearDraft(targetChat,submitted);
+      if(chatScope()===workspace){clearComposerAttachments(folders,foreign);setScrollTrigger(n=>n+1);}
+      return true;
+    }
     const previousId=liveTurn.current?.id;
     const pending:PendingAgentStart={workspace,cancelRequested:false};
     const pendingTab=targetChat&&targetChat!=='new'?targetChat:'new';
     pendingAgentStarts.current.set(workspace,pending);starting(workspace,'starting');notePendingChat(pendingTab);chatEpoch.current++;setError('');setNotice('');
+    // Geometry references belong to the shown model; a turn about another model starts without them.
+    const foreign=!!modelWorkspace&&modelWorkspace!==current.workspace_id;
+    const candidates=foreign?[]:remoteSelection?focusedSelection?.entities??[]:referencesNow.current;
+    const attached=queued
+      ?(current.revision===queued.revision?queued.references:[])
+      :edit
+        ?(edit.references??[]).map(({instance_id,entity_id})=>({revision:current.revision,instance_id,entity_id}))
+        :current.revision===candidates[0]?.revision?candidates.filter(item=>!composerOmitted.has(entityKey(item))):[];
+    const image=queued
+      ?(current.revision===queued.revision?queued.image:queued.imageIsReference?queued.image:null)
+      :edit?edit.image??null:foreign?null:attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
+    const folders=queued?queued.folders:edit?edit.folders??[]:submission===undefined?folderReferences:[];
     // Show the outbound message immediately; refreshChat reconciles with the server.
     // Only composer sends carry the attached folders; programmatic prompts start without them.
-    const folders=edit?edit.folders??[]:submission===undefined?folderReferences:[];
     if(chatScope()===workspace){
-      const optimistic={role:'user',text:submitted,image:edit?edit.image:attachedImage?.data,references:edit?.references,folders};
+      const optimistic=queued?queued.message:{role:'user',text:submitted,image:edit?edit.image:attachedImage?.data,references:edit?.references,folders};
       const base=!targetChat||targetChat===activeChatId?chat:chatMessages[targetChat]||[];
       const next=[...(edit?base.slice(0,edit.index):base),optimistic];
       if(!targetChat||targetChat===activeChatId)setChat(next);
       if(targetChat)setChatMessages(current=>({...current,[targetChat]:next}));
+      if(!queued)setScrollTrigger(n=>n+1);
     }
+    if(!edit&&!queued)clearDraft(targetChat,submitted);
     try{
-      // Geometry references belong to the shown model; a turn about another model starts without them.
-      const foreign=!!modelWorkspace&&modelWorkspace!==current.workspace_id;
-      const candidates=foreign?[]:remoteSelection?focusedSelection?.entities??[]:referencesNow.current;
-      const attached=edit
-        ?(edit.references??[]).map(({instance_id,entity_id})=>({revision:current.revision,instance_id,entity_id}))
-        :current.revision===candidates[0]?.revision?candidates.filter(item=>!composerOmitted.has(entityKey(item))):[];
-      const image=edit?edit.image??null:foreign?null:attachedImage?.data??(attached.length?(remoteSelection?focusedSelection?.capture()??null:referenceView()):null);
       const turn=await invoke<AgentTurn>('agent_start',{workspace,...((modelWorkspace??current.workspace_id)!==workspace?{modelWorkspace:modelWorkspace??current.workspace_id}:{}),prompt:submitted,references:attached,image,folders,...(targetChat&&targetChat!=='new'?{chatId:targetChat}:{})});
       if(turn.workspace_id!==workspace)throw new Error('Agent reply belongs to another workspace');
+      if(!queued&&turn.chat_id)updateQueued(list=>list.map(item=>item.workspace===workspace&&!item.chatId?{...item,chatId:turn.chat_id}:item));
       pending.turn=turn;
       dropPendingStart(pendingTab);
       if(turn.chat_id){if(['succeeded','failed','cancelled'].includes(turn.state))noteSettledChat(turn.chat_id,turn.id);else notePendingChat(turn.chat_id,turn.id);}
       if(chatScope()===workspace&&(!liveTurn.current||liveTurn.current.id===turn.id||liveTurn.current.id===previousId))showTurn(turn);
       if(pending.cancelRequested)await cancelAcceptedStart(pending);
-      if(chatScope()===workspace){if(!edit&&!pending.cancelRequested){if(targetChat)setDraft(targetChat,'');else setPrompt(value=>value===submitted?'':value);setFolderReferences(current=>current.filter(path=>!folders.includes(path)));if(!foreign){setAttachedImage(null);if(remoteSelection)focusedSelection?.clear();else{setSelection(null);viewer.current?.selectEntity(null);setOmitted(new Set());}}}await refreshChat(workspace);}
+      if(chatScope()===workspace){
+        if(pending.cancelRequested){
+          if(!queued&&!edit)restoreDraft(targetChat,submitted);
+        }else if(!queued&&!edit){
+          clearComposerAttachments(folders,foreign);
+        }
+        await refreshChat(workspace);
+      }
+      return true;
     }catch(error){
       dropPendingStart(pendingTab);
-      if(pending.cancelRequested&&!pending.turn){if(chatScope()===workspace)void refreshChat(workspace).catch(()=>{});return;}
-      if(chatScope()===workspace){const failure=error as {code?:string};if(failure.code==='LLM_NOT_CONFIGURED')setProviderOpen(true);setError(message(error));void refreshChat(workspace).catch(()=>{});}
+      if(queued)queueBlocked.current.add(workspace);
+      if(pending.cancelRequested&&!pending.turn){
+        if(chatScope()===workspace){if(!queued&&!edit)restoreDraft(targetChat,submitted);void refreshChat(workspace).catch(()=>{});}
+        return false;
+      }
+      if(chatScope()===workspace){const failure=error as {code?:string};if(failure.code==='LLM_NOT_CONFIGURED')setProviderOpen(true);setError(message(error));if(!queued&&!edit)restoreDraft(targetChat,submitted);void refreshChat(workspace).catch(()=>{});}
+      return false;
     }
     finally{if(pendingAgentStarts.current.get(workspace)===pending){pendingAgentStarts.current.delete(workspace);starting(workspace);}}
+  }
+  async function flushQueued(workspace:string){
+    if(queueBlocked.current.has(workspace)||queueFlushing.current.has(workspace))return;
+    const next=queuedPromptsRef.current.find(item=>item.workspace===workspace);
+    if(!next)return;
+    queueFlushing.current.add(workspace);
+    updateQueued(list=>list.filter(item=>item.id!==next.id));
+    try{
+      const accepted=await sendPrompt(next.submission,next.chatId,undefined,next.modelWorkspace,next);
+      if(!accepted)updateQueued(list=>list.some(item=>item.id===next.id)?list:[next,...list]);
+    }catch(error){
+      updateQueued(list=>list.some(item=>item.id===next.id)?list:[next,...list]);
+      if(chatScope()===workspace)setError(message(error));
+    }finally{queueFlushing.current.delete(workspace);}
   }
   /** The live view with references highlighted and lettered, bounded for the model's context. */
   function referenceView():string|null{
@@ -565,6 +707,7 @@ export function App({host}:{host?:SessionHost}={}) {
       const settings=await invoke<AgentSettings>('configure_agent',{backend,model:composerModel??modelId,apiKey:fromComposer?null:apiKey||null});
       setProviderSettings(settings);setAgentBackend(settings.backend||settings.provider);setModelId(settings.model||'');setApiKey('');
       window.dispatchEvent(new CustomEvent<AgentSettings>('cadpad-agent-settings-changed',{detail:settings}));
+      queueBlocked.current.clear();
       if(fromComposer)return;
       setProviderOpen(!settings.configured);
       setNotice(settings.configured?'Agent settings saved. Send your request to start modeling.':settings.credential_storage==='local_cli'?'CLI selected. Sign in with that CLI if Cadpad still shows it as unavailable.':'Model saved. Add your API key to start modeling.');
@@ -733,7 +876,7 @@ export function App({host}:{host?:SessionHost}={}) {
       if(event.job){liveJob.current=event.job;setJob(event.job);}
       if(event.kind==='tool_started')setAgentActivity('Agent is working…');
       if(event.kind==='tool_succeeded'||event.kind==='tool_failed'||event.kind==='refresh')setAgentActivity('');
-      if(event.kind==='refresh'||event.kind==='recordings_changed'||event.kind==='motion_tests_changed'||event.job&&!['queued','running'].includes(event.job.state)){
+      if(event.kind==='refresh'||event.kind==='recordings_changed'||event.kind==='requirements_changed'||event.job&&!['queued','running'].includes(event.job.state)){
         invoke<Project>('project',{workspace:current.workspace_id}).then(next=>{if(activeWorkspace.current===next.workspace_id)adopt(next);}).catch(e=>setError(message(e)));
       }
     };
@@ -752,6 +895,11 @@ export function App({host}:{host?:SessionHost}={}) {
         else if(request.command==='dimensions'){
           viewer.current?.setDimensions(request.arguments!.visible,request.arguments!.scope);setDimensions(request.arguments!.visible);setScope(request.arguments!.scope);
           reply={data:{visible:request.arguments!.visible,scope:request.arguments!.scope,revision:current.revision,workspace_id:current.workspace_id}};
+        }else if(request.command==='redraw'){
+          if(!viewer.current?.hasScene(request.workspace_id,request.revision))throw {code:'VIEW_NOT_READY',message:'The requested scene has no displayed geometry yet. Build or restore its display, then retry.'};
+          // A canvas redraw also refreshes external edits, so a changed source or STL file is reloaded by the normal review path.
+          externalCheck.current();viewer.current.redraw();flashCanvas();
+          reply={data:{workspace_id:current.workspace_id,revision:current.revision}};
         }else throw {code:'UNSUPPORTED_OPERATION',message:'Unknown viewport request'};
       }catch(error){const failure=error as {code?:string;message?:string};reply={error:{code:failure.code||'APP_UNAVAILABLE',message:failure.message||String(error)}};}
       const viewerToken=await token.catch(()=>null);
@@ -814,6 +962,12 @@ export function App({host}:{host?:SessionHost}={}) {
     }
     return()=>{cancelled=true;};
   },[chatWorkspace,visibleChatKey,activeChatId]);
+  useEffect(()=>{
+    if(!chatWorkspace||queueBlocked.current.has(chatWorkspace))return;
+    if(agentSending||chatBusy||savingProvider)return;
+    if(agentTurn?.workspace_id===chatWorkspace&&['running','cancelling'].includes(agentTurn.state))return;
+    void flushQueued(chatWorkspace);
+  },[chatWorkspace,agentSending,chatBusy,savingProvider,agentTurn?.id,agentTurn?.state,agentTurn?.workspace_id,queuedPrompts.length]);
   useEffect(()=>{
     const update=(event:Event)=>setProviderSettings((event as CustomEvent<AgentSettings>).detail);
     window.addEventListener('cadpad-agent-settings-changed',update);
@@ -930,6 +1084,7 @@ export function App({host}:{host?:SessionHost}={}) {
     if(draftUiFrame.current!==null)cancelAnimationFrame(draftUiFrame.current);
     if(motionUiFrame.current!==null)cancelAnimationFrame(motionUiFrame.current);
     if(interactiveThrottle.current!==null)window.clearTimeout(interactiveThrottle.current);
+    if(makeoverTimer.current!==null)window.clearTimeout(makeoverTimer.current);
     for(const timer of settleTimers.current.values())window.clearTimeout(timer);
     pendingTargets.current.clear();
   },[]);
@@ -1283,7 +1438,7 @@ export function App({host}:{host?:SessionHost}={}) {
   },[project?.dirty,project?.unsaved_changes,project?.model_source_dirty,project?.revision,project?.saved_revision,project?.workspace_id,job?.state,agentTurn?.state,external?.changed]);
   const trackExternal=!host||!host.modelEntry||host.visible;
   useEffect(() => {
-    if(!trackExternal||!project?.external_tracking){setExternal(null);return;}
+    if(!trackExternal||!project?.external_tracking){externalCheck.current=()=>{};setExternal(null);return;}
     let active=true;
     let pending=false,again=false;reviewFingerprint.current='';
     const {workspace_id:workspace,revision,saved_revision:savedRevision}=project;
@@ -1305,8 +1460,9 @@ export function App({host}:{host?:SessionHost}={}) {
       pending=false;
     };
     const close=watchProjectFiles(workspace,()=>{void check();},error=>{if(active)setError(message(error));});
+    externalCheck.current=()=>{void check();};
     void check();
-    return()=>{active=false;close();};
+    return()=>{active=false;externalCheck.current=()=>{};close();};
   },[project?.workspace_id,project?.revision,project?.saved_revision,project?.external_tracking,trackExternal]);
   async function reloadExternal(automatic=false){
     const current=currentProject.current,observed=externalNow.current;
@@ -1342,13 +1498,16 @@ export function App({host}:{host?:SessionHost}={}) {
   },[project?.workspace_id,project?.revision,external?.changed,external?.fingerprint,external?.conflicts?.length,working,trackExternal,host?.openingModel]);
   useEffect(()=>{if(job?.state==='failed'&&external?.changed)setExternalReloadFailed(true);},[job?.state,external?.changed]);
   /** Ask the assistant to save a requirement for a project model, which need not be open. */
-  async function prepareMotionTest(intent:string,model:{entry:string;builder:string}|null,id?:string,mentioned:{entry:string;builder:string}[]=[]){
+  async function prepareRequirement(intent:string,model:{entry:string;builder:string}|null,id?:string,mentioned:{entry:string;builder:string}[]=[]){
     // Models without a tab get a background workspace so the assistant can inspect them.
     const view=model&&host?.ensureModelView?await host.ensureModelView(model.entry,model.builder):null;
-    const target=model?`the project model ${model.builder} in ${model.entry}`:'this design';
+    const describeModel=(item:{entry:string;builder:string})=>item.builder==='$file'?item.entry:`${item.builder} in ${item.entry}`;
+    const target=model?`the project model ${describeModel(model)}`:'this design';
     const others=mentioned.filter(item=>!model||item.entry!==model.entry||item.builder!==model.builder);
-    const mentions=mentioned.length>1||others.length?`\nThe requirement mentions these project models (as @[Label](entry#builder) tokens): ${mentioned.map(item=>`${item.builder} in ${item.entry}`).join('; ')}. Consider every one of them when inspecting and writing checks.`:'';
+    const mentions=mentioned.length>1||others.length?`\nThe requirement mentions these project models (as @[Label](entry#builder) tokens): ${mentioned.map(describeModel).join('; ')}. Consider every one of them when inspecting and writing checks.`:'';
     const request=(id?`Edit the requirement with ID ${id} for ${target}. Use control_requirements: list first and read its print, then compile the changed IR.\n`:`Create a requirement for ${target} from this free-text requirement:\n`)+intent+mentions+'\nUse control_requirements: compile the IR (keep @[Label](entry#builder) chips as written and give every number a source), apply edit_ir fixes and propose edit_source changes (a claim that names parts of several models needs an assembly: follow its skeleton, publishing each part with origin="entry.py#builder" and placing it with place(), then retarget the claim). If ask_user or E_VAGUE remains, save the draft with its diagnostics so I can answer in Requirements. When compilation succeeds, save the draft for review. Never invent numbers: take them from my text, the model or the library, or propose them marked inferred. Do not run it and do not approve it: I review the print and approve it myself. Explain the requirement only from its print. Geometry only.';
+    // A new requirement opens its own chat so it is not mixed with an open conversation.
+    if(!id&&selectedChat.current?.id)await changeChat('new');
     setPanel('assistant');setPrompt(request);await sendPrompt(request,undefined,undefined,view?.workspace);
   }
   /** Send the user's answer, allowance request or rule removal for a requirement to the assistant (the UI never edits the IR). */
@@ -1487,6 +1646,7 @@ export function App({host}:{host?:SessionHost}={}) {
     image={cloudImage} guidance={cloudGuidance} generating={cloudGenerating}
     versions={cloudVersions&&cloudVersions.workspace===(focusProject??project)?.workspace_id?cloudVersions.versions.map((version,index)=>({label:index===0?'Best match':`Option ${index+1}`,title:version.model||version.member||undefined})):[]}
     staged={cloudVersions?.staged??0} disabled={!project||working}
+    history={cloudHistory}
     onSignIn={()=>void signInCloud()} onChoose={()=>void pickImageForCad(false)}
     onFile={file=>void readModelImage(file).then(image=>{setCloudImage(image);setError('');}).catch(e=>setError(message(e)))}
     onClear={()=>setCloudImage(null)} onGuidance={setCloudGuidance}
@@ -1494,12 +1654,23 @@ export function App({host}:{host?:SessionHost}={}) {
     onVersion={index=>void chooseCloudVersion(index)} onDismissVersions={()=>setCloudVersions(null)}/>);
   // Requirements belong to the project: the shared sidebar shows them for every model.
   const requirementModels=useProjectModels(host?.chrome||!host?project?.workspace_id:undefined,host?.chrome||!host?project?.revision:undefined);
+  function resolveModelForFile(path:string){
+    const normalized=path.replaceAll('\\','/').replace(/^\.\//,'').replace(/\/+$/,'');
+    return requirementModels.find(item=>item.model.entry===normalized)?.model;
+  }
+  const openReferencedModel=(entry:string,builder:string)=>{void openModelEntry(entry,builder);};
+  const requirementCatalog=useRequirementCatalog(project?.workspace_id);
+  const askingRequirement=requirementCatalog.requirements.find(item=>item.approval!=='approved'&&questionsOf(item).length>0);
+  const [questionChatId,setQuestionChatId]=useState<string|null>(null);
+  const [questionDismissedInNew,setQuestionDismissedInNew]=useState(false);
+  useEffect(()=>{setQuestionDismissedInNew(false);setQuestionChatId(null);},[askingRequirement?.id]);
+  useEffect(()=>{if(askingRequirement&&!questionChatId&&activeChatId&&activeChatId!=='new')setQuestionChatId(activeChatId);},[askingRequirement?.id,questionChatId,activeChatId]);
   const requirementsBody=project&&<Requirements project={project.workspace_id} projectRunnable={project.model.parts.length>0}
     models={requirementModels} focusedModel={host?host.focusModelEntry??null:null}
     modelViews={()=>host?.modelViews?.()??[]}
     onChanged={()=>{const workspace=project.workspace_id;void invoke<Project>('project',{workspace}).then(next=>{if(activeWorkspace.current===workspace&&currentProject.current?.revision===next.revision){currentProject.current=next;setProject(next);}}).catch(e=>setError(message(e)));}}
-    agentBusy={agentWorking||agentSending} onCreate={(intent,model,mentioned)=>prepareMotionTest(intent,model,undefined,mentioned)} onEdit={(id,intent,model,mentioned)=>prepareMotionTest(intent,model,id,mentioned)} onAsk={askAboutRequirement}/>;
-  const requirementsPanel=(<aside className="motion-sidebar inspector-page" id="panel-test" aria-label="Requirements"><div className="motion-sidebar-content">{requirementsBody}</div></aside>);
+    agentBusy={agentWorking||agentSending} catalog={requirementCatalog} onOpenAssistant={()=>{setQuestionDismissedInNew(false);setPanel('assistant');const targetChat=questionChatId&&chatList.some(c=>c.id===questionChatId)?questionChatId:activeChatId;if(targetChat&&targetChat!=='new'&&targetChat!==activeChatId)void changeChat('select',targetChat);requestAnimationFrame(()=>document.querySelector('#panel-assistant .rq-question')?.scrollIntoView({behavior:'smooth',block:'nearest'}));}} onCreate={(intent,model,mentioned)=>prepareRequirement(intent,model,undefined,mentioned)} onEdit={(id,intent,model,mentioned)=>prepareRequirement(intent,model,id,mentioned)} onAsk={askAboutRequirement}/>;
+  const requirementsPanel=(<aside className="motion-sidebar inspector-page" id="panel-test" aria-label="Requirements"><div className="motion-sidebar-content requirements-content">{requirementsBody}</div></aside>);
   const explorer=displayProject||project;
   const projectPaths=projectFiles(explorer?.files??[]);
   const folderOptions=projectFolders(projectPaths);
@@ -1516,7 +1687,7 @@ export function App({host}:{host?:SessionHost}={}) {
   const motionPanel=(task:MotionTask)=>(            <aside className="motion-sidebar inspector-page" id={host?`panel-${task}`:"panel-motion"} aria-label={motionTools.find(tool=>tool.id===task)!.title} hidden={!host&&!motionOpen}>
               {!host&&<PanelResizeHandle panel="motion" value={panelSizes.motion} onChange={value=>resizePanel('motion',value)}/>}
               {!host&&<header className="dock-heading"><strong>{motionTools.find(tool=>tool.id===task)!.title}</strong>{task!=='test'&&<span className="motion-state" role="status">{motion?.playback?'Replay · live motion paused':motion?.mode==='simulate'?(simulationRunning?'Physics running':'Physics paused'):manipulating?'Drag mode':'Gravity off'}{motion?.recording?' · recording':''}</span>}<button className="icon-button" aria-label="Close motion panel" onClick={()=>{setMotionOpen(false);requestAnimationFrame(()=>document.getElementById(motionTools.find(tool=>tool.id===task)!.button)?.focus());}}><Icon name="close" size={16}/></button></header>}
-              <div className="motion-sidebar-content">
+              <div className={`motion-sidebar-content${task==='test'?' requirements-content':''}`}>
 
           {motion?.playback&&<div className="motion-session" role="status"><strong>Watching a replay</strong><p>The canvas shows a saved moment. Return to live movement before moving parts or starting a simulation.</p><button disabled={playbackBusy} onClick={()=>{setPlaybackRunning(false);void playbackAction({action:'leave'});}}>Leave playback</button></div>}
           {motion?.mode==='simulate'&&task==='move'&&!motion.playback&&<div className="motion-session"><strong>Physics is paused</strong><p>Return to the position from before the simulation to move objects by hand, or open Physics to continue.</p><button disabled={simulationBusy||!!motion.recording} onClick={()=>{setSimulationRunning(false);void simulationAction({action:'stop'});}}>Stop and restore pose</button>{motion.recording&&<p>Finish or discard your recording first.</p>}</div>}
@@ -1544,6 +1715,10 @@ export function App({host}:{host?:SessionHost}={}) {
 
       </nav>}
       <div className="viewport" ref={container} aria-busy={managedOpening||localModelOpening||scenePhase==='loading'||scenePhase==='lost'}/>
+      {!!makeover&&<div className="canvas-makeover" key={makeover} aria-hidden="true">
+        <span className="canvas-makeover-pill"><Icon name="sparkles" size={13}/>Updated</span>
+        {[1,2,3,4,5,6].map(index=><span key={index} className={`canvas-sparkle sparkle-${index}`}/>)}
+      </div>}
       {(scenePhase==='lost'||scenePhase==='loading'&&!viewProblem&&!host?.modelEntry||scenePhase==='failed'||scenePhase==='missing'&&!retainedView)&&<div className={`view-recovery ${retainedView?'retained-view':''}`}><div className="view-recovery-card" role={scenePhase==='failed'?'alert':'status'}>
         <strong>{startupError?'Unable to start the 3D view':scenePhase==='lost'?'Waiting for graphics…':scenePhase==='loading'?'Loading model…':scenePhase==='missing'?'Display data needs restoring':'Unable to display this model'}</strong>
         {scenePhase==='lost'?<p>The graphics connection was interrupted. Your model is still available to save or export. The view will reload when graphics return.</p>:scenePhase!=='loading'&&<p>{startupError||viewStatus?.message||project?.display_error?.message}</p>}
@@ -1582,25 +1757,36 @@ export function App({host}:{host?:SessionHost}={}) {
           panelOpen={assistantVisible}
           hosts={chatHostMap}
           onVisibleChats={setVisibleChatIds}
-          onNew={()=>changeChat('new')}
+          onNew={()=>{setQuestionDismissedInNew(true);return changeChat('new');}}
           onSelect={id=>changeChat('select',id)}
           onClose={id=>changeChat('remove',id)}
           onRestore={id=>changeChat('restore',id)}
           renderChat={chatId=>{
-            const messages=chatId===activeChatId?chat:chatMessages[chatId]||[];
-            const live=!!((agentSending||agentWorking)&&(agentTurn?.chat_id?agentTurn.chat_id===chatId:chatId===activeChatId));
+            const messages=chatId===(activeChatId||'new')?chat:chatMessages[chatId]||[];
+            const live=!!((agentSending||agentWorking)&&(agentTurn?.chat_id?agentTurn.chat_id===chatId:chatId===(activeChatId||'new')));
             const draft=draftFor(chatId);
             const activePane=chatId===activeChatId||(!activeChatId&&chatId==='new');
-            return <div className="assistant-chat-pane" data-chat-id={chatId} tabIndex={-1} onPointerDown={event=>{if(!(event.target as HTMLElement).closest('button,input,textarea,select,a,summary'))event.currentTarget.focus({preventScroll:true});}}>
-              <ConversationScroll key={`${project?.workspace_id}:${chatId}`} ref={activePane?conversationRef:undefined}>
+            const usage=chatUsage[chatId];
+            const totalTokens=(usage?.input_tokens??0)+(usage?.output_tokens??0);
+            const queued=queuedPrompts.filter(item=>item.workspace===chatWorkspace&&(item.chatId?item.chatId===chatId:chatId===(activeChatId||'new')));
+            const showQuestion=!!(activePane&&askingRequirement&&(questionChatId&&openChatIds.includes(questionChatId)?chatId===questionChatId:!(questionDismissedInNew&&chatId==='new')));
+            const emptyChat=!messages.length&&!live&&!queued.length&&!showQuestion;
+            return <div className={`assistant-chat-pane${emptyChat?' is-empty':''}`} data-chat-id={chatId} tabIndex={-1} onPointerDown={event=>{if(!(event.target as HTMLElement).closest('button,input,textarea,select,a,summary'))event.currentTarget.focus({preventScroll:true});}}>
+              <ConversationScroll key={`${project?.workspace_id}:${chatId}`} ref={activePane?conversationRef:undefined} scrollTrigger={activePane?scrollTrigger:0}>
                 <div className="inspector-page" id={activePane?'panel-assistant':undefined} role="region" aria-label="Assistant conversation">
-                  {!messages.length&&!live&&<div className="assistant-welcome"><h3>Describe a change</h3><p>Ask for a part, an edit, or a mechanism. It shows up in this document.</p></div>}
-                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p>{entry.text}</p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({...entry,chatId,index})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending} onClick={()=>void run('restore_checkpoint',{target:entry.checkpoint_revision})}><Icon name="undo" size={13}/>Restore</button>}</>:<FinishedReply text={entry.text} steps={entry.steps}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=><li key={`${chip.instance_id}:${chip.entity_id}`} className="reference-chip" title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`}>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></li>)}</ul>}{!!entry.folders?.length&&<ul className="message-references" aria-label="Referenced folders">{entry.folders.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span></li>)}</ul>}</div>)}
+                  {messages.map((entry,index)=><div key={`${project?.workspace_id}:${chatId}:${index}`} className={`chat-message ${entry.role}`}><strong>{entry.role==='user'?'You':'Cadpad'}</strong>{entry.role==='user'?<>{editingMessage?.chatId===chatId&&editingMessage.index===index?<div className="message-edit"><textarea aria-label="Edit message" onKeyDown={event=>{if(event.key==='Escape'&&!editingMessageBusy){event.preventDefault();setEditingMessage(null);requestAnimationFrame(()=>document.getElementById('model-prompt')?.focus());}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();if(!editingMessageBusy&&editingMessage.text.trim())void submitMessageEdit();}}} value={editingMessage.text} onChange={event=>setEditingMessage({...editingMessage,text:event.target.value})}/><p>Sending replaces this message and removes all later replies and messages.</p><button disabled={editingMessageBusy} onClick={()=>setEditingMessage(null)}>Cancel</button><button className="primary-button" disabled={editingMessageBusy||!editingMessage.text.trim()} onClick={()=>void submitMessageEdit()}>{editingMessageBusy?'Restoring…':'Send'}</button></div>:<p><ChipText raw={entry.text} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/></p>}{entry.image&&<img className="message-image" src={`data:image/png;base64,${entry.image}`} alt="Attached reference"/>}<button className="message-revert" disabled={busy||working||agentWorking||agentSending||editingMessageBusy} onClick={()=>setEditingMessage({...entry,chatId,index})}><Icon name="edit" size={13}/>Edit</button>{entry.checkpoint_revision&&<button className="message-revert" title="Restore the model to before this message" disabled={busy||working||agentWorking||agentSending} onClick={()=>void run('restore_checkpoint',{target:entry.checkpoint_revision})}><Icon name="undo" size={13}/>Restore</button>}</>:<FinishedReply text={entry.text} steps={entry.steps} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/>}{!!entry.references?.length&&<ul className="message-references" aria-label="Referenced geometry">{entry.references.map(chip=>{
+                    const target=chip.file?resolveModelForFile(chip.file):undefined;
+                    const title=`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}`;
+                    const content=<>{entry.references!.length>1&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}</span></>;
+                    return <li key={`${chip.instance_id}:${chip.entity_id}`} className={target?'reference-chip-item':'reference-chip'} title={target?undefined:title}>{target?<button type="button" className="reference-chip is-link" title={title} onClick={()=>openReferencedModel(target.entry,target.builder)}>{content}</button>:content}</li>;
+                  })}</ul>}{!!entry.folders?.length&&<ul className="message-references" aria-label="Referenced folders">{entry.folders.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span></li>)}</ul>}</div>)}
                   {activePane&&!!agentChromeStatus&&<span className="visually-hidden" data-agent-chrome-status role="status">{agentChromeStatus}</span>}
-                  {live&&<div className="chat-message assistant streaming" aria-live="polite"><strong>Cadpad</strong>{agentWorking&&agentTurn.steps?.length?<LiveReply steps={agentTurn.steps} activity={agentTurn.activity} startedAt={agentTurn.started_at} stopping={agentStartCancelling||agentTurn.state==='cancelling'}/>:agentWorking&&agentTurn.text?<><Markdown text={agentTurn.text}/><LiveReply steps={[]} activity={agentTurn.activity} startedAt={agentTurn.started_at}/></>:<LiveReply steps={[]} activity={agentStartCancelling?'Stopping':agentWorking?agentTurn.activity:'Starting'} startedAt={agentWorking?agentTurn.started_at:undefined}/>}</div>}
+                  {live&&<div className="chat-message assistant streaming" aria-live="polite"><strong>Cadpad</strong>{agentWorking&&agentTurn.steps?.length?<LiveReply steps={agentTurn.steps} activity={agentTurn.activity} startedAt={agentTurn.started_at} stopping={agentStartCancelling||agentTurn.state==='cancelling'} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/>:agentWorking&&agentTurn.text?<><Markdown text={agentTurn.text} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/><LiveReply steps={[]} activity={agentTurn.activity} startedAt={agentTurn.started_at} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/></>:<LiveReply steps={[]} activity={agentStartCancelling?'Stopping':agentWorking?agentTurn.activity:'Starting'} startedAt={agentWorking?agentTurn.started_at:undefined} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/>}</div>}
                   {live&&agentTurn?.state==='failed'&&<p className="agent-failure">{agentTurn.error?.message||'The agent could not finish this change.'}</p>}
                   {live&&agentTurn?.state==='cancelled'&&<p className="muted">Stopped. The last committed model is still available.</p>}
                   {live&&!!agentTurn?.artifacts.length&&<section className="agent-artifacts">{agentTurn.artifacts.map(artifact=><button key={artifact.handle} onClick={()=>saveAgentArtifact(artifact)}>Save {artifact.format} export</button>)}</section>}
+                  {queued.map(item=><div key={`queued:${item.id}`} className="chat-message user queued" aria-label="Queued message"><strong>You</strong>{editingQueued?.id===item.id?<div className="message-edit"><textarea aria-label="Edit queued message" value={editingQueued.text} onChange={event=>setEditingQueued({id:item.id,text:event.target.value})} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();setEditingQueued(null);}else if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();saveQueuedEdit(item);}}}/><p>This message stays queued. Send it now or let it go out when the assistant finishes.</p><button type="button" onClick={()=>setEditingQueued(null)}>Cancel</button><button type="button" className="primary-button" disabled={!editingQueued.text.trim()} onClick={()=>saveQueuedEdit(item)}>Save</button></div>:<><p><ChipText raw={item.message.text} resolveModel={resolveModelForFile} onOpenModel={openReferencedModel}/></p>{item.message.image&&<img className="message-image" src={`data:image/png;base64,${item.message.image}`} alt="Attached reference"/>}<div className="queued-footer"><span className="queued-label">Queued</span><div className="message-actions" role="group" aria-label="Queued message actions"><button type="button" className="message-action" title="Send now" aria-label="Send now" onClick={()=>void sendQueuedNow(item)}><Icon name="arrowUp" size={13}/></button><button type="button" className="message-action" title="Delete message" aria-label="Delete message" onClick={()=>removeQueued(item)}><Icon name="trash" size={13}/></button><button type="button" className="message-action" title="Edit message" aria-label="Edit message" onClick={()=>setEditingQueued({id:item.id,text:item.message.text})}><Icon name="edit" size={13}/></button></div></div></>}</div>)}
+                  {activePane&&askingRequirement&&(questionChatId&&openChatIds.includes(questionChatId)?chatId===questionChatId:!(questionDismissedInNew&&chatId==='new'))&&<QuestionFlow info={askingRequirement} questions={questionsOf(askingRequirement)} agentBusy={agentWorking||agentSending} mentionItems={mentionItems} openModels={(host?.modelViews?.()??[]).map(view=>view.entry)} onSend={prompt=>askAboutRequirement(prompt,mentionedModels(askingRequirement.text))}/>}
                 </div>
               </ConversationScroll>
               <form className="prompt-form" onSubmit={event=>{event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}><div className="composer">{activePane&&selectionNotice&&<div className="composer-notice" role="status">{selectionNotice}<button type="button" className="icon-button" aria-label="Dismiss selection notice" onClick={()=>setSelectionNotice('')}><Icon name="close" size={12}/></button></div>}{activePane&&!!composerReferences.length&&<ul className="composer-references" aria-label="Selected geometry sent with your message">{referenceChips().map(chip=><li key={entityKey(chip.entity)} className={`reference-chip${chip.omitted?' is-omitted':''}`} title={`${chip.part} · ${chip.entity_id}${chip.file?` · ${chip.file}:${chip.line}`:''}${chip.omitted?' — left out of the next message':''}`}>{chip.letter&&<b className="reference-letter">{chip.letter}</b>}<span className="reference-part">{chip.part}</span><span className="reference-detail">{chip.label}{chip.file&&<> · <code>{chip.file}</code></>}</span><button type="button" className="reference-remove" aria-label={chip.omitted?`Include ${chip.part} ${chip.label}`:`Leave ${chip.part} ${chip.label} out of the message`} onClick={()=>remoteSelection?focusedSelection?.toggleOmitted(chip.entity):toggleOmitted(chip.entity)}>{chip.omitted?'↺':<Icon name="close" size={11}/>}</button></li>)}</ul>}{activePane&&!!folderReferences.length&&<ul className="composer-references composer-folder-references" aria-label="Folders sent with your message">{folderReferences.map(path=><li key={path} className="reference-chip folder-chip" title={path}><Icon name="folder" size={12}/><span className="reference-part">{path}</span><button type="button" className="reference-remove" aria-label={`Remove folder ${path}`} onClick={()=>removeFolderReference(path)}><Icon name="close" size={11}/></button></li>)}</ul>}{activePane&&attachedImage&&<div className="composer-image" aria-label="Attached reference image"><img src={attachedImage.preview} alt=""/><span title={attachedImage.name}>{attachedImage.name}</span><button type="button" className="composer-image-action" title="Generate an editable model from this image with Cadpad Cloud. Your message is sent as guidance." disabled={!project||working} onClick={()=>void attachedImageToCad(chatId)}><Icon name="sparkles" size={12}/>{cloudGenerating?'Generating…':'Turn into model'}</button><button type="button" className="reference-remove" aria-label="Remove attached image" onClick={()=>setAttachedImage(null)}><Icon name="close" size={11}/></button></div>}<MentionTextarea id={activePane?'model-prompt':undefined} aria-label="Describe your model" placeholder={activePane&&composerReferences.length?(composerReferences.length>1?'Ask about A, B…  Type @ to add files or folders':'Ask about this selection…  Type @ to add files or folders'):activePane&&attachedImage?'Ask about this image…  Type @ to add files or folders':activePane&&folderReferences.length?(folderReferences.length>1?'Ask about these folders…  Type @ to add more':'Ask about this folder…  Type @ to add more'):'Ask for a part or a change…  Type @ to add files or folders'} value={draft} items={mentionItems} openModels={(host?.modelViews?.()??[]).map(view=>view.entry)} onValueChange={value=>setDraft(chatId,value)} onMention={referenceMention} onPaste={event=>{
@@ -1612,11 +1798,12 @@ export function App({host}:{host?:SessionHost}={}) {
                 const input=event.currentTarget,start=input.selectionStart,end=input.selectionEnd;
                 setDraft(chatId,draft.slice(0,start)+text+draft.slice(end));
                 requestAnimationFrame(()=>{input.selectionStart=input.selectionEnd=start+text.length;});
-              }} onFocus={()=>{setPanel('assistant');if(chatId!==activeChatId&&chatId!=='new')void changeChat('select',chatId);}} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();if(!agentWorking&&!agentSending&&!chatBusy){setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}}}/>
+              }} onFocus={()=>{setPanel('assistant');if(chatId!==activeChatId&&chatId!=='new')void changeChat('select',chatId);}} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();setPanel('assistant');void sendPrompt(undefined,chatId==='new'?undefined:chatId);}}}/>
 <div className="composer-actions"><div className="composer-options">
                 <button type="button" className="composer-settings" disabled={savingProvider} onClick={()=>setProviderOpen(true)}><Icon name="sliders" size={14}/>Settings</button>
                 <SearchableModelSelect className="composer-model" ariaLabel="Assistant model" value={savedModel} options={composerModelOptions} placeholder={savedBackendIsDirect?'Choose a model':'Provider default'} loading={!!savedBackend&&agentCatalog?.backend!==savedBackend} disabled={!savedBackend||savingProvider||agentSending||agentWorking} onChange={value=>void saveProvider(value)}/>
-              </div>{agentWorking||agentSending?<button className="send-prompt" title="Stop assistant" aria-label="Stop assistant" disabled={agentStartCancelling||agentTurn?.state==='cancelling'} type="button" onClick={()=>void stopAgent()}><span className="stop-glyph" aria-hidden="true"/></button>:<button className="send-prompt" title="Send message" aria-label="Send message" disabled={!project||!draft.trim()||chatBusy||savingProvider} type="submit"><Icon name="arrowUp" size={18}/></button>}</div></div></form>
+                {totalTokens>0&&<span className="composer-tokens" title={`${usage.input_tokens.toLocaleString()} input · ${usage.output_tokens.toLocaleString()} output tokens`}>{formatTokenCount(totalTokens)} tok</span>}
+              </div>{agentWorking||agentSending?<div className="composer-send-actions">{!!draft.trim()&&<button className="send-prompt" title="Send message" aria-label="Send message" disabled={!project||chatBusy||savingProvider} type="submit"><Icon name="arrowUp" size={18}/></button>}<button className="send-prompt" title="Stop assistant" aria-label="Stop assistant" disabled={agentStartCancelling||agentTurn?.state==='cancelling'} type="button" onClick={()=>void stopAgent()}><span className="stop-glyph" aria-hidden="true"/></button></div>:<button className="send-prompt" title="Send message" aria-label="Send message" disabled={!project||!draft.trim()||chatBusy||savingProvider} type="submit"><Icon name="arrowUp" size={18}/></button>}</div></div></form>
             </div>;
           }}
         />

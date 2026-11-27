@@ -5,7 +5,7 @@
 .workbench-empty-header .document-title{pointer-events:none}
 .workbench-header-slot .document-title,.docked-workbench>.app-header .document-title{align-items:center;gap:9px}
 .docked-main{display:flex;flex:1;min-height:0;min-width:0}
-.workbench-rail-slot{flex:none;display:flex}.workbench-rail-slot>.dock-content-host{display:flex}.workbench-rail-slot .activity-rail{height:100%;width:44px}
+.workbench-rail-slot{flex:none;display:flex}.workbench-rail-slot>.dock-content-host{display:flex}.workbench-rail-slot .activity-rail{flex:none;height:100%;width:44px}
 .docked-sidebar{flex:none;min-width:160px;min-height:0;overflow:hidden;background:var(--chrome)}
 .docked-center{position:relative;display:flex;flex-direction:column;flex:1;min-width:180px;min-height:0;overflow:hidden}
 .workbench-notices-slot{position:relative;z-index:10;flex:0 0 auto;max-height:40%;overflow:auto;background:var(--surface)}.workbench-notices-slot:has(.workspace-notices:empty){display:none}
@@ -117,6 +117,9 @@ body.dock-dragging,body.dock-dragging *{cursor:grabbing!important;user-select:no
 .sidebar-section.expanded>.sidebar-section-heading>button:first-child>svg{transform:rotate(90deg)}
 .sidebar-section-heading .section-settings{opacity:0;width:25px;min-width:25px;height:24px;min-height:24px;padding:4px;margin-right:4px;border:0;background:transparent}
 .sidebar-section-heading:hover .section-settings,.sidebar-section-heading:focus-within .section-settings{opacity:1}
+.sidebar-section-heading .explorer-scope{flex:none;width:24px;min-width:24px;height:24px;min-height:24px;padding:4px;margin-right:4px;border:0;border-radius:4px;background:transparent;color:var(--muted)}
+.sidebar-section-heading .explorer-scope:hover:not(:disabled){background:var(--hover);color:var(--text)}
+.sidebar-section-heading .explorer-scope:disabled{opacity:.35}
 .sidebar-section-content{max-height:55vh;overflow:auto}
 .sidebar-section-content>.dock-content-host{height:auto}
 .docked-sidebar .sidebar-section .model-browser,.docked-sidebar .sidebar-section .motion-sidebar{height:auto;min-height:0}
@@ -135,7 +138,7 @@ body.dock-dragging,body.dock-dragging *{cursor:grabbing!important;user-select:no
 .workbench-width-divider::after,.dock-divider::after{content:"";position:absolute;inset:0 -3px}.dock-split.vertical>.dock-divider::after{inset:-3px 0}.sidebar-section-resizer::after{content:"";position:absolute;inset:-3px 0}
 
 .workbench-header-slot{height:52px;min-height:52px;flex:0 0 52px}.workbench-header-slot>.dock-content-host{height:52px}.workbench-header-slot .app-header{display:flex;align-items:center;padding-top:0;padding-bottom:0}.workbench-header-slot .document-title{height:32px;min-height:32px;padding-top:0;padding-bottom:0}.workbench-header-slot .document-identity{display:flex;flex-direction:row;align-items:center;line-height:20px;gap:0}.workbench-header-slot .document-name{line-height:20px}
-.sidebar-view-heading{display:flex;align-items:center;flex:none;min-height:38px;padding:0 14px;background:var(--bg);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:1}.sidebar-view-heading>button{border:0;background:none;border-radius:0;padding:6px 0;font-size:11px;font-weight:650;letter-spacing:.65px;text-transform:uppercase;cursor:default;touch-action:none;user-select:none;-webkit-user-select:none;color:var(--muted)}.sidebar-view-heading>button:active{cursor:default}.sidebar-section.fill{flex:1;min-height:0}.docked-sidebar .explorer-section>summary{font-size:11px;font-weight:650;letter-spacing:.45px;text-transform:uppercase}.docked-sidebar .explorer-section{border-bottom:1px solid var(--line)}
+.sidebar-view-heading{display:flex;align-items:center;flex:none;min-height:30px;padding:0 14px;background:var(--bg);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:1}.sidebar-view-heading>button{border:0;background:none;border-radius:0;min-height:26px;padding:3px 0;font-size:11px;font-weight:650;letter-spacing:.65px;text-transform:uppercase;cursor:default;touch-action:none;user-select:none;-webkit-user-select:none;color:var(--muted)}.sidebar-view-heading>button:active{cursor:default}.sidebar-section.fill{flex:1;min-height:0}.docked-sidebar .explorer-section>summary{font-size:11px;font-weight:650;letter-spacing:.45px;text-transform:uppercase}.docked-sidebar .explorer-section{border-bottom:1px solid var(--line)}
 .sidebar-view-heading>button:hover:not(:disabled){background:transparent}
 .sidebar-section-loading{display:inline-block;flex:0 0 5px;width:5px;height:5px;margin:0 10px 0 4px;background:var(--muted);border-radius:50%;animation:sidebar-loading-fade 1.6s ease-in-out infinite}@keyframes sidebar-loading-fade{0%,100%{opacity:.35}50%{opacity:.85}}@media(prefers-reduced-motion:reduce){.sidebar-section-loading{animation:none;opacity:.65}}
 

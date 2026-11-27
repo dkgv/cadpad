@@ -8,7 +8,7 @@ function Content({host,open}:{host:HTMLElement;open:boolean}){
   return <div ref={ref} className="sidebar-section-content" hidden={!open}/>;
 }
 const MIN_SECTION=96;
-export function SidebarSections({area,group,tabs,hosts,expanded,weights,onToggle,onDrop,onResize,sectionMode=false,loading={}}:{area:'left'|'right';group:DockGroup;tabs:Record<string,DockTab>;hosts:Record<string,HTMLElement>;expanded:string[];weights:Partial<Record<string,number>>;onToggle:(id:string)=>void;onDrop:(tab:string,source:string,before?:string)=>void;onResize:(next:Record<string,number>)=>void;sectionMode?:boolean;loading?:Record<string,boolean>}){
+export function SidebarSections({area,group,tabs,hosts,expanded,weights,onToggle,onDrop,onResize,sectionMode=false,loading={},actions={}}:{area:'left'|'right';group:DockGroup;tabs:Record<string,DockTab>;hosts:Record<string,HTMLElement>;expanded:string[];weights:Partial<Record<string,number>>;onToggle:(id:string)=>void;onDrop:(tab:string,source:string,before?:string)=>void;onResize:(next:Record<string,number>)=>void;sectionMode?:boolean;loading?:Record<string,boolean>;actions?:Record<string,React.ReactNode>}){
   const stack=useRef<HTMLDivElement>(null);
   const single=group.tabs.length===1&&!sectionMode;
   const active=group.active&&tabs[group.active]?group.active:group.tabs[0];
@@ -61,7 +61,7 @@ export function SidebarSections({area,group,tabs,hosts,expanded,weights,onToggle
           onResize({[prior]:nextAbove,[id]:pair-nextAbove});
         }}/>}
         <section className={`sidebar-section ${opened?'expanded':''} ${share?'stacked':''} ${fill?'fill':''} ${before===id?'drop-before':''}`} data-sidebar-section={id} style={share?{'--section-weight':weight(id)} as CSSProperties:undefined}>
-          {!single&&<header className="sidebar-section-heading"><button aria-expanded={opened} aria-controls={`sidebar-content-${id}`} aria-label={`${opened?'Collapse':'Expand'} ${tabs[id].title} section`} onClick={()=>onToggle(id)} onPointerDown={event=>drag?.begin(event,{kind:'tab',tabs:[id],active:id,area,group:group.id,label:tabs[id].title})}><Icon name="chevron" size={11}/><span>{tabs[id].title}</span></button>{loading[id]&&<span className="sidebar-section-loading" role="status" aria-label={`Loading ${tabs[id].title}`}/>}</header>}
+          {!single&&<header className="sidebar-section-heading"><button aria-expanded={opened} aria-controls={`sidebar-content-${id}`} aria-label={`${opened?'Collapse':'Expand'} ${tabs[id].title} section`} onClick={()=>onToggle(id)} onPointerDown={event=>drag?.begin(event,{kind:'tab',tabs:[id],active:id,area,group:group.id,label:tabs[id].title})}><Icon name="chevron" size={11}/><span>{tabs[id].title}</span></button>{loading[id]&&<span className="sidebar-section-loading" role="status" aria-label={`Loading ${tabs[id].title}`}/>}{actions[id]}</header>}
           <div id={`sidebar-content-${id}`} hidden={!opened}><Content host={hosts[id]} open={opened}/></div>
         </section>
       </React.Fragment>;

@@ -35,6 +35,7 @@ export function ProjectExplorer(props:ExplorerProps){
 
 function Explorer({workspace,revision,catalogWorkspace=workspace,catalogRevision=revision,activeModel,openingModel,selectionPanel,builderDisabled,onChooseBuilder,parts,parameters,selected,hidden,onSelect,onToggleVisibility,onShowAll,onReferenceFolder}:ExplorerProps){
   const [query,setQuery]=useState('');
+  const [reveal,setReveal]=useState(0);
   const prefix=useId();
   const ids=useMemo(()=>Object.fromEntries(sectionNames.map(name=>[name,`${prefix}-${name}`])),[prefix]);
   const hosts=useMemo(()=>Object.fromEntries(Object.values(ids).map(id=>{const host=document.createElement('div');host.className='explorer-section-host';return [id,host];})),[ids]);
@@ -61,7 +62,7 @@ function Explorer({workspace,revision,catalogWorkspace=workspace,catalogRevision
   const contents:Record<string,React.ReactNode>={};
   const tabs:Record<string,DockTab>={};
   const section=(name:string,title:string,content:React.ReactNode)=>{tabs[ids[name]]={id:ids[name],title};contents[ids[name]]=content;};
-  section('components','Models',<SourceCatalog compact visible={!!search||expanded.includes(ids.components)} activeModel={activeModel} openingModel={openingModel} onLoadingChange={loading=>setIndexing(values=>values[ids.components]===loading?values:{...values,[ids.components]:loading})} filterQuery={query} disabled={builderDisabled} workspace={catalogWorkspace} revision={catalogRevision} onChoose={onChooseBuilder} onReferenceFolder={onReferenceFolder}/>);
+  section('components','Models',<SourceCatalog compact visible={!!search||expanded.includes(ids.components)} activeModel={activeModel} openingModel={openingModel} revealToken={reveal} onLoadingChange={loading=>setIndexing(values=>values[ids.components]===loading?values:{...values,[ids.components]:loading})} filterQuery={query} disabled={builderDisabled} workspace={catalogWorkspace} revision={catalogRevision} onChoose={onChooseBuilder} onReferenceFolder={onReferenceFolder}/>);
   section('objects','Parts',parts.length?<div className="explorer-loaded-model">
     {!!search&&!visibleParts.length&&<p className="muted" role="status">No matching parts.</p>}
     {!!hidden.size&&<button className="explorer-show-all" onClick={onShowAll}>Show all parts</button>}
@@ -73,9 +74,16 @@ function Explorer({workspace,revision,catalogWorkspace=workspace,catalogRevision
   if(React.Children.count(parameters))section('parameters','Parameters',parameters);
   if(selectionPanel)section('selection','Selection',selectionPanel);
   const order=Object.keys(tabs);
+  const actions:Record<string,React.ReactNode>=activeModel?{
+    [ids.components]:<button type="button" className="icon-button explorer-scope" aria-label="Scroll to open model" title="Scroll to open model" onClick={()=>{
+      setQuery('');
+      setSections(current=>current.expanded.includes('components')?current:{...current,expanded:[...current.expanded,'components']});
+      setReveal(value=>value+1);
+    }}><Icon name="scope" size={14}/></button>,
+  }:{};
   return <div className="project-explorer">
     <div className="explorer-filter"><Icon name="search" size={15}/><input type="search" aria-label="Search Explorer" placeholder="Search Explorer…" value={query} onChange={event=>setQuery(event.target.value)} onKeyDown={event=>{if(event.key==='Escape')setQuery('');}}/>{query&&<button type="button" className="icon-button" aria-label="Clear Explorer search" onClick={()=>setQuery('')}><Icon name="close" size={13}/></button>}</div>
-    <SidebarSections sectionMode loading={indexing} area="left" group={{kind:'group',id:prefix,tabs:order,active:order[0]}} tabs={tabs} hosts={hosts} expanded={search?[...new Set([...expanded,ids.components,ids.objects])]:expanded} weights={weights} onToggle={id=>{
+    <SidebarSections sectionMode loading={indexing} actions={actions} area="left" group={{kind:'group',id:prefix,tabs:order,active:order[0]}} tabs={tabs} hosts={hosts} expanded={search?[...new Set([...expanded,ids.components,ids.objects])]:expanded} weights={weights} onToggle={id=>{
       const name=id.slice(prefix.length+1);
       setSections(current=>({...current,expanded:current.expanded.includes(name)?current.expanded.filter(value=>value!==name):[...current.expanded,name]}));
     }} onDrop={()=>{}} onResize={next=>{

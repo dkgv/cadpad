@@ -4,7 +4,7 @@ import {ChatHistory} from './chat-history';
 import {DockArea,DockContent,group,groups,placeTabs,removeTab,updateGroup,type DockEdge,type DockNode,type DockTab} from './dock-layout';
 import {DockDragProvider,type DockDragPayload,type DockTarget} from './dock-drag';
 
-export type ChatSummary={id:string;title:string;created_at:number;updated_at:number;message_count:number};
+export type ChatSummary={id:string;title:string;created_at:number;updated_at:number;message_count:number;usage?:{input_tokens:number;output_tokens:number}};
 
 export function chatTabIds(chats:ChatSummary[],activeId:string|null){
   const ids=chats.filter(chat=>chat.message_count>0).map(chat=>chat.id);

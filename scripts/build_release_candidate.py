@@ -29,7 +29,7 @@ SOURCE_INPUTS = (
     "apps/desktop/public/startup.js", "apps/desktop/src-tauri/src/frontend_assets.rs",
     "apps/desktop/tests/startup.test.mjs", "scripts/check_frontend_startup.mjs",
     "apps/desktop/vite.config.mjs", "apps/desktop/src/app.tsx", "apps/desktop/src/style.css",
-    "apps/desktop/src/motion-test-definition.tsx", "apps/desktop/src/motion-tests.tsx", "apps/desktop/src-tauri/src/main.rs",
+    "apps/desktop/src/requirements.tsx", "apps/desktop/src-tauri/src/main.rs",
     "apps/desktop/src-tauri/src/agents.rs", "crates/core/src/motion_tests.rs",
     "crates/core/src/motion_test_runs.rs", "crates/core/src/actors.rs",
     "crates/core/tests/motion_tests.rs", "fixtures/lever_shoe.py",
@@ -249,7 +249,7 @@ def main():
     run(["npm", "run", "tauri", "-w", "@cadpad/desktop", "--", "build", "--ci", "--no-bundle", "--config", str(overlay)], stage, "Build release app", env)
     bundle_target = stage / "bundle-target"
     (bundle_target / "release").mkdir(parents=True)
-    shutil.copy2(REPOSITORY / "target/release/cadpad-desktop", bundle_target / "release/cadpad-desktop")
+    shutil.copy2(REPOSITORY / "target/release/Cadpad", bundle_target / "release/Cadpad")
     bundle_env = {**env, "CARGO_TARGET_DIR": str(bundle_target)}
     run(["npm", "run", "tauri", "-w", "@cadpad/desktop", "--", "bundle", "--ci", "--bundles", "app", "--config", str(overlay)], stage, "Bundle isolated app", bundle_env)
     app = bundle_target / "release/bundle/macos/Cadpad.app"
@@ -272,8 +272,8 @@ def main():
     if any(signed_resources.get(path) != entry for path, entry in expected.items()):
         raise RuntimeError("Final local signing changed the staged runtime resources")
     probe_env = dict(PATH="", HOME=str(stage), TMPDIR=str(stage), LANG="en_US.UTF-8")
-    frontend_build_log = run(["cargo", "test", "--locked", "--release", "-p", "cadpad-desktop", "--bin", "cadpad-desktop", "--features", "tauri/custom-protocol", "--no-run", "--message-format=json"], stage, "Build embedded frontend checker", env)
-    frontend_checker = integration_executable(frontend_build_log, "cadpad-desktop", "bin")
+    frontend_build_log = run(["cargo", "test", "--locked", "--release", "-p", "cadpad-desktop", "--bin", "Cadpad", "--features", "tauri/custom-protocol", "--no-run", "--message-format=json"], stage, "Build embedded frontend checker", env)
+    frontend_checker = integration_executable(frontend_build_log, "Cadpad", "bin")
     frontend_dump = stage / "frontend-check"
     frontend_dump.mkdir()
     frontend_native_log = run([str(frontend_checker), "frontend_assets::release_assets_and_real_startup_reply_are_complete", "--ignored", "--exact", "--nocapture"], stage, "Extract embedded frontend", {**probe_env, "CADPAD_FRONTEND_CHECK_DIR": str(frontend_dump)})

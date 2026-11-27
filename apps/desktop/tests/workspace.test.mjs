@@ -74,7 +74,7 @@ before(async()=>{
          export class CadViewport{constructor(container,onSelect,onAnnotation,onGraphics){const host=globalThis.__cadpadUiHarness;host.constructions=(host.constructions||0)+1;(host.viewports??=[]).push(this);if(host.startupFailures){host.startupFailures--;throw new Error('Synthetic WebGL initialization failure');}globalThis.__cadpadUiHarness.graphics=state=>{if(state==='lost'){this.presented=null;this.cancelLoad();}onGraphics(state);};this.onSelect=onSelect;this.hidden=new Set();this.selection=null;globalThis.__cadpadUiHarness.viewport=this;globalThis.__cadpadUiHarness.select=entity=>{this.selection=entity;onSelect(entity);};globalThis.__cadpadUiHarness.annotation=onAnnotation;}
            async load(...args){const sequence=this.sequence=(this.sequence||0)+1;this.call('load',...args);await globalThis.__cadpadUiHarness.load?.(...args);if(sequence===this.sequence){if(!args[0].parts.length||!this.sceneState(args[3],args[1])){this.hidden.clear();this.selection=null;this.onSelect(null,'replacement');}this.logical=args[0].parts.length?{workspace:args[3],revision:args[1]}:null;this.presented=this.logical;}}
            hasScene(workspace,revision){return this.presented?.workspace===workspace&&this.presented?.revision===revision;} sceneState(workspace,revision){return this.logical?.workspace===workspace&&this.logical?.revision===revision?{hidden:[...this.hidden],selection:this.selection}:null;} cancelLoad(){this.sequence=(this.sequence||0)+1;} suspend(){this.cancelLoad();this.presented=null;this.call('suspend');} call(name,...args){globalThis.__cadpadUiHarness.viewer.push([name,...args]);}
-           setStatusContainer(...a){this.call('statusContainer',...a);} setDimensions(...a){this.call('dimensions',...a);} setMotion(...a){} setSelectionMode(...a){this.call('selectionMode',...a);} setFillSelection(...a){this.call('fillSelection',...a);} setManipulation(...a){this.call('manipulation',...a);} dispose(){this.cancelLoad();this.presented=null;this.logical=null;this.call('dispose');}
+           setStatusContainer(...a){this.call('statusContainer',...a);} setDimensions(...a){this.call('dimensions',...a);} redraw(){this.call('redraw');} setMotion(...a){} setSelectionMode(...a){this.call('selectionMode',...a);} setFillSelection(...a){this.call('fillSelection',...a);} setManipulation(...a){this.call('manipulation',...a);} dispose(){this.cancelLoad();this.presented=null;this.logical=null;this.call('dispose');}
            selectEntity(entity){this.selection=entity;this.call('selectEntity',entity);} setReferences(...a){this.references=a[0];this.call('references',...a);} select(...a){this.selection=a[0]?{revision:this.presented?.revision,instance_id:a[0],entity_id:'part:0'}:null;this.call('select',...a);} setVisible(...a){a[1]?this.hidden.delete(a[0]):this.hidden.add(a[0]);this.call('visible',...a);} view(...a){this.call('view',...a);} cameraQuaternion(){return [0,0,0,1];} capture(){globalThis.__cadpadUiHarness.captureCalls=(globalThis.__cadpadUiHarness.captureCalls||0)+1;throw new Error('Unexpected fixture capture');} resetView(){this.call('fit');} setAdvancedTools(...a){this.call('advanced',...a);} previewCoordinate(...a){this.call('preview',...a);}
          }`}));
     }
@@ -217,6 +217,24 @@ test('dimension overlays toggle without a Measure inspector',async()=>{
   });
   assert.ok(harness.viewer.some(call=>call[0]==='dimensions'&&call[1]===false&&call[2]==='pinned'));
 });
+test('a viewport redraw re-presents the scene and re-checks files changed on disk',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.project.external_tracking=true;harness.project.saved_revision='r1';
+  let checks=0;
+  harness.invoke=async(command,args)=>{
+    if(command==='check_external'){checks++;return {changed:false,fingerprint:'same',changes:{}};}
+    return original(command,args);
+  };
+  await act(async()=>root.unmount());
+  root=createRoot(document.getElementById('root'));await act(async()=>root.render(React.createElement(App)));await flush();
+  const before=checks,redraws=harness.viewer.filter(([name])=>name==='redraw').length;
+  await act(async()=>harness.view.onmessage({id:'redraw-request',workspace_id:'workspace-1',revision:'r1',command:'redraw',arguments:{}}));await flush();
+  assert.equal(harness.viewer.filter(([name])=>name==='redraw').length,redraws+1);
+  assert.ok(checks>before,'The redraw also asks the app to look for external edits');
+  assert.deepEqual(harness.calls.find(([name,args])=>name==='complete_view'&&args.requestId==='redraw-request')[1],{
+    token:'view-token',requestId:'redraw-request',reply:{data:{workspace_id:'workspace-1',revision:'r1'}}
+  });
+});
 test('motion controls retain explicit units, simulation setup, recording and interference access',async()=>{
   await openMotion();
   const motionPanel=document.getElementById('panel-motion');
@@ -299,10 +317,10 @@ test('Assistant remains visible while Explorer and tools share the left sidebar'
   assert.equal(harness.calls.some(([name])=>name==='joint_coordinate'||name==='simulation'),false);
   assert.equal(harness.viewer.some(([name])=>name==='dispose'),false);
 });
-test('new motion test accepts free text and sends the user requirement to the agent',async()=>{
+test('new requirement accepts free text and sends the user requirement to the agent',async()=>{
   await openMotion();await chooseMotionTask('Requirements');
   assert.match(document.querySelector('.test-empty').textContent,/No requirements yet/);
-  assert.equal(document.querySelector('.motion-tests .panel-hint'),null);
+  assert.equal(document.querySelector('.requirements .panel-hint'),null);
   assert.equal(document.querySelector('.test-simulation-limits'),null);
   assert.equal(document.querySelector('#panel-motion .motion-state'),null);
   await click(button('New requirement…'));
@@ -317,6 +335,77 @@ test('new motion test accepts free text and sends the user requirement to the ag
   assert.match(prompt,/Never invent numbers/);
   assert.match(prompt,/Do not run it and do not approve it/);
   assert.equal(harness.calls.some(([name,args])=>name==='requirements'&&args.request?.command?.action==='start_run'),false);
+});
+test('new requirement for a standalone file model omits $file from target and mentions',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files:[
+      {path:'cad/carriage.stl',builders:[{id:'$file',label:'carriage.stl',kind:'model_file',available:true,line:1}]},
+      {path:'mount.py',builders:[{id:'frame',label:'frame',kind:'part',available:true,line:1}]},
+    ]};
+    return original(command,args);
+  };
+  await act(async()=>root.unmount());
+  root=createRoot(document.getElementById('root'));
+  await act(async()=>{root.render(React.createElement(App));});await flush(30);
+  await openMotion();await chooseMotionTask('Requirements');
+  await click(button('New requirement…'));
+  await setValue(document.getElementById('test-intent'),'@[carriage.stl](cad/carriage.stl#$file) must attach to @[frame](mount.py#frame)');
+  await click(button('Prepare requirement'));
+  const prompt=harness.calls.findLast(([name])=>name==='agent_start')[1].prompt;
+  assert.match(prompt,/Create a requirement for the project model cad\/carriage\.stl from this free-text requirement:/);
+  assert.match(prompt,/cad\/carriage\.stl; frame in mount\.py\./);
+  assert.doesNotMatch(prompt,/\$file in /);
+});
+test('pending requirement shows its description with chips and live status instead of a generic placeholder',async()=>{
+  const original=harness.invoke.bind(harness);
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files:[
+      {path:'cad/carriage.stl',builders:[{id:'$file',label:'carriage.stl',kind:'model_file',available:true,line:1}]},
+      {path:'mount.py',builders:[{id:'frame',label:'frame',kind:'part',available:true,line:1}]},
+    ]};
+    return original(command,args);
+  };
+  await act(async()=>root.unmount());
+  root=createRoot(document.getElementById('root'));
+  await act(async()=>{root.render(React.createElement(App));});await flush(30);
+  await openMotion();await chooseMotionTask('Requirements');
+  await click(button('New requirement…'));
+  await setValue(document.getElementById('test-intent'),'@[carriage.stl](cad/carriage.stl#$file) must attach to @[frame](mount.py#frame)');
+  await click(button('Prepare requirement'));await flush();
+  const group=document.querySelector('.requirement-group');
+  assert.equal(group.querySelector('.requirement-group-heading strong')?.textContent,'carriage.stl + Frame');
+  assert.equal(group.querySelector('.requirement-group-heading small'),null);
+  assert.equal(group.querySelector('.requirement-group-count'),null);
+  const card=group.querySelector('.rq-card.rq-pending');
+  assert.ok(card);
+  assert.match(card.textContent,/Preparing checks…|Waiting for your reply/);
+  assert.match(card.querySelector('.rq-pending-text')?.textContent??'',/carriage\.stl must attach to frame/);
+  assert.equal(card.querySelectorAll('.rq-pending-text .req-chip').length,2);
+});
+test('creating a requirement opens a new conversation instead of reusing the open chat',async()=>{
+  let activeId='chat-1';
+  const chats=[{id:'chat-1',title:'Earlier chat',created_at:1,updated_at:1,message_count:1}];
+  const conversation=()=>({active_chat_id:activeId,chats:structuredClone(chats),messages:activeId==='chat-1'?[{role:'user',text:'Earlier chat'}]:[],turn:null});
+  const original=harness.invoke.bind(harness);
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_chat'){
+      harness.calls.push([command,args]);
+      if(args.action==='new'&&!chats.some(chat=>chat.id==='chat-2')){activeId='chat-2';chats.push({id:'chat-2',title:'New chat',created_at:2,updated_at:2,message_count:0});}
+      return conversation();
+    }
+    if(command==='agent_conversation')return conversation();
+    return original(command,args);
+  };
+  await act(async()=>root.unmount());
+  root=createRoot(document.getElementById('root'));
+  await act(async()=>{root.render(React.createElement(App));});await flush(30);
+  await openMotion();await chooseMotionTask('Requirements');
+  await click(button('New requirement…'));
+  await setValue(document.getElementById('test-intent'),'Keep the door under 90 degrees.');
+  await click(button('Prepare requirement'));await flush();
+  assert.ok(harness.calls.some(([name,args])=>name==='agent_chat'&&args.action==='new'),'The open chat is not reused');
+  assert.equal(harness.calls.findLast(([name])=>name==='agent_start')[1].chatId,'chat-2');
 });
 test('finishing a recording refreshes the document edited state for portable Save',async()=>{
   harness.project.dirty=false;
@@ -438,6 +527,8 @@ test('agent settings lists provider models and saves the selected one',async()=>
   await click(model);
   assert.deepEqual([...document.querySelectorAll('.searchable-select-option')].map(option=>option.dataset.value),['','gpt-5.6-sol-high','composer-2.5','__custom__']);
   await click(modelOption('composer-2.5'));
+  assert.equal(document.querySelector('.searchable-select-panel'),null);
+  assert.equal(model.getAttribute('aria-expanded'),'false');
   await click(button('Save settings'));await flush();
   const saved=harness.calls.findLast(([name])=>name==='configure_agent');
   assert.equal(saved[1].backend,'cursor_cli');
@@ -534,6 +625,7 @@ test('settings sections open as tabs and only External agents starts the live MC
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 const agentTurn=(id,workspace_id,state='running')=>({id,workspace_id,state,text:'',activity:'Connecting to the model',error:null,artifacts:[]});
 async function submitPrompt(text){if(document.getElementById('panel-assistant').hidden)await click(document.getElementById('tab-assistant'));await setValue(document.getElementById('model-prompt'),text);await act(async()=>{document.querySelector('.prompt-form').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));});}
+async function pressEnter(){await act(async()=>{document.getElementById('model-prompt').dispatchEvent(new dom.window.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));});}
 const status=()=>document.querySelector('[data-agent-chrome-status]')?.textContent??'';
 const stopAssistant=()=>document.querySelector('[aria-label="Stop assistant"]');
 test('agent submission acknowledges before IPC replies and queues one Stop for its accepted turn',async()=>{
@@ -556,6 +648,108 @@ test('agent submission acknowledges before IPC replies and queues one Stop for i
   assert.equal(status(),'');assert.equal(document.getElementById('model-prompt').value,'Make a small bracket');
 });
 
+test('composer clears immediately and queues a message while the assistant is busy',async()=>{
+  const starts=[],invoke=harness.invoke.bind(harness);let turn=null;
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation')return {messages:[],turn};
+    if(command==='agent_start'){harness.calls.push([command,args]);const next=deferred();starts.push(next);if(starts.length>1)setTimeout(()=>next.resolve({...agentTurn('queued','workspace-1'),state:'succeeded',text:'Done'}),5);return next.promise;}
+    return invoke(command,args);
+  };
+  await submitPrompt('First request');
+  assert.equal(document.getElementById('model-prompt').value,'','The composer clears before the assistant accepts the message');
+  await setValue(document.getElementById('model-prompt'),'Second request');
+  await pressEnter();
+  assert.equal(document.getElementById('model-prompt').value,'','A queued send clears the composer immediately');
+  assert.match(document.querySelector('.conversation').textContent,/Second request/,'The queued message is visible');
+  assert.equal(starts.length,1,'The busy assistant does not start a second turn');
+  turn=agentTurn('first','workspace-1');
+  await act(async()=>{starts[0].resolve(turn);await new Promise(resolve=>setTimeout(resolve,10));});
+  await flush();
+  assert.equal(starts.length,1,'The queued message waits for the running turn');
+  turn={...turn,state:'succeeded',text:'Done'};
+  await act(async()=>{harness.agent.onmessage({kind:'turn_finished',workspace_id:'workspace-1',turn_id:'first',turn});});
+  await flush(20);
+  assert.equal(starts.length,2,'The queued message starts after the turn finishes');
+  assert.equal(harness.calls.filter(([name])=>name==='agent_start').at(-1)[1].prompt,'Second request');
+  await flush(20);
+});
+
+test('a queued message can be removed before it starts',async()=>{
+  const starts=[],invoke=harness.invoke.bind(harness);let turn=null;
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation')return {messages:[],turn};
+    if(command==='agent_start'){harness.calls.push([command,args]);const next=deferred();starts.push(next);return next.promise;}
+    return invoke(command,args);
+  };
+  await submitPrompt('First request');
+  await submitPrompt('Second request');
+  assert.equal(starts.length,1,'The busy assistant does not start a second turn');
+  const queued=document.querySelector('.chat-message.queued');
+  assert.ok(queued,'The queued message is visible');
+  await click(queued.querySelector('[aria-label="Delete message"]'));
+  assert.equal(document.querySelector('.chat-message.queued'),null,'The queued message is removed');
+  turn=agentTurn('first','workspace-1');
+  await act(async()=>{starts[0].resolve(turn);await new Promise(resolve=>setTimeout(resolve,10));});
+  await flush();
+  turn={...turn,state:'succeeded',text:'Done'};
+  await act(async()=>{harness.agent.onmessage({kind:'turn_finished',workspace_id:'workspace-1',turn_id:'first',turn});});
+  await flush(20);
+  assert.equal(starts.length,1,'A removed queued message is not sent');
+});
+
+test('a queued message can be sent now and interrupts the running reply',async()=>{
+  const starts=[],invoke=harness.invoke.bind(harness);let turn=null;
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation')return {messages:[],turn};
+    if(command==='agent_start'){harness.calls.push([command,args]);const next=deferred();starts.push(next);return next.promise;}
+    if(command==='agent_stop'){harness.calls.push([command,args]);turn={...turn,state:'cancelled',activity:''};return turn;}
+    return invoke(command,args);
+  };
+  await submitPrompt('First request');
+  await setValue(document.getElementById('model-prompt'),'Second request');
+  await pressEnter();
+  turn=agentTurn('first','workspace-1');
+  await act(async()=>{starts[0].resolve(turn);await new Promise(resolve=>setTimeout(resolve,10));});
+  await flush();
+  const queued=document.querySelector('.chat-message.queued');
+  assert.ok(queued,'The queued message is visible');
+  await click(queued.querySelector('[aria-label="Send now"]'));
+  await flush(20);
+  assert.deepEqual(harness.calls.filter(([name])=>name==='agent_stop').map(([,args])=>args.turnId),['first'],'Send now stops the reply in flight');
+  assert.equal(starts.length,2,'Send now starts the queued message immediately');
+  assert.equal(harness.calls.filter(([name])=>name==='agent_start').at(-1)[1].prompt,'Second request');
+  await act(async()=>{starts[1].resolve({...agentTurn('second','workspace-1'),state:'succeeded',text:'Done'});await new Promise(resolve=>setTimeout(resolve,10));});
+  await flush(20);
+});
+
+test('a queued message can be edited before it starts',async()=>{
+  const starts=[],invoke=harness.invoke.bind(harness);let turn=null;
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation')return {messages:[],turn};
+    if(command==='agent_start'){harness.calls.push([command,args]);const next=deferred();starts.push(next);return next.promise;}
+    return invoke(command,args);
+  };
+  await submitPrompt('First request');
+  await submitPrompt('Second request');
+  const queued=document.querySelector('.chat-message.queued');
+  assert.ok(queued,'The queued message is visible');
+  await click(queued.querySelector('[aria-label="Edit message"]'));
+  const editor=document.querySelector('[aria-label="Edit queued message"]');
+  assert.ok(editor,'The queued message opens an editor');
+  await setValue(editor,'Edited request');
+  await click([...document.querySelectorAll('.chat-message.queued button')].find(button=>button.textContent==='Save'));
+  assert.match(document.querySelector('.chat-message.queued').textContent,/Edited request/,'The edited text replaces the queued message');
+  turn=agentTurn('first','workspace-1');
+  await act(async()=>{starts[0].resolve(turn);await new Promise(resolve=>setTimeout(resolve,10));});
+  await flush();
+  turn={...turn,state:'succeeded',text:'Done'};
+  await act(async()=>{harness.agent.onmessage({kind:'turn_finished',workspace_id:'workspace-1',turn_id:'first',turn});});
+  await flush(20);
+  assert.equal(harness.calls.filter(([name])=>name==='agent_start').at(-1)[1].prompt,'Edited request','The edited text is what gets sent');
+  await act(async()=>{starts[1].resolve({...agentTurn('second','workspace-1'),state:'succeeded',text:'Done'});await new Promise(resolve=>setTimeout(resolve,10));});
+  await flush(20);
+});
+
 test('a queued Stop and late start reply stay bound to the original workspace',async()=>{
   const starts={'workspace-1':deferred(),'workspace-2':deferred()},turns={},invoke=harness.invoke.bind(harness);
   const other=fixture();other.workspace_id='workspace-2';other.name='Second document';other.motion={...other.motion,workspace_id:other.workspace_id};
@@ -569,10 +763,12 @@ test('a queued Stop and late start reply stay bound to the original workspace',a
   await submitPrompt('First idea');await click(stopAssistant());
   await act(async()=>{harness.menu.onmessage('new');await new Promise(resolve=>setTimeout(resolve,10));});
   await submitPrompt('Second idea');assert.equal(status(),'Starting request…');
+  assert.equal(document.getElementById('model-prompt').value,'','The composer clears immediately for the new request');
+  assert.match(document.querySelector('.conversation').textContent,/Second idea/,'The new request is visible before the assistant accepts it');
   turns['workspace-1']=agentTurn('first','workspace-1');
   await act(async()=>{starts['workspace-1'].resolve(turns['workspace-1']);await new Promise(resolve=>setTimeout(resolve,10));});
   assert.equal(status(),'Starting request…','Completing the background request must not clear the focused start');
-  assert.equal(document.getElementById('model-prompt').value,'Second idea');
+  assert.equal(document.getElementById('model-prompt').value,'');
   assert.deepEqual(harness.calls.filter(([name])=>name==='agent_start').map(([,args])=>args.workspace),['workspace-1','workspace-2']);
   assert.deepEqual(harness.calls.filter(([name])=>name==='agent_stop').map(([,args])=>args.turnId),['first']);
   turns['workspace-2']=agentTurn('second','workspace-2','succeeded');
@@ -1109,6 +1305,72 @@ test('assistant chat tabs can split beside each other like other panes',async()=
 });
 
 
+test('requirement model tokens in a chat message render as reference chips',async()=>{
+  const original=harness.invoke.bind(harness);
+  const text='Create a requirement for the project model frame:\n@[Frame](parts/tensioner/crank_screw/v1/mount.py#frame) must attach to @[beam_far.step](parts/base/frame/v5/assembled/beam_far.step#$file)';
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation')return {active_chat_id:'req-chat',chats:[{id:'req-chat',title:'Requirement',message_count:1}],messages:[{role:'user',text}],turn:null};
+    return original(command,args);
+  };
+  await act(async()=>harness.agent.onmessage({kind:'refresh'}));await flush();
+  const message=document.querySelector('.chat-message.user');
+  assert.ok(message);
+  const chips=[...message.querySelectorAll('.req-chip')];
+  assert.deepEqual(chips.map(chip=>chip.textContent),['Frame','beam_far.step']);
+  assert.equal(chips[0].title,'parts/tensioner/crank_screw/v1/mount.py');
+  assert.equal(chips[1].title,'parts/base/frame/v5/assembled/beam_far.step');
+  assert.doesNotMatch(message.querySelector('p').textContent,/@\[|\]\(/);
+});
+test('clicking model references in chat messages reopens the referenced model',async()=>{
+  const original=harness.invoke.bind(harness);
+  const opened=[];
+  const files=[
+    {path:'parts/rail.py',description:'Rail',builders:[{id:'rail',label:'rail',available:true,reason:'',line:1,kind:'part'}],diagnostic:null},
+    {path:'parts/base.stl',description:'Base',builders:[{id:'$file',label:'base.stl',available:true,reason:'',line:1,kind:'model_file'}],diagnostic:null},
+  ];
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files};
+    if(command==='work_on_project_builder'){opened.push({entry:args.entry,builder:args.builder});return {id:'open-job',state:'succeeded'};}
+    if(command==='agent_conversation')return {
+      active_chat_id:'ref-chat',
+      chats:[{id:'ref-chat',title:'References',message_count:2}],
+      messages:[
+        {
+          role:'user',
+          text:'Update @[Rail](parts/rail.py#rail) and @parts/base.stl',
+          references:[{letter:'A',instance_id:'rail',entity_id:'face:1',part:'rail',label:'Top',file:'parts/rail.py',line:4}],
+        },
+        {role:'assistant',text:'Updated `parts/rail.py`.'},
+      ],
+      turn:null,
+    };
+    return original(command,args);
+  };
+  await act(async()=>root.unmount());
+  root=createRoot(document.getElementById('root'));
+  await act(async()=>{root.render(React.createElement(App));});await flush(30);
+  await act(async()=>harness.agent.onmessage({kind:'refresh'}));await flush();
+  const user=document.querySelector('.chat-message.user');
+  const assistant=document.querySelector('.chat-message.assistant');
+  assert.ok(user&&assistant);
+  const textChips=[...user.querySelectorAll('.req-chip.is-link')];
+  assert.deepEqual(textChips.map(chip=>chip.textContent),['Rail','@parts/base.stl']);
+  await click(textChips[0]);
+  await click(textChips[1]);
+  const geoChip=user.querySelector('.message-references .reference-chip.is-link');
+  assert.ok(geoChip,'Geometry reference chip with a model file is clickable');
+  await click(geoChip);
+  const replyLink=assistant.querySelector('.md-model-link');
+  assert.ok(replyLink,'Model path in assistant reply is clickable');
+  assert.equal(replyLink.textContent,'parts/rail.py');
+  await click(replyLink);
+  assert.deepEqual(opened,[
+    {entry:'parts/rail.py',builder:'rail'},
+    {entry:'parts/base.stl',builder:'$file'},
+    {entry:'parts/rail.py',builder:'rail'},
+    {entry:'parts/rail.py',builder:'rail'},
+  ]);
+});
 test('resending an edited chat message keeps its image and geometry references',async()=>{
   const image='iVBORw0KGgo=';
   const references=[{letter:'',instance_id:'rail',entity_id:'face:2',part:'rail',label:'Top'}];
@@ -1193,7 +1455,7 @@ test('outbound user messages stay visible while a streamed reply is in flight',a
   await act(async()=>{next.resolve({messages,turn});await new Promise(resolve=>setTimeout(resolve,20));});
   await flush();
   assert.match(document.querySelector('.conversation').textContent,/Second request/);
-  assert.equal([...document.querySelectorAll('.chat-message.user')].map(node=>node.textContent.replace(/^You/,'').trim()).at(-1),'Second request');
+  assert.equal([...document.querySelectorAll('.chat-message.user p')].map(node=>node.textContent.trim()).at(-1),'Second request');
 });
 
 test('sending a message scrolls the conversation to the latest reply',async()=>{
@@ -1211,6 +1473,25 @@ test('sending a message scrolls the conversation to the latest reply',async()=>{
   assert.equal(conversation.scrollTop,1200,'The conversation must jump to the bottom when a message is sent');
 });
 
+test('sending a message scrolls down even after the user scrolled up',async()=>{
+  const invoke=harness.invoke.bind(harness);let turn=null,messages=[];
+  harness.invoke=async(command,args)=>{
+    if(command==='agent_conversation')return {messages,turn};
+    if(command==='agent_start'){turn={...agentTurn('scroll-2','workspace-1'),steps:[],started_at:Date.now()};messages=[{role:'user',text:args.prompt}];return turn;}
+    return invoke(command,args);
+  };
+  const conversation=document.querySelector('.conversation');
+  Object.defineProperty(conversation,'scrollHeight',{configurable:true,get:()=>1200});
+  Object.defineProperty(conversation,'clientHeight',{configurable:true,get:()=>400});
+  await act(async()=>{
+    conversation.dispatchEvent(new window.Event('wheel',{bubbles:true}));
+    conversation.scrollTop=100;
+    conversation.dispatchEvent(new window.Event('scroll'));
+  });
+  await submitPrompt('Scroll me down after reading history');
+  assert.equal(conversation.scrollTop,1200,'Sending a message must re-enable follow and scroll to the bottom');
+});
+
 test('agent replies stream thinking, tool hints and markdown, then collapse into a finished reply',async()=>{
   const invoke=harness.invoke.bind(harness);let turn=null,messages=[];
   harness.invoke=async(command,args)=>{
@@ -1219,9 +1500,10 @@ test('agent replies stream thinking, tool hints and markdown, then collapse into
     return invoke(command,args);
   };
   const panel=()=>document.getElementById('panel-assistant');
-  assert.match(panel().textContent,/Describe a change/,'The welcome shows for an empty conversation');
+  assert.ok(document.querySelector('.assistant-chat-pane.is-empty'),'An empty conversation starts with the composer at the top');
+  assert.doesNotMatch(panel().textContent,/Describe a change/,'No welcome copy is shown for an empty conversation');
   await submitPrompt('Remove the floating cube');await flush();
-  assert.doesNotMatch(panel().textContent,/Describe a change/,'The welcome hides once a conversation is under way');
+  assert.equal(document.querySelector('.assistant-chat-pane.is-empty'),null,'The composer moves to the bottom once a message is sent');
   const send=async(kind,next,delta)=>{if(next)turn=next;await act(async()=>{harness.agent.onmessage({kind,workspace_id:'workspace-1',turn_id:'steps-1',turn:next||undefined,delta});await new Promise(resolve=>setTimeout(resolve,5));});};
   await send('step',{...turn,activity:'Thinking',steps:[{kind:'thinking',text:'Looking for',done:false}]});
   await send('thinking_delta',null,' the stop cube');
@@ -1390,7 +1672,8 @@ test('Assistant creates fresh chats and resumes old messages and per-chat drafts
   await click(newChat());
   assert.equal(document.querySelector('.conversation .chat-message'),null);
   assert.equal(document.getElementById('model-prompt').value,'');
-  assert.ok(document.querySelector('.assistant-welcome'));
+  assert.ok(document.querySelector('.assistant-chat-pane.is-empty'));
+  assert.equal(document.activeElement.id,'model-prompt','Opening a new chat tab focuses the message textbox');
   assert.equal(document.querySelectorAll('#panel-assistant-dock .dock-tab').length,3,'The empty chat appears as its own tab');
   assert.equal(chatTab('New chat').getAttribute('aria-selected'),'true');
   await setValue(document.getElementById('model-prompt'),'Fresh chat draft');
@@ -2415,7 +2698,7 @@ test('activity rail and assistant stay mounted when switching model canvas tabs'
 
 test('focused canvas selections attach to the shared Assistant and send the model context',async()=>{
   const original=harness.invoke.bind(harness),views=new Map();
-  const files=[{path:'cad/widgets.py',description:'Widgets',diagnostic:null,builders:['wheel','pin'].map(id=>({id,label:id+'()',kind:'geometry_candidate',available:true,reason:'',line:1}))}];
+  const files=[{path:'cad/widgets.py',description:'Widgets',diagnostic:null,builders:['wheel','pin','axle'].map(id=>({id,label:id+'()',kind:'geometry_candidate',available:true,reason:'',line:1}))}];
   harness.invoke=async(command,args)=>{
     if(command==='project_source_index')return {files};
     if(command==='open_project_model'){
@@ -2653,7 +2936,7 @@ test('boot resolves a focused model-view workspace back to the project and resto
 
 test('Cmd+Shift+O opens a quick model selector from the current project',async()=>{
   const original=harness.invoke.bind(harness),views=new Map();
-  const files=[{path:'cad/widgets.py',description:'Widgets',diagnostic:null,builders:['wheel','pin'].map(id=>({id,label:id+'()',kind:'geometry_candidate',available:true,reason:'',line:1}))}];
+  const files=[{path:'cad/widgets.py',description:'Widgets',diagnostic:null,builders:['wheel','pin','axle'].map(id=>({id,label:id+'()',kind:'geometry_candidate',available:true,reason:'',line:1}))}];
   harness.invoke=async(command,args)=>{
     if(command==='project_source_index')return {files};
     if(command==='workspaces')return [{workspace_id:'workspace-1',name:'Rail assembly',running:0},...[...views.values()].map(project=>({workspace_id:project.workspace_id,name:project.name,running:0,model_parent:'workspace-1'}))];
@@ -3036,4 +3319,36 @@ test('failed automatic reload offers an explicit retry without a build loop',asy
   assert.equal(harness.calls.filter(([name])=>name==='reload_project').length,1);
   await click(button('Retry reload'));
   assert.equal(harness.calls.filter(([name])=>name==='reload_project').length,2);
+});
+
+
+test('a new requirement defaults to the focused canvas model',async()=>{
+  const original=harness.invoke.bind(harness),views=new Map();
+  harness.project.external_tracking=true;
+  const files=[{path:'cad/widgets.py',description:'Widgets',diagnostic:null,builders:['wheel','pin'].map(id=>({id,label:id+'()',kind:'geometry_candidate',available:true,reason:'',line:1}))}];
+  harness.invoke=async(command,args)=>{
+    if(command==='project_source_index')return {files};
+    if(command==='open_project_model'){
+      const project=fixture();project.workspace_id='view-'+args.builder;project.revision=args.builder+'-r';project.saved_revision='r1';project.model_parent='workspace-1';project.model_source_dirty=false;project.external_tracking=true;
+      project.motion={...project.motion,workspace_id:project.workspace_id,revision:project.revision};
+      const partName=args.builder;project.model.parts=[{...project.model.parts[0],id:partName,instance_id:partName,name:partName}];
+      project.activity=[{id:'build-'+args.builder,state:'succeeded',diagnostics:{}}];
+      views.set(project.workspace_id,project);
+      return {project:structuredClone(project),job:project.activity[0]};
+    }
+    if(command==='project'&&views.has(args.workspace))return structuredClone(views.get(args.workspace));
+    return original(command,args);
+  };
+  await mountWorkbench();await flush(20);
+  await expandModelFolders('cad');
+  const choose=async name=>{await click([...document.querySelectorAll('#panel-model .library-part-link')].find(button=>button.querySelector('.library-model-name')?.textContent===name));await flush(25);};
+  await choose('Wheel');
+  await choose('Pin');
+  assert.equal(canvasTabs().find(tab=>tab.getAttribute('aria-selected')==='true').textContent,'Pin');
+  await click(document.getElementById('tab-tests'));await flush();
+  await click(button('New requirement…'));
+  await setValue(document.getElementById('test-intent'),'The pin must stay seated.');
+  await click(button('Prepare requirement'));await flush(30);
+  assert.equal(harness.calls.findLast(([name])=>name==='agent_start')[1].modelWorkspace,'view-pin','the focused model is prepared, not the first catalog model');
+  assert.match(harness.calls.findLast(([name])=>name==='agent_start')[1].prompt,/the project model pin in cad\/widgets\.py/);
 });

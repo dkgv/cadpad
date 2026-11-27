@@ -122,7 +122,7 @@ export function folderGit(path:string,git:ReturnType<typeof indexGit>){return gi
 /** Drag payload for an Explorer folder dropped on the Assistant. */
 export const FOLDER_DRAG_TYPE='application/x-cadpad-folder';
 function gitMark(change?:GitChange){if(!change)return '';return change==='added'||change==='untracked'?'git-new':`git-${change}`;}
-export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,compact=false,filterQuery,compactView='models',onLoadingChange,activeModel,openingModel,visible=true,onReferenceFolder}:{onReferenceFolder?:(path:string)=>void;requestId?:string;workspace?:string;revision?:string;disabled?:boolean;onChoose:(path:string,builder:string)=>void;compact?:boolean;filterQuery?:string;compactView?:'models'|'files';onLoadingChange?:(loading:boolean)=>void;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};visible?:boolean}){
+export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,compact=false,filterQuery,compactView='models',onLoadingChange,activeModel,openingModel,visible=true,onReferenceFolder,revealToken=0}:{onReferenceFolder?:(path:string)=>void;requestId?:string;workspace?:string;revision?:string;disabled?:boolean;onChoose:(path:string,builder:string)=>void;compact?:boolean;filterQuery?:string;compactView?:'models'|'files';onLoadingChange?:(loading:boolean)=>void;activeModel?:{entry:string;builder:string};openingModel?:{entry:string;builder:string};visible?:boolean;/** Increment to scroll to and focus the active model, like IntelliJ's scope button. */revealToken?:number}){
   const [sourcePath,setSourcePath]=useState<string|null>(null);
   const catalog=useRef<HTMLDivElement>(null);
   const [files,setFiles]=useState<SourceFile[]>([]),[loading,setLoading]=useState(true),[error,setError]=useState('');
@@ -181,6 +181,22 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
   },[workspace,revision,showGit,compact,visible]);
   useEffect(()=>{setSourcePath(path=>path&&files.some(file=>file.path===path)?path:null);},[files]);
   const highlighted=openingModel??activeModel;
+  const scrollToHighlighted=(focus:boolean)=>{
+    const root=catalog.current;
+    if(!root||!visible)return false;
+    const row=root.querySelector<HTMLElement>('[aria-current="true"]');
+    // Only scroll the tree's own pane, after the section is actually expanded.
+    const pane=root.closest<HTMLElement>('.explorer-section-host');
+    if(!row||!pane||!pane.clientHeight)return false;
+    const bounds=pane.getBoundingClientRect(),entry=row.getBoundingClientRect();
+    const top=bounds.top+pane.clientTop,bottom=top+pane.clientHeight;
+    if(focus||entry.top<top||entry.bottom>bottom){
+      const delta=(entry.top+entry.bottom)/2-(top+pane.clientHeight/2);
+      pane.scrollTop=Math.max(0,pane.scrollTop+delta);
+    }
+    if(focus)row.focus({preventScroll:true});
+    return true;
+  };
   useEffect(()=>{
     if(!compact||!highlighted)return;
     const row=catalog.current?.querySelector<HTMLElement>('[aria-current="true"]');
@@ -188,15 +204,36 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
       if(parent.hasAttribute('data-manually-collapsed'))return;
       if(parent.tagName==='DETAILS')(parent as HTMLDetailsElement).open=true;
     }
-    // Only scroll the tree's own pane, after the section is actually expanded.
-    const pane=catalog.current?.closest<HTMLElement>('.explorer-section-host');
-    if(!visible||!row||!pane||!pane.clientHeight)return;
-    const bounds=pane.getBoundingClientRect(),entry=row.getBoundingClientRect();
-    const top=bounds.top+pane.clientTop,bottom=top+pane.clientHeight;
-    if(entry.top<top)pane.scrollTop+=entry.top-top;
-    else if(entry.bottom>bottom)pane.scrollTop+=entry.bottom-bottom;
+    scrollToHighlighted(false);
   },[compact,compactView,highlighted?.entry,highlighted?.builder,files,filterQuery,visible]);
   const search=(filterQuery??query).trim().toLowerCase();
+  const pendingReveal=useRef(false);
+  // Runs after every commit so a reveal can wait for cleared collapses to mount the row.
+  useEffect(()=>{
+    if(!pendingReveal.current)return;
+    pendingReveal.current=false;
+    scrollToHighlighted(true);
+  });
+  // Reveal request from the Explorer's scope button: drop manual collapses that hide the
+  // active model, then scroll its row into view and focus it (IntelliJ's "Scroll from Source").
+  useEffect(()=>{
+    if(!compact||!revealToken||!highlighted)return;
+    const context=search||JSON.stringify([highlighted.entry,highlighted.builder]);
+    const clear=(current:BranchOverrides)=>
+      Object.fromEntries(Object.entries(current).filter(([,value])=>value.context!==context||value.open));
+    const collapsed=Object.values(search?searchBranches:branches).some(value=>value.context===context&&!value.open);
+    if(collapsed){
+      if(search)setSearchBranches(clear);
+      else setBranches(current=>{
+        const next=clear(current);
+        if(branchStorage)try{window.localStorage.setItem(branchStorage,JSON.stringify(next));}catch{}
+        return next;
+      });
+      pendingReveal.current=true;
+      return;
+    }
+    scrollToHighlighted(true);
+  },[revealToken]);
   const matching=useMemo(()=>search?files.map(file=>({...file,builders:file.builders.filter(builder=>`${file.path} ${builder.label} ${file.description}`.toLowerCase().includes(search))}))
     .filter(file=>file.builders.length||file.path.toLowerCase().includes(search)):files,[files,search]);
   const groups=useMemo(()=>compact&&showGit?[]:matching.map(file=>({...file,builders:indexedModels([file]).map(item=>item.builder)})).filter(file=>file.builders.length),[matching,compact,showGit]);
@@ -234,7 +271,7 @@ export function SourceCatalog({requestId,workspace,revision,disabled,onChoose,co
     const override=(search?searchBranches:branches)[id];
     const manual=override?.context===branchContext;
     const open=manual?override.open:automatic||!!override?.open;
-    return <details open={open} data-manually-collapsed={manual&&!open?'':undefined}>
+    return <details open={open} data-branch={id} data-manually-collapsed={manual&&!open?'':undefined}>
       <summary {...attributes} onClick={event=>{
         event.preventDefault();
         const change={context:branchContext,open:!open};

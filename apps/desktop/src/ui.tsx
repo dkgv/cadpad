@@ -1,6 +1,6 @@
 import type {Inspection} from '@cadpad/viewer';
 
-export type IconName='chat'|'search'|'cube'|'viewIso'|'viewFront'|'viewTop'|'viewRight'|'sparkles'|'measure'|'motion'|'settings'|'undo'|'export'|'save'|'eye'|'eyeOff'|'fit'|'chevron'|'close'|'arrowUp'|'plus'|'sliders'|'recordings'|'tests'|'folder'|'file'|'import'|'physics'|'history'|'edit'|'splitRight'|'splitDown'|'fill'|'image';
+export type IconName='chat'|'search'|'trash'|'cube'|'viewIso'|'viewFront'|'viewTop'|'viewRight'|'sparkles'|'measure'|'motion'|'settings'|'undo'|'export'|'save'|'eye'|'eyeOff'|'fit'|'chevron'|'close'|'arrowUp'|'plus'|'sliders'|'recordings'|'tests'|'folder'|'file'|'import'|'physics'|'history'|'edit'|'splitRight'|'splitDown'|'fill'|'image'|'scope';
 const cameraCube=['M12 2.5 22 8v9L12 22.5 2 17V8Z','M2 8l10 5.5L22 8','M12 13.5v9'];
 const cameraFaces:Partial<Record<IconName,string>>={
   viewIso:'M12 2.5 22 8v9L12 22.5 2 17V8Z',
@@ -11,6 +11,8 @@ const cameraFaces:Partial<Record<IconName,string>>={
 const paths:Record<IconName,string[]>={
   chat:['M21 15a3 3 0 0 1-3 3H8l-5 4V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3Z'],
   search:['M21 21l-5-5','M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0'],
+  scope:['M12 5a7 7 0 1 0 0 14 7 7 0 0 0 0-14','M12 2v3','M12 19v3','M2 12h3','M19 12h3','M12 12h.01'],
+  trash:['M4 7h16','M10 4h4','M6 7l1 13h10l1-13','M10 11v6','M14 11v6'],
   splitRight:['M3 4h18v16H3Z','M12 4v16'],
   splitDown:['M3 4h18v16H3Z','M3 12h18'],
   cube:['M12 3 3 8v9l9 5 9-5V8Z','m3 8 9 5 9-5','M12 13v9','m7.5 5.5 9 5'],

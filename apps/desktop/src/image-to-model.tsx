@@ -4,6 +4,8 @@ import {Icon} from './ui';
 export type ModelImage={data:string;mime:string;name:string};
 /** One generated version; the label is shown on its button. */
 export type ModelVersionChoice={label:string;title?:string};
+/** One past Cadpad Cloud generation pulled from the backend. */
+export type CloudHistoryItem={id:string;filename?:string|null;prompt?:string|null;created_at?:string|null;status?:string|null};
 
 /** Largest image the Cadpad cloud accepts for image→model generation. */
 export const MAX_MODEL_IMAGE=15*1024*1024;
@@ -18,16 +20,19 @@ export function readModelImage(file:File):Promise<ModelImage>{
   });
 }
 
-export function ImageToModel({signedIn,signingIn,image,guidance,generating,versions,staged,disabled,onSignIn,onChoose,onFile,onClear,onGuidance,onGenerate,onVersion,onDismissVersions}:{
+export function ImageToModel({signedIn,signingIn,image,guidance,generating,versions,staged,disabled,history=[],historyLoading=false,historyError,onSignIn,onChoose,onFile,onClear,onGuidance,onGenerate,onVersion,onDismissVersions,onSelectHistory}:{
   /** null while the keychain check is pending. */
   signedIn:boolean|null;signingIn:boolean;
   image:ModelImage|null;guidance:string;generating:boolean;
   versions:ModelVersionChoice[];staged:number;
   /** No open model, or another change or build is running. */
   disabled:boolean;
+  history?:CloudHistoryItem[];historyLoading?:boolean;historyError?:string;
   onSignIn:()=>void;onChoose:()=>void;onFile:(file:File)=>void;onClear:()=>void;onGuidance:(value:string)=>void;onGenerate:()=>void;onVersion:(index:number)=>void;onDismissVersions:()=>void;
+  onSelectHistory?:(item:CloudHistoryItem)=>void;
 }){
   const [dropDepth,setDropDepth]=useState(0);
+  const [historyOpen,setHistoryOpen]=useState(false);
   const firstImage=(list:DataTransferItemList|FileList|null)=>[...(list??[])].map(item=>item instanceof File?item:item.kind==='file'?item.getAsFile():null).find((file):file is File=>!!file&&file.type.startsWith('image/'));
   const drag=(event:React.DragEvent,phase:'enter'|'over'|'leave'|'drop')=>{
     if(!event.dataTransfer.types.includes('Files'))return;
@@ -73,6 +78,33 @@ export function ImageToModel({signedIn,signingIn,image,guidance,generating,versi
         <p className="muted">Pick the version closest to your image. Each choice is saved as a new revision.</p>
         <div className="image-model-version-list">{versions.map((version,index)=><button key={index} type="button" className={index===staged?'is-active':''} aria-pressed={index===staged} title={version.title} disabled={generating||disabled&&index!==staged} onClick={()=>onVersion(index)}>{version.label}</button>)}</div>
       </section>}
+      <section className="image-model-history" aria-label="History">
+        <header className="image-model-history-heading">
+          <button type="button" aria-expanded={historyOpen} aria-controls="image-model-history-body" onClick={()=>setHistoryOpen(open=>!open)}>
+            <Icon name="chevron" size={11}/>
+            <span className="image-model-history-title">History</span>
+            {history.length>0&&<span className="image-model-history-count">{history.length}</span>}
+          </button>
+        </header>
+        {historyOpen&&<div id="image-model-history-body" className="image-model-history-body">
+          {historyLoading&&<p className="muted">Loading history…</p>}
+          {!historyLoading&&historyError&&<p className="error" role="alert">{historyError}</p>}
+          {!historyLoading&&!historyError&&!history.length&&<p className="muted">No generation history yet.</p>}
+          {!historyLoading&&!historyError&&!!history.length&&<ul className="image-model-history-list">
+            {history.map(item=><li key={item.id}>
+              {onSelectHistory
+                ?<button type="button" className="image-model-history-item" onClick={()=>onSelectHistory(item)}>
+                  <span className="image-model-history-name">{item.filename||item.prompt||'Generated model'}</span>
+                  {item.created_at&&<small className="muted">{item.created_at}</small>}
+                </button>
+                :<div className="image-model-history-item">
+                  <span className="image-model-history-name">{item.filename||item.prompt||'Generated model'}</span>
+                  {item.created_at&&<small className="muted">{item.created_at}</small>}
+                </div>}
+            </li>)}
+          </ul>}
+        </div>}
+      </section>
     </div>
   </aside>;
 }

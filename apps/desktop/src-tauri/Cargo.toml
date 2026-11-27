@@ -3,6 +3,10 @@ name = "cadpad-desktop"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "Cadpad"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

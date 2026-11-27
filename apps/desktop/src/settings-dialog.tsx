@@ -13,6 +13,7 @@ const providers:[string,string][]=[
   ['codex_cli','Codex CLI'],
   ['cursor_cli','Cursor CLI'],
   ['opencode_cli','OpenCode CLI'],
+  ['antigravity_cli','Antigravity CLI'],
   ['anthropic_api','Anthropic API key'],
   ['openrouter_api','OpenRouter API key'],
 ];
@@ -152,16 +153,16 @@ export function SettingsDialog({
           <section className="provider-settings settings-section">
             <header className="settings-section-header">
               <strong>Agent</strong>
-              <p>Use Claude Code, Codex, Cursor, or OpenCode with its configured models and accounts, or an Anthropic or OpenRouter API key. CLIs talk to Cadpad through MCP.</p>
+              <p>Use Claude Code, Codex, Cursor, OpenCode, or Antigravity with its configured models and accounts, or an Anthropic or OpenRouter API key. CLIs talk to Cadpad through MCP.</p>
             </header>
             <label>Provider
               <select value={agentBackend} onChange={event=>onBackend(event.target.value)}>
                 {providers.map(([value,label])=><option key={value} value={value}>{label}</option>)}
               </select>
             </label>
-            <label>Model
+            <div className="provider-settings-field">Model
               <SearchableModelSelect ariaLabel="Model" value={selectValue} options={modelOptions} placeholder={api?'Choose a model':'Provider default'} className="settings-model-trigger" loading={models===null} onChange={chooseModel}/>
-            </label>
+            </div>
             {models===null&&<p className="muted">Loading models…</p>}
             {(api||showCustom)&&<label>Model ID<input aria-label="Model ID" value={modelId} placeholder={api?'Model ID from your API account':'Exact model ID'} onChange={event=>onModel(event.target.value)} autoComplete="off"/></label>}
             <p className="muted">{api?`This model is sent with each ${apiLabel} request.`:'New assistant turns use this model. Provider default keeps the CLI’s own choice.'}</p>

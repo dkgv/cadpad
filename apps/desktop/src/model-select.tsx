@@ -127,11 +127,11 @@ export function SearchableModelSelect({ariaLabel,value,options,placeholder,class
       <span className="searchable-select-label">{selected?.label||placeholder}</span>
       <Icon name="chevron" size={12}/>
     </button>
-    {open&&<div className="searchable-select-panel" style={placement}>
+    {open&&<div className="searchable-select-panel" style={placement} onClick={event=>event.stopPropagation()}>
       <div className="searchable-select-search"><Icon name="search" size={14}/><input ref={search} type="search" autoCorrect="off" autoComplete="off" autoCapitalize="off" spellCheck={false} aria-label="Search models" placeholder={`Search ${ariaLabel.toLowerCase()}…`} value={query} onChange={event=>{setQuery(event.target.value);setHighlight(0);}} onKeyDown={searchKeyDown} role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls={`${id}-options`} aria-activedescendant={matches[highlight]?`${id}-option-${highlight}`:undefined}/></div>
       <div className="searchable-select-list" role="listbox" id={`${id}-options`} aria-label={`${ariaLabel} options`}>
         {loading&&<p className="searchable-select-empty" role="status">Loading models…</p>}
-        {matches.map((option,index)=><button key={option.value} id={`${id}-option-${index}`} type="button" role="option" aria-selected={option.value===value} tabIndex={-1} data-value={option.value} className={`searchable-select-option${index===highlight?' highlighted':''}`} onPointerMove={()=>setHighlight(index)} onClick={()=>choose(option)}>
+        {matches.map((option,index)=><button key={option.value} id={`${id}-option-${index}`} type="button" role="option" aria-selected={option.value===value} tabIndex={-1} data-value={option.value} className={`searchable-select-option${index===highlight?' highlighted':''}`} onPointerMove={()=>setHighlight(index)} onClick={event=>{event.stopPropagation();choose(option);}}>
           <strong>{option.label}</strong>
           {!!option.detail&&option.detail!==option.label&&<small>{option.detail}</small>}
         </button>)}
