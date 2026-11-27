@@ -180,7 +180,7 @@ fn antigravity_streams_text_and_resolves_generic_mcp_tool_calls() {
         id: Some("1".into()),
         name: "tool_schema".into(),
         label: None,
-        detail: Some("control_requirements".into()),
+        detail: None,
     }));
     assert!(events.contains(&StreamEvent::ToolStarted {
         id: Some("2".into()),

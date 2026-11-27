@@ -1123,31 +1123,7 @@ fn cursor_tool(value: &Value) -> (Option<String>, String, Option<String>, Option
         "getMcpToolsToolCall" => "tool_schema".into(),
         other => format!("cursor:{}", other.trim_end_matches("ToolCall")),
     };
-    let detail = call["description"]
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| {
-            if key != "getMcpToolsToolCall" {
-                return None;
-            }
-            let names = args
-                .get("toolNames")
-                .or_else(|| args.get("tools"))
-                .or_else(|| args.get("toolName"));
-            names
-                .and_then(|value| match value {
-                    Value::String(name) => Some(name.clone()),
-                    Value::Array(names) => Some(
-                        names
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    ),
-                    _ => None,
-                })
-                .filter(|names| !names.is_empty())
-        });
+    let detail = call["description"].as_str().map(str::to_string);
     let described = crate::activity::describe(&name, Some(args));
     let result = &call["result"];
     let error = result.get("error").is_some()
@@ -1376,11 +1352,7 @@ fn antigravity_tool(raw: &str, parameters: &Value) -> (String, Option<String>, O
         && path.contains("/mcp/")
         && path.ends_with(".json")
     {
-        let tool = Path::new(path)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(str::to_string);
-        return ("tool_schema".into(), None, tool);
+        return ("tool_schema".into(), None, None);
     }
     let name = tool_name(raw);
     let described = crate::activity::describe(&name, Some(parameters));
